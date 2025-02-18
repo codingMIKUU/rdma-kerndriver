@@ -1,0 +1,1 @@
+cmd_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/target/nvmet-tcp.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/target/nvmet-tcp.o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/target/tcp.o

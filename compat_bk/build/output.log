@@ -1,0 +1,120 @@
+In file included from /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.c:23:
+include/linux/kernel.h:479:5: warning: conflicting types for built-in function ‘snprintf’; expected ‘int(char *, long unsigned int,  const char *, ...)’ [-Wbuiltin-declaration-mismatch]
+  479 | int snprintf(char *buf, size_t size, const char *fmt, ...);
+      |     ^~~~~~~~
+include/linux/kernel.h:19:1: note: ‘snprintf’ is declared in header ‘<stdio.h>’
+   18 | #include <asm/div64.h>
+  +++ |+#include <stdio.h>
+   19 | #include <uapi/linux/kernel.h>
+include/linux/kernel.h:481:5: warning: conflicting types for built-in function ‘vsnprintf’; expected ‘int(char *, long unsigned int,  const char *, __va_list_tag *)’ [-Wbuiltin-declaration-mismatch]
+  481 | int vsnprintf(char *buf, size_t size, const char *fmt, va_list args);
+      |     ^~~~~~~~~
+include/linux/kernel.h:481:5: note: ‘vsnprintf’ is declared in header ‘<stdio.h>’
+WARNING: modpost: missing MODULE_LICENSE() in /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.o
+see include/linux/module.h for more information
+In file included from include/asm-generic/bug.h:19,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/bug.h:83,
+                 from include/linux/bug.h:5,
+                 from include/linux/thread_info.h:12,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/elf.h:8,
+                 from include/linux/elf.h:5,
+                 from include/linux/elfnote.h:62,
+                 from include/linux/build-salt.h:4,
+                 from /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod.c:1:
+include/linux/kernel.h:479:5: warning: conflicting types for built-in function ‘snprintf’; expected ‘int(char *, long unsigned int,  const char *, ...)’ [-Wbuiltin-declaration-mismatch]
+  479 | int snprintf(char *buf, size_t size, const char *fmt, ...);
+      |     ^~~~~~~~
+include/linux/kernel.h:19:1: note: ‘snprintf’ is declared in header ‘<stdio.h>’
+   18 | #include <asm/div64.h>
+  +++ |+#include <stdio.h>
+   19 | #include <uapi/linux/kernel.h>
+include/linux/kernel.h:481:5: warning: conflicting types for built-in function ‘vsnprintf’; expected ‘int(char *, long unsigned int,  const char *, __va_list_tag *)’ [-Wbuiltin-declaration-mismatch]
+  481 | int vsnprintf(char *buf, size_t size, const char *fmt, va_list args);
+      |     ^~~~~~~~~
+include/linux/kernel.h:481:5: note: ‘vsnprintf’ is declared in header ‘<stdio.h>’
+In file included from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/string.h:5,
+                 from include/linux/string.h:20,
+                 from include/linux/bitmap.h:9,
+                 from include/linux/cpumask.h:12,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/cpumask.h:5,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/msr.h:11,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/processor.h:21,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/cpufeature.h:5,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/thread_info.h:53,
+                 from include/linux/thread_info.h:39,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/elf.h:8,
+                 from include/linux/elf.h:5,
+                 from include/linux/elfnote.h:62,
+                 from include/linux/build-salt.h:4,
+                 from /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod.c:1:
+/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/string_64.h:14:14: warning: conflicting types for built-in function ‘memcpy’; expected ‘void *(void *, const void *, long unsigned int)’ [-Wbuiltin-declaration-mismatch]
+   14 | extern void *memcpy(void *to, const void *from, size_t len);
+      |              ^~~~~~
+/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/string_64.h:1:1: note: ‘memcpy’ is declared in header ‘<string.h>’
+  +++ |+#include <string.h>
+    1 | /* SPDX-License-Identifier: GPL-2.0 */
+/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/string_64.h:18:7: warning: conflicting types for built-in function ‘memset’; expected ‘void *(void *, int,  long unsigned int)’ [-Wbuiltin-declaration-mismatch]
+   18 | void *memset(void *s, int c, size_t n);
+      |       ^~~~~~
+/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/string_64.h:18:7: note: ‘memset’ is declared in header ‘<string.h>’
+/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/string_64.h:58:7: warning: conflicting types for built-in function ‘memmove’; expected ‘void *(void *, const void *, long unsigned int)’ [-Wbuiltin-declaration-mismatch]
+   58 | void *memmove(void *dest, const void *src, size_t count);
+      |       ^~~~~~~
+/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/string_64.h:58:7: note: ‘memmove’ is declared in header ‘<string.h>’
+/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/string_64.h:61:5: warning: conflicting types for built-in function ‘memcmp’; expected ‘int(const void *, const void *, long unsigned int)’ [-Wbuiltin-declaration-mismatch]
+   61 | int memcmp(const void *cs, const void *ct, size_t count);
+      |     ^~~~~~
+/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/string_64.h:61:5: note: ‘memcmp’ is declared in header ‘<string.h>’
+/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/string_64.h:62:8: warning: conflicting types for built-in function ‘strlen’; expected ‘long unsigned int(const char *)’ [-Wbuiltin-declaration-mismatch]
+   62 | size_t strlen(const char *s);
+      |        ^~~~~~
+/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/string_64.h:62:8: note: ‘strlen’ is declared in header ‘<string.h>’
+In file included from include/linux/bitmap.h:9,
+                 from include/linux/cpumask.h:12,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/cpumask.h:5,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/msr.h:11,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/processor.h:21,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/cpufeature.h:5,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/thread_info.h:53,
+                 from include/linux/thread_info.h:39,
+                 from /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/elf.h:8,
+                 from include/linux/elf.h:5,
+                 from include/linux/elfnote.h:62,
+                 from include/linux/build-salt.h:4,
+                 from /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod.c:1:
+include/linux/string.h:26:15: warning: conflicting types for built-in function ‘strncpy’; expected ‘char *(char *, const char *, long unsigned int)’ [-Wbuiltin-declaration-mismatch]
+   26 | extern char * strncpy(char *,const char *, __kernel_size_t);
+      |               ^~~~~~~
+include/linux/string.h:21:1: note: ‘strncpy’ is declared in header ‘<string.h>’
+   20 | #include <asm/string.h>
+  +++ |+#include <string.h>
+   21 | 
+include/linux/string.h:42:15: warning: conflicting types for built-in function ‘strncat’; expected ‘char *(char *, const char *, long unsigned int)’ [-Wbuiltin-declaration-mismatch]
+   42 | extern char * strncat(char *, const char *, __kernel_size_t);
+      |               ^~~~~~~
+include/linux/string.h:42:15: note: ‘strncat’ is declared in header ‘<string.h>’
+include/linux/string.h:51:12: warning: conflicting types for built-in function ‘strncmp’; expected ‘int(const char *, const char *, long unsigned int)’ [-Wbuiltin-declaration-mismatch]
+   51 | extern int strncmp(const char *,const char *,__kernel_size_t);
+      |            ^~~~~~~
+include/linux/string.h:51:12: note: ‘strncmp’ is declared in header ‘<string.h>’
+include/linux/string.h:57:12: warning: conflicting types for built-in function ‘strncasecmp’; expected ‘int(const char *, const char *, long unsigned int)’ [-Wbuiltin-declaration-mismatch]
+   57 | extern int strncasecmp(const char *s1, const char *s2, size_t n);
+      |            ^~~~~~~~~~~
+include/linux/string.h:90:24: warning: conflicting types for built-in function ‘strnlen’; expected ‘long unsigned int(const char *, long unsigned int)’ [-Wbuiltin-declaration-mismatch]
+   90 | extern __kernel_size_t strnlen(const char *,__kernel_size_t);
+      |                        ^~~~~~~
+include/linux/string.h:99:24: warning: conflicting types for built-in function ‘strspn’; expected ‘long unsigned int(const char *, const char *)’ [-Wbuiltin-declaration-mismatch]
+   99 | extern __kernel_size_t strspn(const char *,const char *);
+      |                        ^~~~~~
+include/linux/string.h:99:24: note: ‘strspn’ is declared in header ‘<string.h>’
+include/linux/string.h:102:24: warning: conflicting types for built-in function ‘strcspn’; expected ‘long unsigned int(const char *, const char *)’ [-Wbuiltin-declaration-mismatch]
+  102 | extern __kernel_size_t strcspn(const char *,const char *);
+      |                        ^~~~~~~
+include/linux/string.h:102:24: note: ‘strcspn’ is declared in header ‘<string.h>’
+include/linux/string.h:158:12: warning: conflicting types for built-in function ‘bcmp’; expected ‘int(const void *, const void *, long unsigned int)’ [-Wbuiltin-declaration-mismatch]
+  158 | extern int bcmp(const void *,const void *,__kernel_size_t);
+      |            ^~~~
+include/linux/string.h:161:15: warning: conflicting types for built-in function ‘memchr’; expected ‘void *(const void *, int,  long unsigned int)’ [-Wbuiltin-declaration-mismatch]
+  161 | extern void * memchr(const void *,int,__kernel_size_t);
+      |               ^~~~~~
+include/linux/string.h:161:15: note: ‘memchr’ is declared in header ‘<string.h>’

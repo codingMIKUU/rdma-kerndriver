@@ -1,0 +1,21 @@
+
+# Load MLX5 modules
+MLX5_LOAD=yes
+
+# Load UMAD module
+UMAD_LOAD=yes
+
+# Load UVERBS module
+UVERBS_LOAD=yes
+
+# Load RDMA_CM module
+RDMA_CM_LOAD=yes
+
+# Load RDMA_UCM module
+RDMA_UCM_LOAD=yes
+
+# Load IPoIB
+IPOIB_LOAD=yes
+
+# Load SRP module
+SRP_LOAD=no

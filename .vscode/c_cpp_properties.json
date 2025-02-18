@@ -1,0 +1,18 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include",
+                "/home/dell/zxm/linux-headers-5.4.0-86/include",
+                "${workspaceFolder}/**/**/**",
+                "/home/dell/zxm/linux-headers-5.4.0-86/arch/*/include",
+                "/usr/src/linux-headers-5.4.0-86-generic/include",
+                "/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi",
+                "/home/dell/zxm/rdma-core/build/include"
+            ],
+            "defines": []
+        }
+    ],
+    "version": 4
+}

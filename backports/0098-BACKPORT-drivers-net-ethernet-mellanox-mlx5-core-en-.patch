@@ -1,0 +1,36 @@
+From: Valentine Fatiev <valentinef@nvidia.com>
+Subject: [PATCH] BACKPORT: drivers/net/ethernet/mellanox/mlx5/core/en/selq.h
+
+Change-Id: I7ef730d8dcb06bef97ab548e0f794bb2e6207fc1
+---
+ drivers/net/ethernet/mellanox/mlx5/core/en/selq.h | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en/selq.h
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en/selq.h
+@@ -5,6 +5,7 @@
+ #define __MLX5_EN_SELQ_H__
+ 
+ #include <linux/kernel.h>
++#include <linux/netdevice.h>
+ 
+ struct mlx5e_selq_params;
+ 
+@@ -47,7 +48,17 @@ static inline u16 mlx5e_txq_to_ch_ix_htb
+ 	return txq;
+ }
+ 
++#ifdef HAVE_NDO_SELECT_QUEUE_HAS_3_PARMS_NO_FALLBACK
+ u16 mlx5e_select_queue(struct net_device *dev, struct sk_buff *skb,
+ 		       struct net_device *sb_dev);
+ 
++#else
++u16 mlx5e_select_queue(struct net_device *dev, struct sk_buff *skb,
++#ifdef HAVE_SELECT_QUEUE_NET_DEVICE
++		       struct net_device *sb_dev,
++#else
++		       void *accel_priv,
++#endif /* HAVE_SELECT_QUEUE_NET_DEVICE */
++		       select_queue_fallback_t fallback);
++#endif
+ #endif /* __MLX5_EN_SELQ_H__ */

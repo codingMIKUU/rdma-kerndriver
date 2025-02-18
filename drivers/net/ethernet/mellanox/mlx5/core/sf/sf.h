@@ -1,0 +1,88 @@
+/* SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB */
+/* Copyright (c) 2020 Mellanox Technologies Ltd */
+
+#ifndef __MLX5_SF_H__
+#define __MLX5_SF_H__
+
+#include <linux/mlx5/driver.h>
+#include "lib/sf.h"
+
+#ifdef CONFIG_MLX5_SF_MANAGER
+int mlx5_sf_hw_table_init(struct mlx5_core_dev *dev);
+void mlx5_sf_hw_table_cleanup(struct mlx5_core_dev *dev);
+
+int mlx5_sf_hw_table_create(struct mlx5_core_dev *dev);
+void mlx5_sf_hw_table_destroy(struct mlx5_core_dev *dev);
+
+int mlx5_sf_table_init(struct mlx5_core_dev *dev);
+void mlx5_sf_table_cleanup(struct mlx5_core_dev *dev);
+
+int mlx5_devlink_sf_port_new(struct devlink *devlink,
+			     const struct devlink_port_new_attrs *add_attr,
+			     struct netlink_ext_ack *extack,
+#ifdef HAVE_DEVLINK_PORT_OPS
+			     struct devlink_port **dl_port);
+#else
+			     unsigned int *new_port_index);
+#endif
+
+#ifdef HAVE_DEVLINK_PORT_OPS
+int mlx5_devlink_sf_port_del(struct devlink *devlink,
+			     struct devlink_port *dl_port,
+			     struct netlink_ext_ack *extack);
+#else
+int mlx5_devlink_sf_port_del(struct devlink *devlink, unsigned int port_index,
+			     struct netlink_ext_ack *extack);
+#endif
+#if defined(HAVE_PORT_FUNCTION_STATE_GET_4_PARAM) || defined(HAVE_DEVLINK_PORT_OPS)
+int mlx5_devlink_sf_port_fn_state_get(
+#else
+int mlx5_devlink_sf_port_fn_state_get(struct devlink *devlink,
+#endif
+				      struct devlink_port *dl_port,
+				      enum devlink_port_fn_state *state,
+				      enum devlink_port_fn_opstate *opstate,
+				      struct netlink_ext_ack *extack);
+#if defined(HAVE_PORT_FUNCTION_STATE_GET_4_PARAM) || defined(HAVE_DEVLINK_PORT_OPS)
+int mlx5_devlink_sf_port_fn_state_set(
+#else
+int mlx5_devlink_sf_port_fn_state_set(struct devlink *devlink,
+#endif
+				      struct devlink_port *dl_port,
+				      enum devlink_port_fn_state state,
+				      struct netlink_ext_ack *extack);
+#if IS_ENABLED(CONFIG_MLXDEVM)
+void mlx5_sf_index_to_hw_id(struct devlink *devlink, u16 *hw_fn_id, struct devlink_port *dl_port);
+#endif
+#else
+
+static inline int mlx5_sf_hw_table_init(struct mlx5_core_dev *dev)
+{
+	return 0;
+}
+
+static inline void mlx5_sf_hw_table_cleanup(struct mlx5_core_dev *dev)
+{
+}
+
+static inline int mlx5_sf_hw_table_create(struct mlx5_core_dev *dev)
+{
+	return 0;
+}
+
+static inline void mlx5_sf_hw_table_destroy(struct mlx5_core_dev *dev)
+{
+}
+
+static inline int mlx5_sf_table_init(struct mlx5_core_dev *dev)
+{
+	return 0;
+}
+
+static inline void mlx5_sf_table_cleanup(struct mlx5_core_dev *dev)
+{
+}
+
+#endif
+
+#endif

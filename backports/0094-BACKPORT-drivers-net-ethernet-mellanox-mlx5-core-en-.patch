@@ -1,0 +1,32 @@
+From: Valentine Fatiev <valentinef@nvidia.com>
+Subject: [PATCH] BACKPORT:
+ drivers/net/ethernet/mellanox/mlx5/core/en/rep/neigh.c
+
+Change-Id: I13bf105e0d223180012ed8b3aec6baddcb1aecb9
+---
+ drivers/net/ethernet/mellanox/mlx5/core/en/rep/neigh.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en/rep/neigh.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en/rep/neigh.c
+@@ -10,6 +10,10 @@
+ #include <linux/notifier.h>
+ #include <net/netevent.h>
+ #include <net/arp.h>
++#ifdef HAVE_BASECODE_EXTRAS
++#include <net/addrconf.h>
++#include <net/ipv6_stubs.h>
++#endif
+ #include "neigh.h"
+ #include "tc.h"
+ #include "en_rep.h"
+@@ -150,7 +154,9 @@ static void mlx5e_rep_neigh_update(struc
+ 
+ 	neigh_connected = (nud_state & NUD_VALID) && !dead;
+ 
++#ifndef MLX_DISABLE_TRACEPOINTS
+ 	trace_mlx5e_rep_neigh_update(nhe, ha, neigh_connected);
++#endif
+ 
+ 	if (!same_dev)
+ 		goto out;

@@ -1,0 +1,19 @@
+From: Valentine Fatiev <valentinef@nvidia.com>
+Subject: [PATCH] BACKPORT:
+ drivers/net/ethernet/mellanox/mlx5/core/en/tc/post_meter.h
+
+Change-Id: Ifa9d9e03795daf696328a2059ce947c0a4208882
+---
+ drivers/net/ethernet/mellanox/mlx5/core/en/tc/post_meter.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en/tc/post_meter.h
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en/tc/post_meter.h
+@@ -4,6 +4,7 @@
+ #ifndef __MLX5_EN_POST_METER_H__
+ #define __MLX5_EN_POST_METER_H__
+ 
++
+ #define packet_color_to_reg { \
+ 	.mfield = MLX5_ACTION_IN_FIELD_METADATA_REG_C_5, \
+ 	.moffset = 0, \

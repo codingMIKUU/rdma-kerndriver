@@ -1,0 +1,29 @@
+/* SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB */
+/* Copyright (c) 2020, Mellanox Technologies inc.  All rights reserved. */
+
+#ifndef __MLX5_FW_RESET_H
+#define __MLX5_FW_RESET_H
+
+#include "mlx5_core.h"
+
+int mlx5_fw_reset_query(struct mlx5_core_dev *dev, u8 *reset_level, u8 *reset_type);
+int mlx5_fw_reset_set_reset_sync(struct mlx5_core_dev *dev, u8 reset_type_sel,
+				 struct netlink_ext_ack *extack);
+int mlx5_fw_reset_set_live_patch(struct mlx5_core_dev *dev);
+
+#ifdef HAVE_DEVLINK_RELOAD_DOWN_SUPPORT_RELOAD_ACTION
+int mlx5_fw_reset_wait_reset_done(struct mlx5_core_dev *dev);
+#endif
+int mlx5_fw_reset_verify_fw_complete(struct mlx5_core_dev *dev,
+				     struct netlink_ext_ack *extack);
+void mlx5_fw_reset_events_start(struct mlx5_core_dev *dev);
+void mlx5_fw_reset_events_stop(struct mlx5_core_dev *dev);
+void mlx5_drain_fw_reset(struct mlx5_core_dev *dev);
+int mlx5_fw_reset_init(struct mlx5_core_dev *dev);
+void mlx5_fw_reset_cleanup(struct mlx5_core_dev *dev);
+#if (defined(HAVE_DEVLINK_PARAMS_PUBLISHED) || defined(HAVE_DEVLINK_REGISTER_GET_1_PARAMS)) && !defined(HAVE_DEVL_PARAM_DRIVERINIT_VALUE_GET)
+int mlx5_register_devlink_fw_params(struct mlx5_core_dev *dev);
+void mlx5_unregister_devlink_fw_params(struct mlx5_core_dev *dev);
+#endif
+
+#endif
