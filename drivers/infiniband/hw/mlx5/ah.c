@@ -133,11 +133,20 @@ int mlx5_ib_create_ah(struct ib_ah *ibah, struct rdma_ah_init_attr *init_attr,
 		if (err)
 			return err;
 	}
+	if (ibah->pd->device == NULL) {
+        pr_info("ah->pd->device is NULL\n");
+    }
+	// ibah->pd->device=ibah->device;
+
+	if (ibah->pd->device == NULL) {
+        pr_info("ah->pd->device is NULL222\n");
+    }
+	// pr_info("mlx5_ib_create_ah的pd local_dma_lkey:%d,PD __internal_mr pointer address:%p, __internal_mr address%p\n",pd_temp->local_dma_lkey,&pd_temp->__internal_mr,pd_temp->__internal_mr);
 	//find if the SRMC exists
 	const struct ib_global_route *grh = rdma_ah_read_grh(ah_attr);
 	if(ah_attr->xrc_flags)
-		ibah->srmc_flags = is_xrc_exists(&sched,ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
-
+		{ibah->srmc_flags = is_xrc_exists(&sched,ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
+		pr_info("内核srmc_flags: %u\n", ibah->srmc_flags);}
 	create_ib_ah(dev, ah, init_attr);
 	pr_info("out mlx5_ib_create_ah\n");
 	return 0;

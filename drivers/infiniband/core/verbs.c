@@ -1343,6 +1343,7 @@ struct ib_qp *ib_create_qp_kernel(struct ib_pd *pd,
 				  struct ib_qp_init_attr *qp_init_attr,
 				  const char *caller)
 {
+	pr_info("in ib_create_qp_kernel\n");
 	struct ib_device *device = pd->device;
 	struct ib_qp *qp;
 	int ret;
@@ -1703,23 +1704,23 @@ bool ib_modify_qp_is_ok(enum ib_qp_state cur_state, enum ib_qp_state next_state,
 			enum ib_qp_type type, enum ib_qp_attr_mask mask)
 {
 	enum ib_qp_attr_mask req_param, opt_param;
-	pr_info("1\n");
+	pr_info("ib_modify_qp_is_ok,1\n");
 	if (mask & IB_QP_CUR_STATE  &&
 	    cur_state != IB_QPS_RTR && cur_state != IB_QPS_RTS &&
 	    cur_state != IB_QPS_SQD && cur_state != IB_QPS_SQE)
 		return false;
-	pr_info("2\n");
+	pr_info("ib_modify_qp_is_ok,2\n");
 	if (!qp_state_table[cur_state][next_state].valid)
 		return false;
 	req_param = qp_state_table[cur_state][next_state].req_param[type];
 	opt_param = qp_state_table[cur_state][next_state].opt_param[type];
-	pr_info("3\n");
+	pr_info("ib_modify_qp_is_ok,3\n");
 	if ((mask & req_param) != req_param)
 		return false;
-	pr_info("4\n");
+	pr_info("ib_modify_qp_is_ok,4\n");
 	if (mask & ~(req_param | opt_param | IB_QP_STATE))
 		return false;
-	pr_info("5\n");
+	pr_info("ib_modify_qp_is_ok,5\n");
 	return true;
 }
 EXPORT_SYMBOL(ib_modify_qp_is_ok);

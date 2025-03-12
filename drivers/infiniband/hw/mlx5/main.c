@@ -1632,17 +1632,14 @@ static int mlx5_ib_query_gid(struct ib_device *ibdev, u32 port, int index,
 	pr_info("in mlx5_ib_query_gid\n");
 	struct mlx5_ib_dev *dev = to_mdev(ibdev);
 	struct mlx5_core_dev *mdev = dev->mdev;
-
+	printk(KERN_INFO "vport access method: %d\n", mlx5_get_vport_access_method(ibdev));
 	switch (mlx5_get_vport_access_method(ibdev))
 	{
-	pr_info("1\n");
-	case MLX5_VPORT_ACCESS_METHOD_MAD:
+	case MLX5_VPORT_ACCESS_METHOD_MAD://0，适用于 InfiniBand，通过 MAD 接口管理端口。
 		return mlx5_query_mad_ifc_gids(ibdev, port, index, gid);
-	pr_info("2\n");
-	case MLX5_VPORT_ACCESS_METHOD_HCA:
+	case MLX5_VPORT_ACCESS_METHOD_HCA://1，适用于 InfiniBand 和 RoCE，通过 HCA 硬件直接访问端口。
 		return mlx5_query_hca_vport_gid(mdev, 0, port, 0, index, gid);
-	pr_info("3\n");
-	default:
+	default://2，MLX5_VPORT_ACCESS_METHOD_NIC，适用于以太网（如 RoCE v2），将端口作为 NIC 使用。
 		return -EINVAL;
 	}
 }

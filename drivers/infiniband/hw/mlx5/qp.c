@@ -2495,6 +2495,7 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 	MLX5_SET(qpc, qpc, st, mlx5_st);
 	MLX5_SET(qpc, qpc, pm_state, MLX5_QP_PM_MIGRATED);
 	MLX5_SET(qpc, qpc, pd, to_mpd(pd)->pdn);
+	if(to_mpd(pd)->pdn){pr_info("create_user_qp pd is %d\n", to_mpd(pd)->pdn);}
 
 	if (qp->flags_en & MLX5_QP_FLAG_SIGNATURE)
 		MLX5_SET(qpc, qpc, wq_signature, 1);
@@ -2690,7 +2691,8 @@ static int create_kernel_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 		MLX5_SET(qpc, qpc, pd, to_mpd(pd ? pd : devr->p0)->pdn);
 	else
 		MLX5_SET(qpc, qpc, latency_sensitive, 1);
-
+	
+	if(to_mpd(pd)->pdn)pr_info("create_kernel_qp pd is %d\n", to_mpd(pd)->pdn);
 
 	if (qp->flags & IB_QP_CREATE_BLOCK_MULTICAST_LOOPBACK)
 		MLX5_SET(qpc, qpc, block_lb_mc, 1);
@@ -3359,6 +3361,7 @@ out:
 		qp->ibqp.qp_num = 1;
 	else
 		qp->ibqp.qp_num = qp->trans_qp.base.mqp.qpn;
+	pr_info("in create qp:qp->ibqp.qp_num%d\n",qp->ibqp.qp_num);
 
 	mlx5_ib_dbg(dev,
 		"QP type %d, ib qpn 0x%X, mlx qpn 0x%x, rcqn 0x%x, scqn 0x%x, ece 0x%x\n",
@@ -3465,17 +3468,44 @@ static int check_ucmd_data(struct mlx5_ib_dev *dev,
 	return ret ? 0 : -EINVAL;
 }
 
+static void print_pd_info(struct ib_pd *pd)
+{
+    if (!pd) {
+        pr_err("pd 指针为 NULL\n");
+        return;
+    }
+
+    // 输出 local_dma_lkey 和 unsafe_global_rkey
+    pr_info("pd->local_dma_lkey: %u\n", pd->local_dma_lkey);
+    pr_info(" pd->unsafe_global_rkey: %u\n", pd->unsafe_global_rkey);
+
+    // 检查并输出 __internal_mr 的地址
+    if (pd->__internal_mr) {
+        pr_info("pd->__internal_mr 地址: %pK\n", pd->__internal_mr);
+        pr_info("pd->__internal_mr->lkey: %u\n", pd->__internal_mr->lkey);
+        pr_info("pd->__internal_mr->rkey: %u\n", pd->__internal_mr->rkey);
+        
+        // 如果需要更多 MR 信息，可以继续添加
+        pr_info("pd->__internal_mr->iova: 0x%llx\n", pd->__internal_mr->iova);
+        pr_info("pd->__internal_mr->length: 0x%llx\n", pd->__internal_mr->length);
+    } else {
+        pr_info("pd->__internal_mr 为 NULL\n");
+    }
+}
+
 int mlx5_ib_create_qp(struct ib_qp *ibqp, struct ib_qp_init_attr *attr,
 		      struct ib_udata *udata)
 {
 	pr_info("in mlx5_ib_create_qp");
+	print_pd_info(ibqp->pd);
 	struct mlx5_create_qp_params params = {};
 	struct mlx5_ib_dev *dev = to_mdev(ibqp->device);
 	struct mlx5_ib_qp *qp = to_mqp(ibqp);
 	struct ib_pd *pd = ibqp->pd;
 	enum ib_qp_type type;
 	int err;
-
+	
+	// pr_info("mlx5_ib_create_qp的pd local_dma_lkey:%d,PD __internal_mr pointer address:%p, __internal_mr address%p\n",pd->local_dma_lkey,&pd->__internal_mr,pd->__internal_mr);
 	err = mlx5_ib_dev_res_srq_init(dev);
 	if (err)
 		return err;
@@ -3541,7 +3571,6 @@ int mlx5_ib_create_qp(struct ib_qp *ibqp, struct ib_qp_init_attr *attr,
 
 	kfree(params.ucmd);
 	params.ucmd = NULL;
-
 	if (udata)
 		/*
 		 * It is safe to copy response for all user create QP flows,
@@ -5011,7 +5040,7 @@ static int ignored_ts_check(enum ib_qp_type qp_type)
 int mlx5_ib_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 		      int attr_mask, struct ib_udata *udata)
 {
-	pr_info("in mlx5_modify_qp\n");
+	pr_info("in mlx5_modify_qp,qp state:%d\n",attr->qp_state);
 	struct mlx5_ib_dev *dev = to_mdev(ibqp->device);
 	struct mlx5_ib_modify_qp_resp resp = {};
 	struct mlx5_ib_qp *qp = to_mqp(ibqp);

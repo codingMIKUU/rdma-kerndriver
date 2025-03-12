@@ -253,19 +253,19 @@ int mlx5_qpc_create_qp(struct mlx5_ib_dev *dev, struct mlx5_core_qp *qp,
 	int err;
 
 	MLX5_SET(create_qp_in, in, opcode, MLX5_CMD_OP_CREATE_QP);
-	pr_info("2\n");
+	pr_info("mlx5_qpc_create_qp,2\n");
 	err = mlx5_cmd_exec(dev->mdev, in, inlen, out,
 			    MLX5_ST_SZ_BYTES(create_qp_out));
 	if (err)
 		return err;
-	pr_info("4\n");
+	pr_info("mlx5_qpc_create_qp,4\n");
 	qp->uid = MLX5_GET(create_qp_in, in, uid);
 	qp->qpn = MLX5_GET(create_qp_out, out, qpn);
 
 	err = create_resource_common(dev, qp, MLX5_RES_QP);
 	if (err)
 		goto err_cmd;
-	pr_info("5\n");
+	pr_info("mlx5_qpc_create_qp,5\n");
 	if (dev->ib_dev.type != RDMA_DEVICE_TYPE_SMI)
 		mlx5_debug_qp_add(dev->mdev, qp);
 

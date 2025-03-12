@@ -1067,12 +1067,10 @@ int mlx5_ib_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 	int i;
 	u8 next_fence = 0;
 	u8 fence;
-	pr_info("a\n");
 
 	if (unlikely(mdev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR &&
 		     !drain)) {
 		*bad_wr = wr;
-		pr_info("0\n");
 		return -EIO;
 	}
 
@@ -1086,7 +1084,6 @@ int mlx5_ib_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 			mlx5_ib_warn(dev, "\n");
 			err = -EINVAL;
 			*bad_wr = wr;
-			pr_info("1\n");
 			goto out;
 		}
 
@@ -1095,18 +1092,16 @@ int mlx5_ib_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 			mlx5_ib_warn(dev, "\n");
 			err = -EINVAL;
 			*bad_wr = wr;
-			pr_info("2，max_gs:%d\n",qp->sq.max_gs);
+			pr_info("mlx5_ib_post_send,2，max_gs:%d\n",qp->sq.max_gs);
 			goto out;
 		}
 
 		err = begin_wqe(qp, &seg, &ctrl, wr, &idx, &size, &cur_edge,
 				nreq);
-		pr_info("b\n");
 		if (err) {
 			mlx5_ib_warn(dev, "\n");
 			err = -ENOMEM;
 			*bad_wr = wr;
-			pr_info("3\n");
 			goto out;
 		}
 
@@ -1133,7 +1128,6 @@ int mlx5_ib_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 			if (unlikely(!(qp->flags & IB_QP_CREATE_SIGNATURE_PIPELINE))) {
 				mlx5_ib_warn(dev, "\n");
 				err = -EINVAL;
-				pr_info("4\n");
 				*bad_wr = wr;
 				goto out;
 			}
@@ -1153,12 +1147,10 @@ int mlx5_ib_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 					    next_fence, &num_sge);
 			if (unlikely(err)) {
 				*bad_wr = wr;
-				pr_info("5\n");
 				goto out;
 			} else if (wr->opcode == IB_WR_REG_MR_INTEGRITY) {
 				goto skip_psv;
 			}
-			pr_info("d\n");
 			break;
 
 		case IB_QPT_UC:
@@ -1188,7 +1180,6 @@ int mlx5_ib_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 			if (unlikely(err)) {
 				mlx5_ib_warn(dev, "\n");
 				*bad_wr = wr;
-				pr_info("6\n");
 				goto out;
 			}
 		} else {
@@ -1205,11 +1196,9 @@ int mlx5_ib_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 				seg += sizeof(struct mlx5_wqe_data_seg);
 			}
 		}
-		pr_info("e\n");
 		qp->next_fence = next_fence;
 		mlx5r_finish_wqe(qp, ctrl, seg, size, cur_edge, idx, wr->wr_id,
 				 nreq, fence, mlx5_ib_opcode[wr->opcode]);
-		pr_info("f\n");
 skip_psv:
 		if (0)
 			dump_wqe(qp, idx, size);

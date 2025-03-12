@@ -294,4 +294,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "memtrack,mlx_compat");
 
 
-MODULE_INFO(srcversion, "A352C3195A156173FA42BFA");
+MODULE_INFO(srcversion, "DFA904F181426753FA2175B");

@@ -937,7 +937,7 @@ void uverbs_destroy_ufile_hw(struct ib_uverbs_file *ufile,
 	 */
 	if (!ufile->ucontext)
 		goto done;
-
+	pr_info("uverbs: Destroying ucontext报错\n");
 	while (!list_empty(&ufile->uobjects) &&
 	       !__uverbs_cleanup_ufile(ufile, reason)) {
 	}
