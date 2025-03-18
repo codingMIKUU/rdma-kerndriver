@@ -3481,9 +3481,9 @@ static void print_pd_info(struct ib_pd *pd)
 
     // 检查并输出 __internal_mr 的地址
     if (pd->__internal_mr) {
-        pr_info("pd->__internal_mr 地址: %pK\n", pd->__internal_mr);
-        pr_info("pd->__internal_mr->lkey: %u\n", pd->__internal_mr->lkey);
-        pr_info("pd->__internal_mr->rkey: %u\n", pd->__internal_mr->rkey);
+        pr_info("pd->__internal_mr 地址: %px\n", pd->__internal_mr);
+        pr_info("pd->__internal_mr->lkey: %d\n", pd->__internal_mr->lkey);
+        pr_info("pd->__internal_mr->rkey: %d\n", pd->__internal_mr->rkey);
         
         // 如果需要更多 MR 信息，可以继续添加
         pr_info("pd->__internal_mr->iova: 0x%llx\n", pd->__internal_mr->iova);

@@ -5,6 +5,7 @@ struct __attribute__((packed)) ibv_qp_info {
     uint32_t qpn;
     union ib_gid gid;
 	char rconn_server[4];
+    void *padding;
 };
 int conn_server(char *addr, int port,struct ibv_qp_info *local_qp_info,struct ibv_qp_info *remote_qp_info);
 

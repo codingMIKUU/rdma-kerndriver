@@ -179,6 +179,7 @@ __used __section(__versions) = {
 	{ 0xb44ad4b3, "_copy_to_user" },
 	{ 0xd24d2842, "mlx5_eswitch_register_vport_reps" },
 	{ 0x6de13801, "wait_for_completion" },
+	{ 0x76c43700, "ib_alloc_mr" },
 	{ 0x97b51df7, "pci_set_master" },
 	{ 0x50d1f870, "pgprot_writecombine" },
 	{ 0x9926fdf2, "mlx5_rl_remove_rate" },
@@ -273,6 +274,7 @@ __used __section(__versions) = {
 	{ 0x3146b988, "mlx5_lag_is_shared_fdb" },
 	{ 0x74bcd683, "vm_insert_page" },
 	{ 0xd1575343, "memtrack_check_size" },
+	{ 0x7ba31b34, "ib_map_mr_sg" },
 	{ 0xabdc0b9, "ib_dispatch_event" },
 	{ 0xf11543ff, "find_first_zero_bit" },
 	{ 0xc34165c0, "_uverbs_get_const_unsigned" },
@@ -458,4 +460,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,mlx_compat");
 
 
-MODULE_INFO(srcversion, "CC2BEB528C43D463751F845");
+MODULE_INFO(srcversion, "4F18213C5C7167125753319");

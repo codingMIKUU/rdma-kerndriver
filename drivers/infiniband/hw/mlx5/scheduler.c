@@ -239,7 +239,7 @@ int scheduler_polling(void* data)
             pr_info("发送端的数据缓存区地址: %px\n", sgl.addr);
             pr_info("发送端要写入的缓存区地址: %px\n", rdma_wr.remote_addr);
             pr_info("服务端lkey：%d，收到的rkey：%d\n", sgl.lkey, rdma_wr.rkey);
-            
+    
             //find the srmc qp to send this req
             mutex_lock(&sched->srmc_lock);
             for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
@@ -317,7 +317,7 @@ int scheduler_polling(void* data)
                 }
                 mutex_unlock(&sched->cq_lock);
             }
-            pr_info("polling cqe\n");
+            //pr_info("polling cqe\n");
         }
         mutex_unlock(&sched->srmc_lock);
         msleep(10000);
@@ -496,7 +496,8 @@ int is_xrc_exists(struct mlx5_ib_sched* sched,struct ib_pd *pd,union ib_gid *dgi
             srmc->tgt_refcnt = 1;
          }
     }
-    if(ret&&flags == SRMC_CREATE_FLAG_INIT_QP){
+    // if(ret&&flags == SRMC_CREATE_FLAG_INIT_QP){
+    if(ret){
         if((ret = mlx5_ib_create_srmc_qp(sched,srmc,pd,flags,qpn))<0){
             pr_err("Failed to create srmc qp\n");
         }
@@ -570,9 +571,9 @@ static void print_pd_info(struct ib_pd *pd)
 
     // 检查并输出 __internal_mr 的地址
     if (pd->__internal_mr) {
-        pr_info("pd->__internal_mr 地址: %pK\n", pd->__internal_mr);
-        pr_info("pd->__internal_mr->lkey: %u\n", pd->__internal_mr->lkey);
-        pr_info("pd->__internal_mr->rkey: %u\n", pd->__internal_mr->rkey);
+        pr_info("pd->__internal_mr 地址: %px\n", pd->__internal_mr);
+        pr_info("pd->__internal_mr->lkey: %d\n", pd->__internal_mr->lkey);
+        pr_info("pd->__internal_mr->rkey: %d\n", pd->__internal_mr->rkey);
         
         // 如果需要更多 MR 信息，可以继续添加
         pr_info("pd->__internal_mr->iova: 0x%llx\n", pd->__internal_mr->iova);
@@ -580,6 +581,89 @@ static void print_pd_info(struct ib_pd *pd)
     } else {
         pr_info("SRMC pd->__internal_mr 为 NULL\n");
     }
+}
+
+//alloc dma buf and alloc mr, for ini qp
+int mlx5_sched_alloc_mr(struct mlx5_ib_srmc *srmc,struct ib_pd *pd,int flags){
+    if(flags == SRMC_CREATE_FLAG_INIT_QP){
+        srmc->ini_buf_sz = 100;
+        srmc->ini_buf = kzalloc(srmc->ini_buf_sz,GFP_KERNEL);
+        if(srmc->ini_buf)
+            srmc->ini_dma_buf = ib_dma_map_single(pd->device,srmc->ini_buf,srmc->ini_buf_sz,DMA_BIDIRECTIONAL);
+        if(!srmc->ini_buf || ib_dma_mapping_error(pd->device,srmc->ini_dma_buf)){
+            pr_err("Failed to allocate dma buffer\n");
+            kfree(srmc->ini_buf);
+            return -1;
+        }
+        
+        dma_unmap_addr_set(srmc,dma_mapping,srmc->ini_dma_buf);
+
+        //alloc mr
+        srmc->ini_page_list_len = (((srmc->ini_buf_sz-1) & PAGE_MASK)+PAGE_SIZE)>>PAGE_SHIFT;
+        srmc->ini_mr = ib_alloc_mr(pd,IB_MR_TYPE_MEM_REG,srmc->ini_page_list_len);
+        if(IS_ERR(srmc->ini_mr)){
+            pr_err("Failed to allocate mr\n");
+            goto err;
+        }
+    }else{
+        srmc->tgt_buf_sz = 100;
+        srmc->tgt_buf = kzalloc(srmc->tgt_buf_sz,GFP_KERNEL);
+        if(srmc->tgt_buf)
+            srmc->tgt_dma_buf = ib_dma_map_single(pd->device,srmc->tgt_buf,srmc->tgt_buf_sz,DMA_BIDIRECTIONAL);
+        if(!srmc->tgt_buf || ib_dma_mapping_error(pd->device,srmc->tgt_dma_buf)){
+            pr_err("Failed to allocate dma buffer\n");
+            kfree(srmc->tgt_buf);
+            return -1;
+        }
+        
+        dma_unmap_addr_set(srmc,dma_mapping2,srmc->tgt_dma_buf);
+
+        //alloc mr
+        srmc->tgt_page_list_len = (((srmc->tgt_buf_sz-1) & PAGE_MASK)+PAGE_SIZE)>>PAGE_SHIFT;
+        srmc->tgt_mr = ib_alloc_mr(pd,IB_MR_TYPE_MEM_REG,srmc->tgt_page_list_len);
+        if(IS_ERR(srmc->tgt_mr)){
+            pr_err("Failed to allocate mr\n");
+            goto err;
+        }
+    }
+
+    return 0;
+err:
+    //TODO:error handling,free resources
+    return -1;
+}  
+
+
+//reg rkey and mr. for ini qp.
+int mlx5_sched_reg_mr(struct ib_mr *mr,struct mlx5_ib_qp *qp,char *dma_buf,size_t buf_sz,int page_list_len){
+    struct ib_reg_wr reg_wr = {0};
+    struct ib_send_wr *bad_wr;
+    int ret;
+    struct scatterlist sg = {0};
+    if(!mr || !qp){
+        pr_err("Unexpected:mr or qp is NULL\n");
+        return -1;
+    }
+    reg_wr.wr.opcode = IB_WR_REG_MR;
+    reg_wr.mr = mr;
+    reg_wr.access = IB_ACCESS_LOCAL_WRITE | IB_ACCESS_REMOTE_WRITE;
+
+    sg_init_marker(&sg,1);
+
+    ib_update_fast_reg_key(mr,1);
+    reg_wr.key = mr->rkey;
+    
+    sg_dma_address(&sg) = dma_buf;
+    sg_dma_len(&sg) = buf_sz;
+
+    ret = ib_map_mr_sg(mr,&sg,1,NULL,PAGE_SIZE);
+    BUG_ON(ret<=0 || ret > page_list_len);
+
+    ret = ib_post_send(&qp->ibqp,&reg_wr.wr,&bad_wr);
+    if(ret){
+        pr_err("Failed to post reg mr\n");
+    }
+    return ret;
 }
 
 //return 0 if success, return -1 if failed. return >0 for qpn.
@@ -627,15 +711,21 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
         //     return -1;
         // }
 
+        //alloc mr 
+        if(mlx5_sched_alloc_mr(srmc,pd,SRMC_CREATE_FLAG_INIT_QP)){
+            pr_err("mr alloc false");
+            return -1;
+        }
+
 
         create_attr.qp_type = IB_QPT_XRC_INI;
         create_attr.send_cq = cq;
 
 
-        // create_attr.qp_type = IB_QPT_RC;
-        // create_attr.recv_cq = cq;//RC
-        // create_attr.cap.max_recv_wr = 1;
-        // create_attr.cap.max_recv_sge = 1;//RC
+        create_attr.qp_type = IB_QPT_RC;
+        create_attr.recv_cq = cq;//RC
+        create_attr.cap.max_recv_wr = 1;
+        create_attr.cap.max_recv_sge = 1;//RC
 
         create_attr.cap.max_send_wr = sq_depth;
         create_attr.cap.max_send_sge = 1;
@@ -688,6 +778,7 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
 
         srmc->init_qp = to_mqp(qp);
         srmc->init_cq = to_mcq(cq);
+        pr_info("srmc->init_qp is OK\n");
     }else{
         if(srmc->tgt_qp){
             pr_err("Unexpected:tgt qp exists\n");
@@ -700,6 +791,10 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
         //     return -1;
         // }
 
+        if(mlx5_sched_alloc_mr(srmc,pd,SRMC_CREATE_FLAG_TGT_QP)){
+            pr_err("mr alloc false");
+            return -1;
+        }
 
         //为了统一modify操作赋值remote qp info
         remote_qp_info.qpn = qpn;
@@ -710,13 +805,10 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
         create_attr.qp_type = IB_QPT_XRC_TGT;
         create_attr.xrcd = xrcd;
     
-        // create_attr.send_cq = cq;
-        // create_attr.qp_type = IB_QPT_RC;
-        // create_attr.cap.max_send_sge = 1;
-        // create_attr.cap.max_send_wr = sq_depth;//RC
-        // create_attr.cap.max_rdma_ctxs = 1;
-        // create_attr.comp_mask = IBV_QP_INIT_ATTR_PD;
-        // create_attr.pd = pd;
+        create_attr.send_cq = cq;
+        create_attr.qp_type = IB_QPT_RC;
+        create_attr.cap.max_send_sge = 1;
+        create_attr.cap.max_send_wr = sq_depth;//RC
     
         create_attr.recv_cq = cq;
         create_attr.cap.max_recv_wr = rq_depth;  
@@ -772,11 +864,11 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
     int rtr_flags = IB_QP_STATE | IB_QP_AV | IB_QP_PATH_MTU | IB_QP_DEST_QPN |
                     IB_QP_RQ_PSN;
 
-    if(flags == SRMC_CREATE_FLAG_TGT_QP){
+    //if(flags == SRMC_CREATE_FLAG_TGT_QP){
         conn_attr.max_dest_rd_atomic = max_rd_atomic;
         conn_attr.min_rnr_timer = 12;
         rtr_flags |= IB_QP_MAX_DEST_RD_ATOMIC | IB_QP_MIN_RNR_TIMER;
-    }
+    //}
 
     if (ib_modify_qp(qp, &conn_attr, rtr_flags)) {
         pr_err("Failed to modify QP to RTR\n");
@@ -789,7 +881,7 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
 
     int rts_flags = IB_QP_STATE | IB_QP_SQ_PSN;
 
-    conn_attr.timeout = 60;
+    conn_attr.timeout = 18;
     conn_attr.retry_cnt = 30;//增大重试时间
     conn_attr.rnr_retry = 30;
     conn_attr.max_rd_atomic = max_rd_atomic;
@@ -802,6 +894,21 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
         pr_err("Failed to modify QP to RTS\n");
         return -1;
     }
+
+    //reg mr
+    if(flags == SRMC_CREATE_FLAG_INIT_QP){
+        if(mlx5_sched_reg_mr(srmc->ini_mr,srmc->init_qp,srmc->ini_dma_buf,srmc->ini_buf_sz,srmc->ini_page_list_len)){
+            pr_err("reg mr false\n");
+            return -1;
+        }
+    }else{
+       
+        if(mlx5_sched_reg_mr(srmc->tgt_mr,srmc->tgt_qp,srmc->tgt_dma_buf,srmc->tgt_buf_sz,srmc->tgt_page_list_len)){
+            pr_err("reg mr false\n");
+            return -1;
+        }
+    }
+
     pr_info("Successfully created SRMC\n");
     if(flags == SRMC_CREATE_FLAG_INIT_QP)
         return 0;

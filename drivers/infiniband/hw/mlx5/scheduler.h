@@ -29,10 +29,21 @@ struct mlx5_ib_srmc{
     int ah_id;
     struct mlx5_ib_qp *init_qp;
     struct mlx5_ib_cq *init_cq;//TODO:get init_cq
+
+    int ini_page_list_len;
+    DEFINE_DMA_UNMAP_ADDR(dma_mapping);
     struct ib_mr *ini_mr;
+    char* ini_buf;
+    char* ini_dma_buf;
+    int ini_buf_sz;
     int sig_cnt;
     struct mlx5_ib_qp *tgt_qp;
+    int tgt_page_list_len;
+    DEFINE_DMA_UNMAP_ADDR(dma_mapping2);
     struct ib_mr *tgt_mr;
+    char* tgt_buf;
+    char* tgt_dma_buf;
+    int tgt_buf_sz;
     struct mlx5_ib_srmc* next;//not loop
 };
 struct mlx5_ib_sched{
