@@ -244,12 +244,12 @@ int scheduler_polling(void* data)
             mutex_lock(&sched->srmc_lock);
             for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
                 if(memcmp(srmc->dgid.raw,ibv_wr->qp_type.srm.remote_gid.raw,sizeof(srmc->dgid.raw))==0){
-                    pr_info("max_gs:%d\n,max_post:%d,fbc:%u\n",srmc->init_qp->sq.max_gs,srmc->init_qp->sq.max_post,srmc->init_qp->sq.fbc);
-                    if(ret = ib_post_send(&srmc->init_qp->ibqp,&rdma_wr.wr,&bad_wr)){
+                    pr_info("max_gs:%d\n,max_post:%d,fbc:%u\n",srmc->ini_cb.qp->sq.max_gs,srmc->ini_cb.qp->sq.max_post,srmc->ini_cb.qp->sq.fbc);
+                    if(ret = ib_post_send(&srmc->ini_cb.qp->ibqp,&rdma_wr.wr,&bad_wr)){
                         pr_err("post send error:%d\n",ret);
                     }
                     pr_info("send finished\n");
-                    srmc->sig_cnt+=(rdma_wr.wr.send_flags & IB_SEND_SIGNALED) ? 1 : 0;
+                    srmc->ini_cb.sig_cnt+=(rdma_wr.wr.send_flags & IB_SEND_SIGNALED) ? 1 : 0;
                     break;
                 }
             }
@@ -263,11 +263,11 @@ int scheduler_polling(void* data)
         // //TODO:poll xrc cq and distribute them
         mutex_lock(&sched->srmc_lock);
         for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
-            if(srmc->sig_cnt){
+            if(srmc->ini_cb.sig_cnt){
                 memset(&wc,1,sizeof wc);
                 int cqe_num=0;
                 while(!cqe_num){
-                    cqe_num=ib_poll_cq(srmc->init_qp->ibqp.send_cq,1,&wc);
+                    cqe_num=ib_poll_cq(srmc->ini_cb.qp->ibqp.send_cq,1,&wc);
                     // cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->init_qp->ibqp.send_cq,1,&wc,&cqe);
                 }
                 pr_warn("cqe_num:%d,wc status:%d\n",cqe_num,wc.status);
@@ -275,11 +275,11 @@ int scheduler_polling(void* data)
                 // pr_warn("ret: %d, wc status:%d",ret,wc.status);
                 // if(!ret)
                 //     continue;
-                srmc->sig_cnt--;
+                srmc->ini_cb.sig_cnt--;
                 if(wc.status!=IB_WC_SUCCESS){
                     continue;
                 }
-                cqe64 =(to_mcq(srmc->init_qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
+                cqe64 =(to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
                 //Two attr to change
                 
 
@@ -306,7 +306,7 @@ int scheduler_polling(void* data)
                         ucqe = cqb->buf + cqb->cur_put * cqb->cqe_sz;
                         ucqe64 = (cqb->cqe_sz == 64) ? ucqe : ucqe + 64;
                         memcpy(ucqe,cqe,cqb->cqe_sz);
-                        ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn)-srmc->init_qp->ibqp.qp_num + qpn);
+                        ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn)-srmc->ini_cb.qp->ibqp.qp_num + qpn);
                         ucqe64->wqe_counter =  htonl(wc.wr_id & 0xffffffff);
                         cqb->cur_put ++ ;
                         if(cqb->cur_put* cqb->cqe_sz >= cqb->cq_size){
@@ -327,56 +327,56 @@ int scheduler_polling(void* data)
 	return 0;
 }
 
-//create srmc, and copy the qp struct to it.
-int mlx5_ib_create_srmc(struct mlx5_ib_sched *sched,struct mlx5_ib_qp *init_qp,struct mlx5_ib_qp *tgt_qp,union ib_gid *dgid)
-{
-    pr_info("in mlx5_ib_create_srmc,gid.in_id = %llu, gid.subnet = %llu\n",dgid->global.interface_id,dgid->global.subnet_prefix);
-    struct mlx5_ib_srmc *srmc;
-    int ret;
-    int find;
-    find = 0;
-    if(init_qp == NULL && tgt_qp == NULL){
-        pr_err("Unexpected:Both qp are NULL\n");
-        return -1;
-    }
-    mutex_lock(&sched->srmc_lock);
-    for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
-        if(memcmp(srmc->dgid.raw,dgid->raw,sizeof(srmc->dgid.raw))==0){
-            find = 1;
-            break;
-        }
-    }
-    if(!find){
-        pr_err("Unexpected:No srmc found in creating srmc function\n");
-        mutex_unlock(&sched->srmc_lock);
-        return -1;
-    }
+// //create srmc, and copy the qp struct to it.
+// int mlx5_ib_create_srmc(struct mlx5_ib_sched *sched,struct mlx5_ib_qp *init_qp,struct mlx5_ib_qp *tgt_qp,union ib_gid *dgid)
+// {
+//     pr_info("in mlx5_ib_create_srmc,gid.in_id = %llu, gid.subnet = %llu\n",dgid->global.interface_id,dgid->global.subnet_prefix);
+//     struct mlx5_ib_srmc *srmc;
+//     int ret;
+//     int find;
+//     find = 0;
+//     if(init_qp == NULL && tgt_qp == NULL){
+//         pr_err("Unexpected:Both qp are NULL\n");
+//         return -1;
+//     }
+//     mutex_lock(&sched->srmc_lock);
+//     for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
+//         if(memcmp(srmc->dgid.raw,dgid->raw,sizeof(srmc->dgid.raw))==0){
+//             find = 1;
+//             break;
+//         }
+//     }
+//     if(!find){
+//         pr_err("Unexpected:No srmc found in creating srmc function\n");
+//         mutex_unlock(&sched->srmc_lock);
+//         return -1;
+//     }
 
-    if(init_qp){
-        //TODO:create init qp
-        if(srmc->init_qp == NULL){
-            srmc->init_qp = init_qp;
-        }else{
-            pr_err("Unexpected:Init qp already exists\n");
-            goto err;
-        }
-    }
-    if(tgt_qp){
-        //TODO:create tgt qp
-        if(srmc->tgt_qp == NULL){
-            srmc->tgt_qp = tgt_qp;
-        }else{  
-            pr_err("Unexpected:Tgt qp already exists\n");
-            goto err;
-        }
-    }
-    mutex_unlock(&sched->srmc_lock);
-	return 0;
+//     if(init_qp){
+//         //TODO:create init qp
+//         if(srmc->init_qp == NULL){
+//             srmc->init_qp = init_qp;
+//         }else{
+//             pr_err("Unexpected:Init qp already exists\n");
+//             goto err;
+//         }
+//     }
+//     if(tgt_qp){
+//         //TODO:create tgt qp
+//         if(srmc->tgt_qp == NULL){
+//             srmc->tgt_qp = tgt_qp;
+//         }else{  
+//             pr_err("Unexpected:Tgt qp already exists\n");
+//             goto err;
+//         }
+//     }
+//     mutex_unlock(&sched->srmc_lock);
+// 	return 0;
 
-err:
-    mutex_unlock(&sched->srmc_lock);
-    return -1;
-}
+// err:
+//     mutex_unlock(&sched->srmc_lock);
+//     return -1;
+// }
 
 int mlx5_ib_sched_init(struct mlx5_ib_sched* sched)
 {
@@ -461,19 +461,19 @@ int is_xrc_exists(struct mlx5_ib_sched* sched,struct ib_pd *pd,union ib_gid *dgi
     for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
         if(memcmp(srmc->dgid.raw,dgid->raw,sizeof(srmc->dgid.raw))==0){
             if(flags == SRMC_CREATE_FLAG_INIT_QP){
-                if(srmc->ini_refcnt == 0){
-                    srmc->ini_refcnt = 1;
+                if(srmc->ini_cb.refcnt == 0){
+                    srmc->ini_cb.refcnt = 1;
                     ret = 1;
                 }else{
-                    srmc->ini_refcnt++;
+                    srmc->ini_cb.refcnt++;
                     ret = 0;
                 }
             }else if(flags == SRMC_CREATE_FLAG_TGT_QP){
                 if(srmc->tgt_refcnt == 0){
-                    srmc->tgt_refcnt = 1;
+                    srmc->tgt_cb.refcnt = 1;
                     ret = 1;
                 }else{
-                    srmc->tgt_refcnt++;
+                    srmc->tgt_cb.refcnt++;
                     ret = 0;
                 }
             }
@@ -491,9 +491,9 @@ int is_xrc_exists(struct mlx5_ib_sched* sched,struct ib_pd *pd,union ib_gid *dgi
         }
         memcpy(srmc->dgid.raw,dgid->raw,sizeof(srmc->dgid.raw));
         if(flags == SRMC_CREATE_FLAG_INIT_QP){
-            srmc->ini_refcnt = 1;
+            srmc->ini_cb.refcnt = 1;
          }else{
-            srmc->tgt_refcnt = 1;
+            srmc->tgt_cb.refcnt = 1;
          }
     }
     // if(ret&&flags == SRMC_CREATE_FLAG_INIT_QP){
@@ -584,49 +584,26 @@ static void print_pd_info(struct ib_pd *pd)
 }
 
 //alloc dma buf and alloc mr, for ini qp
-int mlx5_sched_alloc_mr(struct mlx5_ib_srmc *srmc,struct ib_pd *pd,int flags){
-    if(flags == SRMC_CREATE_FLAG_INIT_QP){
-        srmc->ini_buf_sz = 100;
-        srmc->ini_buf = kzalloc(srmc->ini_buf_sz,GFP_KERNEL);
-        if(srmc->ini_buf)
-            srmc->ini_dma_buf = ib_dma_map_single(pd->device,srmc->ini_buf,srmc->ini_buf_sz,DMA_BIDIRECTIONAL);
-        if(!srmc->ini_buf || ib_dma_mapping_error(pd->device,srmc->ini_dma_buf)){
-            pr_err("Failed to allocate dma buffer\n");
-            kfree(srmc->ini_buf);
-            return -1;
-        }
-        
-        dma_unmap_addr_set(srmc,dma_mapping,srmc->ini_dma_buf);
-
-        //alloc mr
-        srmc->ini_page_list_len = (((srmc->ini_buf_sz-1) & PAGE_MASK)+PAGE_SIZE)>>PAGE_SHIFT;
-        srmc->ini_mr = ib_alloc_mr(pd,IB_MR_TYPE_MEM_REG,srmc->ini_page_list_len);
-        if(IS_ERR(srmc->ini_mr)){
-            pr_err("Failed to allocate mr\n");
-            goto err;
-        }
-    }else{
-        srmc->tgt_buf_sz = 100;
-        srmc->tgt_buf = kzalloc(srmc->tgt_buf_sz,GFP_KERNEL);
-        if(srmc->tgt_buf)
-            srmc->tgt_dma_buf = ib_dma_map_single(pd->device,srmc->tgt_buf,srmc->tgt_buf_sz,DMA_BIDIRECTIONAL);
-        if(!srmc->tgt_buf || ib_dma_mapping_error(pd->device,srmc->tgt_dma_buf)){
-            pr_err("Failed to allocate dma buffer\n");
-            kfree(srmc->tgt_buf);
-            return -1;
-        }
-        
-        dma_unmap_addr_set(srmc,dma_mapping2,srmc->tgt_dma_buf);
-
-        //alloc mr
-        srmc->tgt_page_list_len = (((srmc->tgt_buf_sz-1) & PAGE_MASK)+PAGE_SIZE)>>PAGE_SHIFT;
-        srmc->tgt_mr = ib_alloc_mr(pd,IB_MR_TYPE_MEM_REG,srmc->tgt_page_list_len);
-        if(IS_ERR(srmc->tgt_mr)){
-            pr_err("Failed to allocate mr\n");
-            goto err;
-        }
+int mlx5_sched_alloc_mr(struct srm_cb *cb,struct ib_pd *pd){
+    cb->buf_sz = 100;
+    cb->buf = kzalloc(cb->buf_sz,GFP_KERNEL);
+    if(cb->buf)
+        cb->dma_buf = ib_dma_map_single(pd->device,cb->buf,cb->buf_sz,DMA_BIDIRECTIONAL);
+    if(!cb->buf || ib_dma_mapping_error(pd->device,cb->dma_buf)){
+        pr_err("Failed to allocate dma buffer\n");
+        kfree(cb->buf);
+        return -1;
     }
+    
+    dma_unmap_addr_set(cb,dma_mapping,cb->dma_buf);
 
+    //alloc mr
+    cb->page_list_len = (((cb->buf_sz-1) & PAGE_MASK)+PAGE_SIZE)>>PAGE_SHIFT;
+    cb->mr = ib_alloc_mr(pd,IB_MR_TYPE_MEM_REG,cb->page_list_len);
+    if(IS_ERR(cb->mr)){
+        pr_err("Failed to allocate mr\n");
+        goto err;
+    }
     return 0;
 err:
     //TODO:error handling,free resources
@@ -700,7 +677,7 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
         return -1;
     }
     if(flags == SRMC_CREATE_FLAG_INIT_QP){
-        if(srmc->init_qp){
+        if(srmc->ini_cb.qp){
             pr_err("Unexpected:init qp exists\n");
             return -1;
         }
@@ -712,7 +689,7 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
         // }
 
         //alloc mr 
-        if(mlx5_sched_alloc_mr(srmc,pd,SRMC_CREATE_FLAG_INIT_QP)){
+        if(mlx5_sched_alloc_mr(srmc->ini_cb,pd)){
             pr_err("mr alloc false");
             return -1;
         }
@@ -776,11 +753,11 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
         }
         mutex_lock(&sched->srmc_lock);
 
-        srmc->init_qp = to_mqp(qp);
-        srmc->init_cq = to_mcq(cq);
+        srmc->ini_cb.qp = to_mqp(qp);
+        srmc->ini_cb.cq = to_mcq(cq);
         pr_info("srmc->init_qp is OK\n");
     }else{
-        if(srmc->tgt_qp){
+        if(srmc->tgt_cb.qp){
             pr_err("Unexpected:tgt qp exists\n");
             return -1;
         }
@@ -791,7 +768,7 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
         //     return -1;
         // }
 
-        if(mlx5_sched_alloc_mr(srmc,pd,SRMC_CREATE_FLAG_TGT_QP)){
+        if(mlx5_sched_alloc_mr(srmc->tgt_cb,pd)){
             pr_err("mr alloc false");
             return -1;
         }
@@ -821,7 +798,7 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
             return -1;
         }
         pr_info("flags != SRMC_CREATE_FLAG_INIT_QP create qp_kernel\n");
-        srmc->tgt_qp = to_mqp(qp);
+        srmc->tgt_cb.qp = to_mqp(qp);
     }
     //modify qp
     memset(&conn_attr,0,sizeof conn_attr);
@@ -897,13 +874,13 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
 
     //reg mr
     if(flags == SRMC_CREATE_FLAG_INIT_QP){
-        if(mlx5_sched_reg_mr(srmc->ini_mr,srmc->init_qp,srmc->ini_dma_buf,srmc->ini_buf_sz,srmc->ini_page_list_len)){
+        if(mlx5_sched_reg_mr(srmc->ini_cb.mr,srmc->ini_cb.qp,srmc->ini_cb.dma_buf,srmc->ini_cb.buf_sz,srmc->ini_cb.page_list_len)){
             pr_err("reg mr false\n");
             return -1;
         }
     }else{
        
-        if(mlx5_sched_reg_mr(srmc->tgt_mr,srmc->tgt_qp,srmc->tgt_dma_buf,srmc->tgt_buf_sz,srmc->tgt_page_list_len)){
+        if(mlx5_sched_reg_mr(srmc->tgt_cb.mr,srmc->tgt_cb.qp,srmc->tgt_cb.dma_buf,srmc->tgt_cb.buf_sz,srmc->tgt_cb.page_list_len)){
             pr_err("reg mr false\n");
             return -1;
         }

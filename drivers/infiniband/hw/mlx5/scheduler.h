@@ -22,29 +22,24 @@ struct mlx5_ib_cqbuf{
     int cur_put;
     struct mlx5_ib_cqbuf* next;//not loop
 };
-struct mlx5_ib_srmc{
-    int ini_refcnt;
-    int tgt_refcnt;
-    union ib_gid	dgid;
-    int ah_id;
-    struct mlx5_ib_qp *init_qp;
-    struct mlx5_ib_cq *init_cq;//TODO:get init_cq
-
-    int ini_page_list_len;
-    DEFINE_DMA_UNMAP_ADDR(dma_mapping);
-    struct ib_mr *ini_mr;
-    char* ini_buf;
-    char* ini_dma_buf;
-    int ini_buf_sz;
+struct srm_cb{
+    int refcnt;
+    struct mlx5_ib_qp *qp;
+    struct mlx5_ib_cq *cq;
+    
+    int page_list_len;
+    char* dma_buf;
+    DEFINED_DMA_UNMAP_ADDR(dma_mapping);
+    struct ib_mr *mr;
+    char* buf;
+    int buf_sz;
     int sig_cnt;
-    struct mlx5_ib_qp *tgt_qp;
-    int tgt_page_list_len;
-    DEFINE_DMA_UNMAP_ADDR(dma_mapping2);
-    struct ib_mr *tgt_mr;
-    char* tgt_buf;
-    char* tgt_dma_buf;
-    int tgt_buf_sz;
-    struct mlx5_ib_srmc* next;//not loop
+};
+struct mlx5_ib_srmc{
+   struct srm_cb ini_cb;
+   struct srm_cb tgt_cb;
+   union ib_gid dgid;
+   struct mlx5_ib_srmc* next;//not loop
 };
 struct mlx5_ib_sched{
     struct mutex sq_lock;
