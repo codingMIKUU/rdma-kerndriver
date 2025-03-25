@@ -55,7 +55,7 @@
 #include <rdma/uverbs_named_ioctl.h>
 
 MODULE_AUTHOR("Eli Cohen <eli@mellanox.com>");
-MODULE_DESCRIPTION("Mellanox 5th generation network adapters (ConnectX series) IB driversss");
+MODULE_DESCRIPTION("Mellanox 5th generation network adapters (ConnectX series) IB driverss");
 MODULE_LICENSE("Dual BSD/GPL");
 
 MODULE_ALIAS("auxiliary:mlx5_core.rdma");
@@ -93,6 +93,9 @@ static LIST_HEAD(mlx5_ib_dev_list);
 static DEFINE_MUTEX(mlx5_ib_multiport_mutex);
 
 struct mlx5_ib_sched sched;
+
+struct task_struct *server_task;
+struct srm_cb server_cb;
 
 struct mlx5_ib_dev *mlx5_ib_get_ibdev_from_mpi(struct mlx5_ib_multiport_info *mpi)
 {
@@ -5331,6 +5334,10 @@ static int __init mlx5_ib_init(void)
 	ret = mlx5_ib_sched_init(&sched);
 	if (ret)
 		goto sched_err;
+
+	//init server
+	server_task = kthread_run(mlx5_sched_run_server,&server_cb, "server thread");
+	
 	return 0;
 
 sched_err:
@@ -5355,6 +5362,18 @@ err_free_xlt_page:
 
 static void __exit mlx5_ib_cleanup(void)
 {
+	pr_info("mlx5_ib exit\n");
+	//exit scheduler
+	mlx5_ib_sched_exit(&sched);
+	//exit server
+	if(!IS_ERR(server_task)&&server_task->state!=TASK_DEAD)
+		kthread_stop(server_task);
+	else 
+		pr_info("server task PTR is err\n");
+
+	
+
+	
 	mlx5_data_direct_driver_unregister();
 	auxiliary_driver_unregister(&mlx5r_driver);
 	auxiliary_driver_unregister(&mlx5r_mp_driver);
@@ -5364,8 +5383,9 @@ static void __exit mlx5_ib_cleanup(void)
 	destroy_workqueue(mlx5_ib_sigerr_sqd_wq);
 	destroy_workqueue(mlx5_ib_event_wq);
 	free_page((unsigned long)xlt_emergency_page);
-	pr_info("mlx5_ib exit\n");
-	mlx5_ib_sched_exit(&sched);
+
+
+		
 }
 
 module_init(mlx5_ib_init);

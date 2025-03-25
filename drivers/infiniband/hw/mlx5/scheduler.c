@@ -15,10 +15,12 @@
 #include "qp.h"
 #include "wr.h"
 #include <linux/mlx5/device.h>
+#include <linux/err.h>
 #include "user_verbs.h"
 #include "conn.h"
+#include <linux/inet.h>
 
-
+#define IP_ADDR "192.168.1.5"
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched* sched,unsigned long virt_addr,size_t size,int qpn,int cqn){
     pr_info("in mlx5_ib_map_ubuf\n");
     pr_info("内核态virt_addr:%px\n",virt_addr);
@@ -244,6 +246,10 @@ int scheduler_polling(void* data)
             mutex_lock(&sched->srmc_lock);
             for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
                 if(memcmp(srmc->dgid.raw,ibv_wr->qp_type.srm.remote_gid.raw,sizeof(srmc->dgid.raw))==0){
+                    if(!srmc->ini_cb.qp){
+                        pr_err("Unexpected:ini qp for this srmc is NULL\n");
+                        break;
+                    }
                     pr_info("max_gs:%d\n,max_post:%d,fbc:%u\n",srmc->ini_cb.qp->sq.max_gs,srmc->ini_cb.qp->sq.max_post,srmc->ini_cb.qp->sq.fbc);
                     if(ret = ib_post_send(&srmc->ini_cb.qp->ibqp,&rdma_wr.wr,&bad_wr)){
                         pr_err("post send error:%d\n",ret);
@@ -415,6 +421,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched* sched)
     } else {
         pr_info("Scheduler task is not running\n");
     }
+
     //cleanup scheduler
     for(sqb=sched->sq_head;sqb;){
         vunmap(sqb->buf);
@@ -443,6 +450,14 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched* sched)
     //TODO:cleanup srmc
 	for(srmc = sched->srmc_head;srmc;){
         
+        
+        if(srmc->ini_cb.state == CONNECTED){
+            rdma_disconnect(srmc->ini_cb.cm_id);
+            ib_sched_free_buf(&srmc->ini_cb);
+            ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
+            ib_destroy_cq(srmc->ini_cb.cq);
+            rdma_destroy_id(srmc->ini_cb.cm_id);
+        }
         srmc = srmc->next;
         kfree(sched->srmc_head);
         sched->srmc_head = srmc;
@@ -469,7 +484,7 @@ int is_xrc_exists(struct mlx5_ib_sched* sched,struct ib_pd *pd,union ib_gid *dgi
                     ret = 0;
                 }
             }else if(flags == SRMC_CREATE_FLAG_TGT_QP){
-                if(srmc->tgt_refcnt == 0){
+                if(srmc->tgt_cb.refcnt == 0){
                     srmc->tgt_cb.refcnt = 1;
                     ret = 1;
                 }else{
@@ -497,10 +512,15 @@ int is_xrc_exists(struct mlx5_ib_sched* sched,struct ib_pd *pd,union ib_gid *dgi
          }
     }
     // if(ret&&flags == SRMC_CREATE_FLAG_INIT_QP){
+    // if(ret){
+    //     if((ret = mlx5_ib_create_srmc_qp(sched,srmc,pd,flags,qpn))<0){
+    //         pr_err("Failed to create srmc qp\n");
+    //     }
+    // }
+
     if(ret){
-        if((ret = mlx5_ib_create_srmc_qp(sched,srmc,pd,flags,qpn))<0){
-            pr_err("Failed to create srmc qp\n");
-        }
+        ret = create_srmc_qp_cm(&srmc->ini_cb,pd);
+        DEBUG_LOG("create_srmc_qp_cm ret:%d\n",ret);
     }
     mutex_unlock(&sched->srmc_lock);
     pr_info("out is_xrc_exists,ret:%d\n",ret);
@@ -522,41 +542,41 @@ int is_xrc_exists(struct mlx5_ib_sched* sched,struct ib_pd *pd,union ib_gid *dgi
 
 // }
 
-int mlx5_ib_destroy_srmc(struct mlx5_ib_sched* sched,int ah_id){
-    struct mlx5_ib_srmc *srmc,*tmp;
-    mutex_lock(&sched->srmc_lock);
-    if(sched->srmc_head==NULL){
-        goto err;
-    }
-    if(sched->srmc_head->ah_id == ah_id){
-        srmc = sched->srmc_head;
-        sched->srmc_head = srmc->next;
-    }else{
-        for(srmc=sched->srmc_head;srmc->next;srmc=srmc->next){
-            if(srmc->next->ah_id == ah_id){
-                break;
-            }
-        }
-        if(srmc->next==NULL)
-            goto err;
-        tmp = srmc->next;
-        srmc->next = tmp->next;
-        srmc = tmp;
-    }
-    //destroy qp
-    if(srmc->init_qp)
-        ib_destroy_qp_user(&srmc->init_qp->ibqp,NULL);
-    if(srmc->tgt_qp)
-        ib_destroy_qp_user(&srmc->tgt_qp->ibqp,NULL);
+// int mlx5_ib_destroy_srmc(struct mlx5_ib_sched* sched,int ah_id){
+//     struct mlx5_ib_srmc *srmc,*tmp;
+//     mutex_lock(&sched->srmc_lock);
+//     if(sched->srmc_head==NULL){
+//         goto err;
+//     }
+//     if(sched->srmc_head->ah_id == ah_id){
+//         srmc = sched->srmc_head;
+//         sched->srmc_head = srmc->next;
+//     }else{
+//         for(srmc=sched->srmc_head;srmc->next;srmc=srmc->next){
+//             if(srmc->next->ah_id == ah_id){
+//                 break;
+//             }
+//         }
+//         if(srmc->next==NULL)
+//             goto err;
+//         tmp = srmc->next;
+//         srmc->next = tmp->next;
+//         srmc = tmp;
+//     }
+//     //destroy qp
+//     if(srmc->init_qp)
+//         ib_destroy_qp_user(&srmc->init_qp->ibqp,NULL);
+//     if(srmc->tgt_qp)
+//         ib_destroy_qp_user(&srmc->tgt_qp->ibqp,NULL);
 
-    kfree(srmc);
-    //success
-    mutex_unlock(&sched->srmc_lock);
-    return 0;
-err:
-    mutex_unlock(&sched->srmc_lock);
-    return -1;
-}
+//     kfree(srmc);
+//     //success
+//     mutex_unlock(&sched->srmc_lock);
+//     return 0;
+// err:
+//     mutex_unlock(&sched->srmc_lock);
+//     return -1;
+// }
 
 static void print_pd_info(struct ib_pd *pd)
 {
@@ -666,9 +686,6 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
     // struct ib_device *ibdev;
     print_pd_info(pd);
     
-
-
-
     cq_attr.cqe = cq_depth;
     cq_attr.comp_vector = 0;// CPU 0
     cq = ib_create_cq(pd->device,NULL,NULL,NULL,&cq_attr);
@@ -689,7 +706,7 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
         // }
 
         //alloc mr 
-        if(mlx5_sched_alloc_mr(srmc->ini_cb,pd)){
+        if(mlx5_sched_alloc_mr(&srmc->ini_cb,pd)){
             pr_err("mr alloc false");
             return -1;
         }
@@ -699,10 +716,10 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
         create_attr.send_cq = cq;
 
 
-        create_attr.qp_type = IB_QPT_RC;
-        create_attr.recv_cq = cq;//RC
-        create_attr.cap.max_recv_wr = 1;
-        create_attr.cap.max_recv_sge = 1;//RC
+        // create_attr.qp_type = IB_QPT_RC;
+        // create_attr.recv_cq = cq;//RC
+        // create_attr.cap.max_recv_wr = 1;
+        // create_attr.cap.max_recv_sge = 1;//RC
 
         create_attr.cap.max_send_wr = sq_depth;
         create_attr.cap.max_send_sge = 1;
@@ -768,7 +785,7 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
         //     return -1;
         // }
 
-        if(mlx5_sched_alloc_mr(srmc->tgt_cb,pd)){
+        if(mlx5_sched_alloc_mr(&srmc->tgt_cb,pd)){
             pr_err("mr alloc false");
             return -1;
         }
@@ -887,8 +904,465 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
     }
 
     pr_info("Successfully created SRMC\n");
-    if(flags == SRMC_CREATE_FLAG_INIT_QP)
-        return 0;
-    else 
-        return qp->qp_num;
+    return qp->qp_num;
+}
+
+static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
+									struct rdma_cm_event *event)
+{
+	int ret;
+	struct srm_cb *cb = cma_id->context;
+
+	DEBUG_LOG("cma_event type %d cma_id %p (%s)\n", event->event, cma_id,
+			  (cma_id == cb->cm_id) ? "parent" : "child");
+
+	switch (event->event)
+	{
+	case RDMA_CM_EVENT_ADDR_RESOLVED:
+		cb->state = ADDR_RESOLVED;
+		ret = rdma_resolve_route(cma_id, 2000);
+		if (ret)
+		{
+			printk(KERN_ERR "rdma_resolve_route error %d\n",
+				   ret);
+			wake_up_interruptible(&cb->sem);
+		}
+		break;
+
+	case RDMA_CM_EVENT_ROUTE_RESOLVED:
+		cb->state = ROUTE_RESOLVED;
+		wake_up_interruptible(&cb->sem);
+		break;
+
+	case RDMA_CM_EVENT_CONNECT_REQUEST:
+		cb->state = CONNECT_REQUEST;
+		cb->child_cm_id = cma_id;
+		DEBUG_LOG("child cma %p\n", cb->child_cm_id);
+		wake_up_interruptible(&cb->sem);
+		break;
+
+	case RDMA_CM_EVENT_ESTABLISHED:
+		DEBUG_LOG("ESTABLISHED\n");
+        cb->state = CONNECTED;
+		wake_up_interruptible(&cb->sem);
+		break;
+
+	case RDMA_CM_EVENT_ADDR_ERROR:
+	case RDMA_CM_EVENT_ROUTE_ERROR:
+	case RDMA_CM_EVENT_CONNECT_ERROR:
+	case RDMA_CM_EVENT_UNREACHABLE:
+	case RDMA_CM_EVENT_REJECTED:
+		printk(KERN_ERR "cma event %d, error %d,reject msg:%s\n", event->event,
+			   event->status,rdma_reject_msg(cma_id,event->status));
+		cb->state = ERROR;
+		wake_up_interruptible(&cb->sem);
+		break;
+
+	case RDMA_CM_EVENT_DISCONNECTED:
+		printk(KERN_ERR "DISCONNECT EVENT...\n");
+		cb->state = ERROR;
+		wake_up_interruptible(&cb->sem);
+		break;
+
+	case RDMA_CM_EVENT_DEVICE_REMOVAL:
+		printk(KERN_ERR "cma detected device removal!!!!\n");
+		cb->state = ERROR;
+		wake_up_interruptible(&cb->sem);
+		break;
+
+	default:
+		printk(KERN_ERR "oof bad type!\n");
+		wake_up_interruptible(&cb->sem);
+		break;
+	}
+	return 0;
+}
+
+static void fill_sockaddr(struct sockaddr_storage *sin, struct srm_cb *cb)
+{
+	memset(sin, 0, sizeof(*sin));
+
+
+    struct sockaddr_in *sin4 = (struct sockaddr_in *)sin;
+    sin4->sin_family = AF_INET;
+    memcpy((void *)&sin4->sin_addr.s_addr, cb->addr, 4);
+    sin4->sin_port = cb->port;
+	
+}
+static int reg_supported(struct ib_device *dev)
+{
+	u64 needed_flags = IB_DEVICE_MEM_MGT_EXTENSIONS;
+
+	if ((dev->attrs.device_cap_flags & needed_flags) != needed_flags)
+	{
+		printk(KERN_ERR
+			   "Fastreg not supported - device_cap_flags 0x%llx\n",
+			   (unsigned long long)dev->attrs.device_cap_flags);
+		return 0;
+	}
+	DEBUG_LOG("Fastreg supported - device_cap_flags 0x%llx\n",
+			  (unsigned long long)dev->attrs.device_cap_flags);
+	return 1;
+}
+
+static int srm_bind_client(struct srm_cb *cb)
+{
+	struct sockaddr_storage sin;
+	int ret;
+
+	fill_sockaddr(&sin, cb);
+
+	ret = rdma_resolve_addr(cb->cm_id, NULL, (struct sockaddr *)&sin, 2000);
+	if (ret)
+	{
+		printk(KERN_ERR "rdma_resolve_addr error %d\n", ret);
+		return ret;
+	}
+
+	wait_event_interruptible(cb->sem, cb->state >= ROUTE_RESOLVED);
+	if (cb->state != ROUTE_RESOLVED)
+	{
+		printk(KERN_ERR
+			   "addr/route resolution did not resolve: state %d\n",
+			   cb->state);
+		return -EINTR;
+	}
+
+	if (!reg_supported(cb->cm_id->device))
+		return -EINVAL;
+
+	DEBUG_LOG("rdma_resolve_addr - rdma_resolve_route successful\n");
+	return 0;
+}
+
+static int srm_connect_client(struct srm_cb *cb)
+{
+	struct rdma_conn_param conn_param;
+	int ret;
+
+	memset(&conn_param, 0, sizeof conn_param);
+	conn_param.responder_resources = 1;
+	conn_param.initiator_depth = 1;
+	conn_param.retry_count = 10;
+
+	ret = rdma_connect(cb->cm_id, &conn_param);
+	if (ret)
+	{
+		printk(KERN_ERR  "rdma_connect error %d\n", ret);
+		return ret;
+	}
+
+	wait_event_interruptible(cb->sem, cb->state >= CONNECTED);
+	if (cb->state == ERROR)
+	{
+		printk(KERN_ERR "wait for CONNECTED state %d\n", cb->state);
+		return -1;
+	}
+
+	DEBUG_LOG("rdma_connect successful\n");
+	return 0;
+}
+
+int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
+    int ret ;
+    struct ib_cq_init_attr cq_attr;
+    struct ib_qp_init_attr init_attr;
+
+    cb->addr_str = IP_ADDR;
+    cb->port = 10086;
+    if(!(ret = in4_pton(cb->addr_str, -1, cb->addr, -1, NULL))){
+        printk(KERN_ERR "in4_pton error %d\n",ret);
+        ret = -1;
+        goto out;
+    }
+    cb->server = 0 ;
+    init_waitqueue_head(&cb->sem);
+    cb->txdepth = 256;
+    cb->pd = pd;
+
+    cb->cm_id = rdma_create_id(&init_net,srm_cma_event_handler,cb,RDMA_PS_TCP,IB_QPT_XRC_INI);
+    if (IS_ERR(cb->cm_id))
+	{
+		ret = PTR_ERR(cb->cm_id);
+		printk(KERN_ERR "rdma_create_id error %d\n", ret);
+		goto out;
+	}
+    DEBUG_LOG("created cm_id %p\n", cb->cm_id);
+    ret = srm_bind_client(cb);
+    if(ret){
+        printk(KERN_ERR "bind client failed\n");
+        goto err0;
+    }
+
+    //create cq
+    memset(&cq_attr,0,sizeof cq_attr);
+    cq_attr.cqe = cb->txdepth;
+    cq_attr.comp_vector = 0;
+    //change to event?
+    cb->cq = ib_create_cq(cb->cm_id->device,NULL,NULL,NULL,&cq_attr);
+    if(IS_ERR(cb->cq)){
+        printk(KERN_ERR "ib_create_cq failed,cq:%s\n",PTR_ERR(cb->cq));
+        ret = PTR_ERR(cb->cq);
+        goto err0;
+    }
+
+    //create qp
+	memset(&init_attr, 0, sizeof(init_attr));
+	init_attr.cap.max_send_wr = cb->txdepth;
+	// init_attr.cap.max_recv_wr = 2;
+
+	/* For flush_qp() */
+	init_attr.cap.max_send_wr++;
+	// init_attr.cap.max_recv_wr++;
+
+	// init_attr.cap.max_recv_sge = 1;
+	init_attr.cap.max_send_sge = 1;
+	init_attr.qp_type = IB_QPT_XRC_INI;
+	init_attr.send_cq = cb->cq;
+	// init_attr.recv_cq = cb->cq;
+	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
+    ret = rdma_create_qp(cb->cm_id,pd,&init_attr);
+    if(!ret)
+        cb->qp = to_mqp(cb->cm_id->qp);
+    else{
+        pr_err("rdma_create_qp failed,error:%d\n",ret);
+        goto err1;
+    }
+    DEBUG_LOG("created qp %p\n", cb->qp);
+        
+    //alloc mr and buf
+    ret = mlx5_sched_alloc_mr(cb,pd);
+    if(ret){
+        pr_err("alloc mr failed,error:%d\n",ret);
+        goto err2;
+    }
+    //modify qp etc
+    ret = srm_connect_client(cb);
+    if(ret){
+        pr_err("connect client failed,error:%d\n",ret);
+        goto err3;
+    }
+
+    //reg mr and bind buf
+    ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
+    if(ret){
+        pr_err("reg mr failed,error:%d\n",ret);
+        goto err4;
+    }
+    return ret; 
+err4:
+    rdma_disconnect(cb->cm_id);
+err3:
+    //TODO:free buf and mr resources.
+    ib_sched_free_buf(cb);
+err2:
+    ib_destroy_qp(&cb->qp->ibqp);
+err1:
+    ib_destroy_cq(cb->cq);
+err0:
+    rdma_destroy_id(cb->cm_id);
+out:
+    return ret?0:cb->qp->ibqp.qp_num;
+}
+
+int srm_bind_server(struct srm_cb *cb){
+    struct sockaddr_storage sin;
+	int ret;
+
+	fill_sockaddr(&sin, cb);
+
+	ret = rdma_bind_addr(cb->cm_id, (struct sockaddr *)&sin);
+	if (ret)
+	{
+		printk(KERN_ERR  "rdma_bind_addr error %d\n", ret);
+		return ret;
+	}
+	DEBUG_LOG("rdma_bind_addr successful\n");
+
+	DEBUG_LOG("rdma_listen\n");
+	ret = rdma_listen(cb->cm_id, 3);
+	if (ret)
+	{
+		printk(KERN_ERR "rdma_listen failed: %d\n", ret);
+		return ret;
+	}
+
+    while (true) {
+        wait_event_interruptible_timeout(cb->sem, cb->state >= CONNECT_REQUEST || kthread_should_stop(), msecs_to_jiffies(1000));
+        if (kthread_should_stop()) {
+            return -1;
+        }
+        if (cb->state == CONNECT_REQUEST) {
+            break;
+        }
+        if(cb->state >CONNECT_REQUEST)
+            return -1;
+    }
+    DEBUG_LOG("cb state is %d,cb child_cm_id is %p\n",cb->state,cb->child_cm_id);
+	if (!reg_supported(cb->child_cm_id->device))
+		return -EINVAL;
+
+	return 0;
+}
+static int srm_accept(struct srm_cb *cb)
+{
+	struct rdma_conn_param conn_param;
+	int ret;
+
+	DEBUG_LOG("accepting client connection request\n");
+
+	memset(&conn_param, 0, sizeof conn_param);
+	conn_param.responder_resources = 1;
+	conn_param.initiator_depth = 1;
+
+	ret = rdma_accept(cb->child_cm_id, &conn_param);
+	if (ret)
+	{
+		printk(KERN_ERR "rdma_accept error: %d\n", ret);
+		return ret;
+	}
+
+    wait_event_interruptible(cb->sem, cb->state >= CONNECTED);
+    if (cb->state == ERROR)
+    {
+        printk(KERN_ERR "wait for CONNECTED state %d\n",
+                cb->state);
+        return -1;
+    }
+	return 0;
+}
+int mlx5_sched_run_server(struct srm_cb *cb){
+    pr_info("srm server is running\n");
+    int ret;
+    struct ib_cq_init_attr cq_attr;
+    struct ib_qp_init_attr init_attr;
+    struct ib_pd *pd;
+
+    cb->addr_str = IP_ADDR;
+    cb->port = 10086;
+    if(!(ret = in4_pton(cb->addr_str, -1, cb->addr, -1, NULL))){
+        printk(KERN_ERR "in4_pton error %d\n",ret);
+        ret = -1;
+        goto out;
+    }
+    cb->server = 1;
+    init_waitqueue_head(&cb->sem);
+    cb->txdepth = 256;
+
+    cb->cm_id = rdma_create_id(&init_net, srm_cma_event_handler, cb, RDMA_PS_TCP, IB_QPT_XRC_TGT);
+	if (IS_ERR(cb->cm_id))
+	{
+		ret = PTR_ERR(cb->cm_id);
+		printk(KERN_ERR "rdma_create_id error %d\n", ret);
+		goto out;
+	}
+	DEBUG_LOG("created cm_id %p\n", cb->cm_id);
+
+    ret = srm_bind_server(cb);
+    if(ret){
+        printk(KERN_ERR "bind server failed\n");
+        goto err0;
+    }
+    DEBUG_LOG("bind server\n");
+
+    //create pd
+    pd = ib_alloc_pd(cb->child_cm_id->device,0);
+    if(IS_ERR(pd)){
+        printk(KERN_ERR "alloc pd failed\n");
+        goto err0;
+    }
+    DEBUG_LOG("alloc pd\n");
+    cb->pd = pd;
+
+    //create cq
+    memset(&cq_attr,0,sizeof cq_attr);
+    cq_attr.cqe = cb->txdepth;
+    cq_attr.comp_vector = 0;
+    //change to event?
+    cb->cq = ib_create_cq(cb->child_cm_id->device,NULL,NULL,NULL,&cq_attr);
+    if(IS_ERR(cb->cq)){
+        printk(KERN_ERR "ib_create_cq failed\n");
+		ret = PTR_ERR(cb->cq);
+        goto err1;
+    }
+    DEBUG_LOG("created cq %p\n", cb->cq);
+
+    //create qp
+	memset(&init_attr, 0, sizeof(init_attr));
+	// init_attr.cap.max_send_wr = cb->txdepth;
+	init_attr.cap.max_recv_wr = cb->txdepth;
+
+	/* For flush_qp() */
+	// init_attr.cap.max_send_wr++;
+	init_attr.cap.max_recv_wr++;
+
+	init_attr.cap.max_recv_sge = 1;
+	// init_attr.cap.max_send_sge = 1;
+	// init_attr.qp_type = IB_QPT_RC;
+	// init_attr.send_cq = cb->cq;
+	init_attr.recv_cq = cb->cq;
+	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
+
+
+    init_attr.qp_type = IB_QPT_XRC_TGT;
+    init_attr.xrcd = NULL;//TODO:add xrcd
+
+    ret = rdma_create_qp(cb->child_cm_id,pd,&init_attr);
+    if(!ret)
+        cb->qp = to_mqp(cb->child_cm_id->qp);
+    else{
+        pr_err("rdma_create_qp failed\n");
+        goto err2;
+    }
+    DEBUG_LOG("created qp %p\n", cb->qp);
+        
+    //alloc mr and buf
+    ret = mlx5_sched_alloc_mr(cb,pd);
+    if(ret){
+        pr_err("alloc mr failed\n");
+        goto err3;
+    }
+    ret = srm_accept(cb);
+    if(ret){
+        pr_err("accept failed\n");
+        goto err4;
+    }
+    DEBUG_LOG("accept\n");
+    //reg mr and bind buf
+    ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
+    if(ret){
+        pr_err("reg mr failed\n");
+        goto err5;
+    }
+    DEBUG_LOG("reg mr success\n");
+
+    while(!kthread_should_stop()){
+        //waiting
+        msleep(1000);
+    }
+    pr_info("srm server stop\n"); 
+err5:
+    rdma_disconnect(cb->child_cm_id);
+err4:
+    //TODO:release buf and mr.
+    ib_sched_free_buf(cb);
+err3:
+    ib_destroy_qp(&cb->qp->ibqp);
+err2:
+    ib_destroy_cq(cb->cq);
+err1:
+    ib_dealloc_pd(pd);
+err0:
+    rdma_destroy_id(cb->cm_id);
+    if(cb->child_cm_id)
+        rdma_destroy_id(cb->child_cm_id);
+out:
+    wait_event_interruptible(cb->sem, kthread_should_stop());
+    return ret;
+}
+
+void ib_sched_free_buf(struct srm_cb *cb){
+    ib_dereg_mr(cb->mr);
+    dma_unmap_single(cb->pd->device->dma_device, dma_unmap_addr(cb,dma_mapping), cb->buf_sz, DMA_BIDIRECTIONAL);
+    kfree(cb->buf);
 }

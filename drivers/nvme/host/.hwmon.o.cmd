@@ -1,13 +1,9 @@
-cmd_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/main.o := gcc -Wp,-MD,/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/.main.o.d  -nostdinc -isystem /usr/lib/gcc/x86_64-linux-gnu/9/include -D__OFED_BUILD__ -D__KERNEL__ -w  -include /lib/modules/5.4.0-86-generic/build/include/generated/autoconf.h -include /lib/modules/5.4.0-86-generic/build/include/linux/kconfig.h -include /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/compat-2.6.h  -include /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/debug/mtrack.h  -I/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include -I/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi -I/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/debug -D__XEN_INTERFACE_VERSION__= -I./arch/x86/include/mach-xen -I./arch/x86/include -Iarch/x86/include/generated -Iinclude -I./arch/x86/include/uapi -Iarch/x86/include/generated/uapi -I./include -I./include/uapi -Iinclude/generated/uapi  -I./arch/x86/include -Iarch/x86/include/generated  -include ./include/linux/compiler_types.h -D__KERNEL__ -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs -fno-strict-aliasing -fno-common -fshort-wchar -fno-PIE -Werror=implicit-function-declaration -Werror=implicit-int -Werror=return-type -Wno-format-security -std=gnu89 -mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx -fcf-protection=none -m64 -falign-jumps=1 -falign-loops=1 -mno-80387 -mno-fp-ret-in-387 -mpreferred-stack-boundary=3 -mskip-rax-setup -mtune=generic -mno-red-zone -mcmodel=kernel -DCONFIG_X86_X32_ABI -DCONFIG_AS_CFI=1 -DCONFIG_AS_CFI_SIGNAL_FRAME=1 -DCONFIG_AS_CFI_SECTIONS=1 -DCONFIG_AS_SSSE3=1 -DCONFIG_AS_AVX=1 -DCONFIG_AS_AVX2=1 -DCONFIG_AS_AVX512=1 -DCONFIG_AS_SHA1_NI=1 -DCONFIG_AS_SHA256_NI=1 -Wno-sign-compare -fno-asynchronous-unwind-tables -mindirect-branch=thunk-extern -mindirect-branch-register -fno-jump-tables -fno-delete-null-pointer-checks -Wno-frame-address -Wno-format-truncation -Wno-format-overflow -Wno-address-of-packed-member -O2 --param=allow-store-data-races=0 -Wframe-larger-than=1024 -fstack-protector-strong -Wimplicit-fallthrough -Wno-unused-but-set-variable -Wno-unused-const-variable -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-var-tracking-assignments -g -pg -mrecord-mcount -mfentry -DCC_USING_FENTRY -flive-patching=inline-clone -Wdeclaration-after-statement -Wvla -Wno-pointer-sign -Wno-stringop-truncation -Wno-array-bounds -Wno-stringop-overflow -Wno-restrict -Wno-maybe-uninitialized -fno-strict-overflow -fno-merge-all-constants -fmerge-constants -fno-stack-check -fconserve-stack -Werror=date-time -Werror=incompatible-pointer-types -Werror=designated-init -fmacro-prefix-map=./= -Wno-packed-not-aligned -Wno-date-time  -DMODULE  -DKBUILD_BASENAME='"main"' -DKBUILD_MODNAME='"mlx5_ib"' -c -o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/main.o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/main.c
+cmd_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/hwmon.o := gcc -Wp,-MD,/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/.hwmon.o.d  -nostdinc -isystem /usr/lib/gcc/x86_64-linux-gnu/9/include -D__OFED_BUILD__ -D__KERNEL__ -w  -include /lib/modules/5.5.5-050505-generic/build/include/generated/autoconf.h -include /lib/modules/5.5.5-050505-generic/build/include/linux/kconfig.h -include /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/compat-2.6.h  -include /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/debug/mtrack.h  -I/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include -I/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi -I/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/debug -D__XEN_INTERFACE_VERSION__= -I./arch/x86/include/mach-xen -I./arch/x86/include -Iarch/x86/include/generated -Iinclude -I./arch/x86/include/uapi -Iarch/x86/include/generated/uapi -I./include -I./include/uapi -Iinclude/generated/uapi  -I./arch/x86/include -Iarch/x86/include/generated  -include ./include/linux/compiler_types.h -D__KERNEL__ -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs -fno-strict-aliasing -fno-common -fshort-wchar -fno-PIE -Werror=implicit-function-declaration -Werror=implicit-int -Wno-format-security -std=gnu89 -mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx -m64 -falign-jumps=1 -falign-loops=1 -mno-80387 -mno-fp-ret-in-387 -mpreferred-stack-boundary=3 -mskip-rax-setup -mtune=generic -mno-red-zone -mcmodel=kernel -DCONFIG_X86_X32_ABI -DCONFIG_AS_CFI=1 -DCONFIG_AS_CFI_SIGNAL_FRAME=1 -DCONFIG_AS_CFI_SECTIONS=1 -DCONFIG_AS_SSSE3=1 -DCONFIG_AS_AVX=1 -DCONFIG_AS_AVX2=1 -DCONFIG_AS_AVX512=1 -DCONFIG_AS_SHA1_NI=1 -DCONFIG_AS_SHA256_NI=1 -Wno-sign-compare -fno-asynchronous-unwind-tables -mindirect-branch=thunk-extern -mindirect-branch-register -fno-jump-tables -fno-delete-null-pointer-checks -Wno-frame-address -Wno-format-truncation -Wno-format-overflow -Wno-address-of-packed-member -O2 --param=allow-store-data-races=0 -Wframe-larger-than=1024 -fstack-protector-strong -Wno-unused-but-set-variable -Wimplicit-fallthrough -Wno-unused-const-variable -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-var-tracking-assignments -g -pg -mrecord-mcount -mfentry -DCC_USING_FENTRY -flive-patching=inline-clone -Wdeclaration-after-statement -Wvla -Wno-pointer-sign -Wno-stringop-truncation -fno-strict-overflow -fno-merge-all-constants -fmerge-constants -fno-stack-check -fconserve-stack -Werror=date-time -Werror=incompatible-pointer-types -Werror=designated-init -fmacro-prefix-map=./= -fcf-protection=none -Wno-packed-not-aligned -Wno-date-time -I/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host -DCONFIG_NVFS  -DMODULE  -DKBUILD_BASENAME='"hwmon"' -DKBUILD_MODNAME='"nvme_core"' -c -o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/hwmon.o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/hwmon.c
 
-source_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/main.o := /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/main.c
+source_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/hwmon.o := /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/hwmon.c
 
-deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/main.o := \
-    $(wildcard include/config/gpu/direct/storage.h) \
-    $(wildcard include/config/infiniband/on/demand/paging.h) \
-    $(wildcard include/config/mlx5/core/ipoib.h) \
-    $(wildcard include/config/infiniband/user/access.h) \
-  /lib/modules/5.4.0-86-generic/build/include/linux/kconfig.h \
+deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/hwmon.o := \
+  /lib/modules/5.5.5-050505-generic/build/include/linux/kconfig.h \
     $(wildcard include/config/cpu/big/endian.h) \
     $(wildcard include/config/booger.h) \
     $(wildcard include/config/foo.h) \
@@ -30,7 +26,8 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   include/uapi/asm-generic/types.h \
   include/asm-generic/int-ll64.h \
   include/uapi/asm-generic/int-ll64.h \
-  include/asm/bitsperlong.h \
+  arch/x86/include/uapi/asm/bitsperlong.h \
+  include/asm-generic/bitsperlong.h \
   include/uapi/asm-generic/bitsperlong.h \
   include/uapi/linux/posix_types.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/stddef.h \
@@ -45,7 +42,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   include/linux/compiler_attributes.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/compiler-gcc.h \
   include/linux/compiler-gcc.h \
-    $(wildcard include/config/arm64.h) \
     $(wildcard include/config/retpoline.h) \
     $(wildcard include/config/arch/use/builtin/bswap.h) \
   arch/x86/include/asm/posix_types.h \
@@ -69,7 +65,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/debug/atomic/sleep.h) \
     $(wildcard include/config/mmu.h) \
     $(wildcard include/config/prove/locking.h) \
-    $(wildcard include/config/arch/has/refcount.h) \
     $(wildcard include/config/panic/timeout.h) \
     $(wildcard include/config/tracing.h) \
     $(wildcard include/config/ftrace/mcount/record.h) \
@@ -77,6 +72,7 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   include/linux/limits.h \
   include/uapi/linux/limits.h \
   include/linux/linkage.h \
+    $(wildcard include/config/x86.h) \
   include/linux/stringify.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/export.h \
   include/linux/export.h \
@@ -91,7 +87,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/trace/branch/profiling.h) \
     $(wildcard include/config/profile/all/branches.h) \
     $(wildcard include/config/stack/validation.h) \
-    $(wildcard include/config/debug/entry.h) \
     $(wildcard include/config/kasan.h) \
   arch/x86/include/asm/barrier.h \
   arch/x86/include/asm/alternative.h \
@@ -131,12 +126,14 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   arch/x86/include/asm/disabled-features.h \
     $(wildcard include/config/x86/intel/mpx.h) \
     $(wildcard include/config/x86/smap.h) \
-    $(wildcard include/config/x86/intel/umip.h) \
+    $(wildcard include/config/x86/umip.h) \
     $(wildcard include/config/x86/intel/memory/protection/keys.h) \
     $(wildcard include/config/x86/5level.h) \
     $(wildcard include/config/page/table/isolation.h) \
   include/asm-generic/bitops/const_hweight.h \
-  include/asm-generic/bitops-instrumented.h \
+  include/asm-generic/bitops/instrumented-atomic.h \
+  include/asm-generic/bitops/instrumented-non-atomic.h \
+  include/asm-generic/bitops/instrumented-lock.h \
   include/asm-generic/bitops/le.h \
   arch/x86/include/uapi/asm/byteorder.h \
   include/linux/byteorder/little_endian.h \
@@ -158,7 +155,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/early/printk.h) \
     $(wildcard include/config/printk/nmi.h) \
     $(wildcard include/config/printk.h) \
-    $(wildcard include/config/kmsg/ids.h) \
     $(wildcard include/config/dynamic/debug.h) \
   include/linux/init.h \
     $(wildcard include/config/strict/kernel/rwx.h) \
@@ -202,11 +198,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/arch/supports/int128.h) \
   include/uapi/linux/time.h \
   include/uapi/linux/time_types.h \
-  include/linux/errno.h \
-  include/uapi/linux/errno.h \
-  arch/x86/include/generated/uapi/asm/errno.h \
-  include/uapi/asm-generic/errno.h \
-  include/uapi/asm-generic/errno-base.h \
   arch/x86/include/asm/current.h \
   arch/x86/include/asm/percpu.h \
     $(wildcard include/config/x86/64/smp.h) \
@@ -221,6 +212,7 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/amd/mem/encrypt.h) \
   arch/x86/include/asm/thread_info.h \
     $(wildcard include/config/vm86.h) \
+    $(wildcard include/config/x86/iopl/ioperm.h) \
     $(wildcard include/config/frame/pointer.h) \
     $(wildcard include/config/ia32/emulation.h) \
   arch/x86/include/asm/page.h \
@@ -237,14 +229,14 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   include/linux/apm_bios.h \
   include/uapi/linux/apm_bios.h \
   include/uapi/linux/ioctl.h \
-  include/asm/ioctl.h \
+  arch/x86/include/generated/uapi/asm/ioctl.h \
+  include/asm-generic/ioctl.h \
   include/uapi/asm-generic/ioctl.h \
   include/linux/edd.h \
   include/uapi/linux/edd.h \
   arch/x86/include/asm/ist.h \
   arch/x86/include/uapi/asm/ist.h \
   include/video/edid.h \
-    $(wildcard include/config/x86.h) \
   include/uapi/video/edid.h \
   arch/x86/include/asm/page_64_types.h \
     $(wildcard include/config/dynamic/memory/layout.h) \
@@ -304,6 +296,9 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   arch/x86/include/asm/msr.h \
     $(wildcard include/config/tracepoints.h) \
   arch/x86/include/asm/msr-index.h \
+  arch/x86/include/generated/uapi/asm/errno.h \
+  include/uapi/asm-generic/errno.h \
+  include/uapi/asm-generic/errno-base.h \
   arch/x86/include/asm/cpumask.h \
   include/linux/cpumask.h \
     $(wildcard include/config/cpumask/offstack.h) \
@@ -331,6 +326,7 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   arch/x86/include/uapi/asm/msr.h \
   include/linux/tracepoint-defs.h \
   arch/x86/include/asm/paravirt.h \
+    $(wildcard include/config/debug/entry.h) \
   arch/x86/include/asm/frame.h \
   arch/x86/include/asm/special_insns.h \
   arch/x86/include/asm/fpu/types.h \
@@ -509,6 +505,8 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   include/linux/completion.h \
   include/linux/uprobes.h \
     $(wildcard include/config/uprobes.h) \
+  include/linux/errno.h \
+  include/uapi/linux/errno.h \
   arch/x86/include/asm/uprobes.h \
   include/linux/notifier.h \
     $(wildcard include/config/tree/srcu.h) \
@@ -532,11 +530,13 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   include/linux/ktime.h \
   include/linux/time.h \
     $(wildcard include/config/arch/uses/gettimeoffset.h) \
+    $(wildcard include/config/posix/timers.h) \
   include/linux/time32.h \
   include/linux/timex.h \
   include/uapi/linux/timex.h \
   include/uapi/linux/param.h \
-  include/asm/param.h \
+  arch/x86/include/generated/uapi/asm/param.h \
+  include/asm-generic/param.h \
     $(wildcard include/config/hz.h) \
   include/uapi/asm-generic/param.h \
   arch/x86/include/asm/timex.h \
@@ -599,6 +599,7 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   arch/x86/include/asm/realmode.h \
     $(wildcard include/config/acpi/sleep.h) \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/asm/io.h \
+    $(wildcard include/config/arm64.h) \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/asm/../../compat/config.h \
   arch/x86/include/asm/io.h \
     $(wildcard include/config/mtrr.h) \
@@ -614,11 +615,13 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/no/generic/pci/ioport/map.h) \
     $(wildcard include/config/generic/pci/iomap.h) \
   include/asm-generic/io.h \
+    $(wildcard include/config/generic/ioremap.h) \
     $(wildcard include/config/virt/to/bus.h) \
   include/linux/logic_pio.h \
     $(wildcard include/config/indirect/pio.h) \
   include/linux/fwnode.h \
   include/linux/vmalloc.h \
+    $(wildcard include/config/kasan/vmalloc.h) \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/llist.h \
   include/linux/llist.h \
     $(wildcard include/config/arch/have/nmi/safe/cmpxchg.h) \
@@ -703,8 +706,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/prove/rcu/list.h) \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/refcount.h \
   include/linux/refcount.h \
-    $(wildcard include/config/refcount/full.h) \
-  arch/x86/include/asm/refcount.h \
   include/linux/sem.h \
   include/uapi/linux/sem.h \
   include/linux/ipc.h \
@@ -750,7 +751,8 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   include/uapi/linux/unistd.h \
   include/linux/resource.h \
   include/uapi/linux/resource.h \
-  include/asm/resource.h \
+  arch/x86/include/generated/uapi/asm/resource.h \
+  include/asm-generic/resource.h \
   include/uapi/asm-generic/resource.h \
   include/linux/latencytop.h \
   include/linux/sched/prio.h \
@@ -766,7 +768,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   include/linux/task_io_accounting.h \
     $(wildcard include/config/task/io/accounting.h) \
   include/linux/posix-timers.h \
-    $(wildcard include/config/posix/timers.h) \
   include/linux/alarmtimer.h \
   include/uapi/linux/rseq.h \
   arch/x86/include/asm/uaccess.h \
@@ -919,6 +920,7 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   include/asm-generic/error-injection.h \
   arch/x86/include/asm/module.h \
     $(wildcard include/config/unwinder/orc.h) \
+    $(wildcard include/config/m486sx.h) \
     $(wildcard include/config/m486.h) \
     $(wildcard include/config/m586.h) \
     $(wildcard include/config/m586tsc.h) \
@@ -947,7 +949,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/modules/use/elf/rela.h) \
   arch/x86/include/asm/orc_types.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/debug/mtrack.h \
-    $(wildcard include/config/generic/ioremap.h) \
     $(wildcard include/config/ppc.h) \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/debug/memtrack.h \
   include/linux/io.h \
@@ -958,7 +959,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   include/uapi/linux/random.h \
   include/linux/irqnr.h \
   include/uapi/linux/irqnr.h \
-  include/linux/prandom.h \
   arch/x86/include/asm/archrandom.h \
   include/linux/io-mapping.h \
     $(wildcard include/config/have/atomic/iomap.h) \
@@ -996,6 +996,7 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/arch/has/set/direct/map.h) \
     $(wildcard include/config/hibernation.h) \
     $(wildcard include/config/hugetlbfs.h) \
+    $(wildcard include/config/mapping/dirty/helpers.h) \
   include/linux/bit_spinlock.h \
   include/linux/shrinker.h \
   include/linux/page_ext.h \
@@ -1009,7 +1010,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/debug/page/ref.h) \
   include/linux/memremap.h \
   include/linux/ioport.h \
-    $(wildcard include/config/io/strict/devmem.h) \
   include/linux/sizes.h \
   include/linux/huge_mm.h \
   include/linux/sched/coredump.h \
@@ -1026,7 +1026,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/fs/verity.h) \
     $(wildcard include/config/epoll.h) \
     $(wildcard include/config/quota.h) \
-    $(wildcard include/config/blk/dev/loop.h) \
     $(wildcard include/config/fs/dax.h) \
     $(wildcard include/config/mandatory/file/locking.h) \
     $(wildcard include/config/migration.h) \
@@ -1101,7 +1100,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/ipv6/ndisc/nodetype.h) \
     $(wildcard include/config/net/switchdev.h) \
     $(wildcard include/config/net/cls/act.h) \
-    $(wildcard include/config/net/redirect.h) \
     $(wildcard include/config/tls/device.h) \
     $(wildcard include/config/net/sched.h) \
     $(wildcard include/config/net/rx/busy/poll.h) \
@@ -1152,7 +1150,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   arch/x86/include/asm/device.h \
     $(wildcard include/config/intel/iommu.h) \
     $(wildcard include/config/amd/iommu.h) \
-    $(wildcard include/config/sta2x11.h) \
     $(wildcard include/config/x86/dev/dma/ops.h) \
     $(wildcard include/config/pci/domains.h) \
   include/linux/pm_wakeup.h \
@@ -1227,47 +1224,84 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/pci/msi/irq/domain.h) \
     $(wildcard include/config/vmd.h) \
   arch/x86/include/asm/pat.h \
-  arch/x86/include/asm/pci_64.h \
-    $(wildcard include/config/calgary/iommu.h) \
   include/asm-generic/pci.h \
   include/linux/pci-dma-compat.h \
   include/linux/compiler_types.h \
-  include/linux/debugfs.h \
-    $(wildcard include/config/debug/fs.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/seq_file.h \
-  include/linux/seq_file.h \
-  include/linux/cred.h \
-    $(wildcard include/config/debug/credentials.h) \
-  include/linux/key.h \
-  include/linux/assoc_array.h \
-    $(wildcard include/config/associative/array.h) \
-  include/linux/sched/user.h \
-    $(wildcard include/config/fanotify.h) \
-    $(wildcard include/config/posix/mqueue.h) \
-    $(wildcard include/config/bpf/syscall.h) \
+  include/linux/hwmon.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/units.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/unaligned.h \
+  arch/x86/include/asm/unaligned.h \
+  include/linux/unaligned/access_ok.h \
+  include/linux/unaligned/generic.h \
+  include/asm-generic/unaligned.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/nvme.h \
+    $(wildcard include/config/nvme/host/auth.h) \
+    $(wildcard include/config/blk/dev/zoned.h) \
+    $(wildcard include/config/nvme/multipath.h) \
+    $(wildcard include/config/fault/injection/debug/fs.h) \
+    $(wildcard include/config/nvme/hwmon.h) \
+    $(wildcard include/config/nvme/poll.h) \
+    $(wildcard include/config/nvme/verbose/errors.h) \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/nvme.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/cdev.h \
+  include/linux/cdev.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/blk-mq.h \
+  include/linux/blk-mq.h \
+    $(wildcard include/config/blk/debug/fs.h) \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/blkdev.h \
+  include/linux/blkdev.h \
+    $(wildcard include/config/blk/rq/alloc/time.h) \
+    $(wildcard include/config/blk/wbt.h) \
+    $(wildcard include/config/blk/dev/integrity.h) \
+    $(wildcard include/config/blk/dev/bsg.h) \
+    $(wildcard include/config/blk/dev/throttling.h) \
+  include/uapi/linux/major.h \
+  include/linux/genhd.h \
+    $(wildcard include/config/fail/make/request.h) \
+    $(wildcard include/config/solaris/x86/partition.h) \
+    $(wildcard include/config/bsd/disklabel.h) \
+    $(wildcard include/config/unixware/disklabel.h) \
+    $(wildcard include/config/minix/subpartition.h) \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/blk_types.h \
+  include/linux/blk_types.h \
+    $(wildcard include/config/blk/cgroup/iocost.h) \
+  arch/x86/include/asm/local.h \
+  include/linux/pagemap.h \
   include/linux/highmem.h \
   arch/x86/include/asm/cacheflush.h \
   include/asm-generic/cacheflush.h \
-  include/linux/sched/mm.h \
-    $(wildcard include/config/arch/has/membarrier/callbacks.h) \
-  include/linux/sync_core.h \
-    $(wildcard include/config/arch/has/sync/core/before/usermode.h) \
-  arch/x86/include/asm/sync_core.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/sched/task.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/sched/../../../compat/config.h \
-  include/linux/sched/task.h \
-    $(wildcard include/config/have/copy/thread/tls.h) \
-    $(wildcard include/config/have/exit/thread.h) \
-    $(wildcard include/config/arch/wants/dynamic/task/struct.h) \
-    $(wildcard include/config/have/arch/thread/struct/whitelist.h) \
-  include/linux/delay.h \
-  arch/x86/include/asm/delay.h \
-  include/asm-generic/delay.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/ib_user_verbs.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_addr.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/../../compat/config.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/ethtool.h \
-  include/linux/ethtool.h \
+  include/linux/hugetlb_inline.h \
+  include/linux/backing-dev-defs.h \
+    $(wildcard include/config/debug/fs.h) \
+  include/linux/flex_proportions.h \
+  include/linux/mempool.h \
+  include/linux/bio.h \
+  include/linux/bsg.h \
+  include/uapi/linux/bsg.h \
+  include/uapi/linux/blkzoned.h \
+  include/linux/elevator.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/hashtable.h \
+  include/linux/hashtable.h \
+  include/linux/sbitmap.h \
+  include/linux/fault-inject.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/t10-pi.h \
+  include/linux/t10-pi.h \
+  include/trace/events/block.h \
+  include/linux/blktrace_api.h \
+  include/linux/relay.h \
+    $(wildcard include/config/relay.h) \
+  include/linux/irq_work.h \
+    $(wildcard include/config/irq/work.h) \
+  arch/x86/include/asm/irq_work.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/poll.h \
+  include/linux/poll.h \
+  include/uapi/linux/poll.h \
+  arch/x86/include/generated/uapi/asm/poll.h \
+  include/uapi/asm-generic/poll.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/linux/eventpoll.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/linux/../../../compat/config.h \
+  include/uapi/linux/eventpoll.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/linux/eventpoll.h \
   include/linux/compat.h \
     $(wildcard include/config/arch/has/syscall/wrapper.h) \
     $(wildcard include/config/compat/old/sigaction.h) \
@@ -1280,488 +1314,13 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   arch/x86/include/asm/user32.h \
   include/asm-generic/compat.h \
   arch/x86/include/asm/syscall_wrapper.h \
-  include/uapi/linux/ethtool.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/if_ether.h \
-  include/linux/if_ether.h \
-  include/linux/in.h \
-  include/uapi/linux/in.h \
-  include/linux/if_arp.h \
-    $(wildcard include/config/firewire/net.h) \
-  include/uapi/linux/if_arp.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/netdevice.h \
-    $(wildcard include/config/net/cls/e2e/cache.h) \
-    $(wildcard include/config/bql.h) \
-  include/linux/netdevice.h \
-    $(wildcard include/config/dcb.h) \
-    $(wildcard include/config/hyperv/net.h) \
-    $(wildcard include/config/wlan.h) \
-    $(wildcard include/config/ax25.h) \
-    $(wildcard include/config/mac80211/mesh.h) \
-    $(wildcard include/config/net/ipip.h) \
-    $(wildcard include/config/net/ipgre.h) \
-    $(wildcard include/config/ipv6/sit.h) \
-    $(wildcard include/config/ipv6/tunnel.h) \
-    $(wildcard include/config/rps.h) \
-    $(wildcard include/config/netpoll.h) \
-    $(wildcard include/config/xdp/sockets.h) \
-    $(wildcard include/config/rfs/accel.h) \
-    $(wildcard include/config/fcoe.h) \
-    $(wildcard include/config/xfrm/offload.h) \
-    $(wildcard include/config/net/poll/controller.h) \
-    $(wildcard include/config/libfcoe.h) \
-    $(wildcard include/config/wireless/ext.h) \
-    $(wildcard include/config/net/l3/master/dev.h) \
-    $(wildcard include/config/ipv6.h) \
-    $(wildcard include/config/vlan/8021q.h) \
-    $(wildcard include/config/net/dsa.h) \
-    $(wildcard include/config/tipc.h) \
-    $(wildcard include/config/irda.h) \
-    $(wildcard include/config/atalk.h) \
-    $(wildcard include/config/decnet.h) \
-    $(wildcard include/config/mpls/routing.h) \
-    $(wildcard include/config/netfilter/ingress.h) \
-    $(wildcard include/config/garp.h) \
-    $(wildcard include/config/mrp.h) \
-    $(wildcard include/config/cgroup/net/prio.h) \
-    $(wildcard include/config/net/flow/limit.h) \
-  include/linux/prefetch.h \
-  include/linux/dynamic_queue_limits.h \
-  include/net/net_namespace.h \
-    $(wildcard include/config/ieee802154/6lowpan.h) \
-    $(wildcard include/config/ip/sctp.h) \
-    $(wildcard include/config/ip/dccp.h) \
-    $(wildcard include/config/netfilter.h) \
-    $(wildcard include/config/nf/defrag/ipv6.h) \
-    $(wildcard include/config/netfilter/netlink/acct.h) \
-    $(wildcard include/config/nf/ct/netlink/timeout.h) \
-    $(wildcard include/config/wext/core.h) \
-    $(wildcard include/config/mpls.h) \
-    $(wildcard include/config/can.h) \
-    $(wildcard include/config/crypto/user.h) \
-    $(wildcard include/config/net/ns.h) \
-  include/net/netns/core.h \
-  include/net/netns/mib.h \
-    $(wildcard include/config/xfrm/statistics.h) \
-  include/net/snmp.h \
-  include/uapi/linux/snmp.h \
-  include/linux/u64_stats_sync.h \
-  include/net/netns/unix.h \
-  include/net/netns/packet.h \
-  include/net/netns/ipv4.h \
-    $(wildcard include/config/ip/multiple/tables.h) \
-    $(wildcard include/config/ip/route/classid.h) \
-    $(wildcard include/config/ip/mroute.h) \
-    $(wildcard include/config/ip/mroute/multiple/tables.h) \
-    $(wildcard include/config/ip/route/multipath.h) \
-  include/net/inet_frag.h \
-  include/net/netns/ipv6.h \
-    $(wildcard include/config/ipv6/multiple/tables.h) \
-    $(wildcard include/config/ipv6/mroute.h) \
-    $(wildcard include/config/ipv6/mroute/multiple/tables.h) \
-  include/net/dst_ops.h \
-  include/uapi/linux/icmpv6.h \
-  include/net/netns/nexthop.h \
-  include/net/netns/ieee802154_6lowpan.h \
-  include/net/netns/sctp.h \
-  include/net/netns/dccp.h \
-  include/net/netns/netfilter.h \
-    $(wildcard include/config/netfilter/family/arp.h) \
-    $(wildcard include/config/netfilter/family/bridge.h) \
-    $(wildcard include/config/nf/defrag/ipv4.h) \
-  include/linux/netfilter_defs.h \
-  include/uapi/linux/netfilter.h \
-  include/net/netns/x_tables.h \
-    $(wildcard include/config/bridge/nf/ebtables.h) \
-  include/net/netns/conntrack.h \
-    $(wildcard include/config/nf/ct/proto/dccp.h) \
-    $(wildcard include/config/nf/ct/proto/sctp.h) \
-    $(wildcard include/config/nf/ct/proto/gre.h) \
-    $(wildcard include/config/nf/conntrack/events.h) \
-    $(wildcard include/config/nf/conntrack/labels.h) \
-  include/linux/list_nulls.h \
-  include/linux/netfilter/nf_conntrack_tcp.h \
-  include/uapi/linux/netfilter/nf_conntrack_tcp.h \
-  include/linux/netfilter/nf_conntrack_dccp.h \
-  include/uapi/linux/netfilter/nf_conntrack_tuple_common.h \
-  include/linux/netfilter/nf_conntrack_sctp.h \
-  include/uapi/linux/netfilter/nf_conntrack_sctp.h \
-  include/net/netns/nftables.h \
-  include/net/netns/xfrm.h \
-  include/uapi/linux/xfrm.h \
-  include/net/netns/mpls.h \
-  include/net/netns/can.h \
-  include/net/netns/xdp.h \
-  include/linux/ns_common.h \
-  include/linux/seq_file_net.h \
-  include/net/dcbnl.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/dcbnl.h \
-  include/uapi/linux/dcbnl.h \
-  include/net/netprio_cgroup.h \
-  include/linux/cgroup.h \
-    $(wildcard include/config/cgroup/cpuacct.h) \
-    $(wildcard include/config/sock/cgroup/data.h) \
-    $(wildcard include/config/cgroup/net/classid.h) \
-    $(wildcard include/config/cgroup/data.h) \
-    $(wildcard include/config/cgroup/bpf.h) \
-  include/uapi/linux/cgroupstats.h \
-  include/uapi/linux/taskstats.h \
-  include/linux/nsproxy.h \
-  include/linux/user_namespace.h \
-    $(wildcard include/config/inotify/user.h) \
-    $(wildcard include/config/persistent/keyrings.h) \
-  include/linux/kernel_stat.h \
-  include/linux/cgroup-defs.h \
-  include/linux/bpf-cgroup.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/bpf.h \
-  include/linux/bpf.h \
-    $(wildcard include/config/bpf/jit/always/on.h) \
-    $(wildcard include/config/bpf/stream/parser.h) \
-    $(wildcard include/config/inet.h) \
-  include/uapi/linux/bpf.h \
-    $(wildcard include/config/efficient/unaligned/access.h) \
-    $(wildcard include/config/bpf/kprobe/override.h) \
-    $(wildcard include/config/bpf/lirc/mode2.h) \
-  include/uapi/linux/bpf_common.h \
-  include/linux/file.h \
-  include/linux/bpf_types.h \
-  include/linux/psi_types.h \
-  include/linux/kthread.h \
-  include/linux/cgroup_subsys.h \
-    $(wildcard include/config/cgroup/device.h) \
-    $(wildcard include/config/cgroup/freezer.h) \
-    $(wildcard include/config/cgroup/perf.h) \
-    $(wildcard include/config/cgroup/hugetlb.h) \
-    $(wildcard include/config/cgroup/pids.h) \
-    $(wildcard include/config/cgroup/rdma.h) \
-    $(wildcard include/config/cgroup/debug.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/net/xdp.h \
-  include/net/xdp.h \
-  include/uapi/linux/neighbour.h \
-  include/linux/netlink.h \
-  include/net/scm.h \
-    $(wildcard include/config/security/network.h) \
-  include/linux/security.h \
-    $(wildcard include/config/security/infiniband.h) \
-    $(wildcard include/config/security/network/xfrm.h) \
-    $(wildcard include/config/security/path.h) \
-    $(wildcard include/config/securityfs.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/sched/signal.h \
-  include/linux/sched/signal.h \
-    $(wildcard include/config/sched/autogroup.h) \
-    $(wildcard include/config/bsd/process/acct.h) \
-    $(wildcard include/config/taskstats.h) \
-  include/linux/signal.h \
-  include/linux/sched/jobctl.h \
-  include/uapi/linux/netlink.h \
-  include/uapi/linux/netdevice.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/if_link.h \
-  include/linux/if_link.h \
-  include/uapi/linux/if_link.h \
-  include/uapi/linux/if_bonding.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/linux/pkt_cls.h \
-    $(wildcard include/config/compat/kernel/4/14.h) \
-    $(wildcard include/config/compat/cls/flower/4/18/mod.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/linux/../../../compat/config.h \
-  include/uapi/linux/pkt_cls.h \
-  include/uapi/linux/pkt_sched.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/hashtable.h \
-  include/linux/hashtable.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/inetdevice.h \
-  include/linux/inetdevice.h \
-  include/linux/ip.h \
-  include/uapi/linux/ip.h \
-  include/linux/rtnetlink.h \
-    $(wildcard include/config/net/ingress.h) \
-    $(wildcard include/config/net/egress.h) \
-  include/uapi/linux/rtnetlink.h \
-  include/uapi/linux/if_addr.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/if_vlan.h \
-  include/linux/if_vlan.h \
-  include/linux/etherdevice.h \
-  arch/x86/include/asm/unaligned.h \
-  include/linux/unaligned/access_ok.h \
-  include/linux/unaligned/generic.h \
-  include/uapi/linux/if_vlan.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/net/ipv6.h \
-  include/net/ipv6.h \
-  include/linux/ipv6.h \
-    $(wildcard include/config/ipv6/router/pref.h) \
-    $(wildcard include/config/ipv6/route/info.h) \
-    $(wildcard include/config/ipv6/optimistic/dad.h) \
-    $(wildcard include/config/ipv6/seg6/hmac.h) \
-    $(wildcard include/config/ipv6/mip6.h) \
-    $(wildcard include/config/ipv6/subtrees.h) \
-  include/uapi/linux/ipv6.h \
-  include/linux/tcp.h \
-    $(wildcard include/config/smc.h) \
-    $(wildcard include/config/bpf.h) \
-    $(wildcard include/config/tcp/md5sig.h) \
-  include/linux/win_minmax.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/net/sock.h \
-  include/net/sock.h \
-    $(wildcard include/config/sock/validate/xmit.h) \
-  include/linux/page_counter.h \
-  include/linux/memcontrol.h \
-    $(wildcard include/config/memcg/swap.h) \
-  include/linux/vmpressure.h \
-  include/linux/eventfd.h \
-    $(wildcard include/config/eventfd.h) \
-  include/linux/writeback.h \
-  include/linux/flex_proportions.h \
-  include/linux/backing-dev-defs.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/blk_types.h \
-  include/linux/blk_types.h \
-    $(wildcard include/config/blk/cgroup/iocost.h) \
-    $(wildcard include/config/blk/dev/integrity.h) \
-  include/linux/blk-cgroup.h \
-    $(wildcard include/config/blk/dev/throttling.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/blkdev.h \
-  include/linux/blkdev.h \
-    $(wildcard include/config/blk/rq/alloc/time.h) \
-    $(wildcard include/config/blk/wbt.h) \
-    $(wildcard include/config/blk/dev/zoned.h) \
-    $(wildcard include/config/blk/dev/bsg.h) \
-    $(wildcard include/config/blk/debug/fs.h) \
-  include/uapi/linux/major.h \
-  include/linux/genhd.h \
-    $(wildcard include/config/fail/make/request.h) \
-    $(wildcard include/config/solaris/x86/partition.h) \
-    $(wildcard include/config/bsd/disklabel.h) \
-    $(wildcard include/config/unixware/disklabel.h) \
-    $(wildcard include/config/minix/subpartition.h) \
-  arch/x86/include/asm/local.h \
-  include/linux/pagemap.h \
-  include/linux/hugetlb_inline.h \
-  include/linux/mempool.h \
-  include/linux/bio.h \
-  include/linux/bsg.h \
-  include/uapi/linux/bsg.h \
-  include/uapi/linux/blkzoned.h \
-  include/linux/elevator.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/filter.h \
-  include/linux/filter.h \
-    $(wildcard include/config/bpf/jit.h) \
-    $(wildcard include/config/have/ebpf/jit.h) \
-  include/linux/cryptohash.h \
-  include/linux/set_memory.h \
-    $(wildcard include/config/arch/has/set/memory.h) \
-  arch/x86/include/asm/set_memory.h \
-  include/asm-generic/set_memory.h \
-  include/linux/kallsyms.h \
-    $(wildcard include/config/kallsyms/all.h) \
-  include/net/sch_generic.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/linux/pkt_cls.h \
-  include/net/gen_stats.h \
-  include/uapi/linux/gen_stats.h \
-  include/net/rtnetlink.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/net/netlink.h \
-  include/net/netlink.h \
-  include/net/genetlink.h \
-  include/linux/genetlink.h \
-  include/uapi/linux/genetlink.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/net/flow_offload.h \
-  include/net/flow_offload.h \
-  include/linux/rhashtable.h \
-  include/linux/jhash.h \
-  include/linux/unaligned/packed_struct.h \
-  include/uapi/linux/filter.h \
-  include/linux/rculist_nulls.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/poll.h \
-  include/linux/poll.h \
-  include/uapi/linux/poll.h \
-  arch/x86/include/generated/uapi/asm/poll.h \
-  include/uapi/asm-generic/poll.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/linux/eventpoll.h \
-  include/uapi/linux/eventpoll.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/linux/eventpoll.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/net/dst.h \
-  include/net/dst.h \
-  include/net/neighbour.h \
-  include/net/tcp_states.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/linux/net_tstamp.h \
-  include/uapi/linux/net_tstamp.h \
-  include/net/smc.h \
-  include/net/l3mdev.h \
-  include/net/fib_rules.h \
-  include/uapi/linux/fib_rules.h \
-  include/net/fib_notifier.h \
-  include/net/inet_connection_sock.h \
-  include/net/inet_sock.h \
-  include/net/request_sock.h \
-  include/net/netns/hash.h \
-  include/net/inet_timewait_sock.h \
-  include/net/timewait_sock.h \
-  include/uapi/linux/tcp.h \
-  include/linux/udp.h \
-  include/uapi/linux/udp.h \
-  include/linux/jump_label_ratelimit.h \
-  include/net/if_inet6.h \
-  include/net/ndisc.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/net/ipv6_stubs.h \
-  include/net/ipv6_stubs.h \
-  include/linux/icmpv6.h \
-    $(wildcard include/config/nf/nat.h) \
-  include/net/ip.h \
-  include/net/route.h \
-  include/net/inetpeer.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/net/ip_fib.h \
-    $(wildcard include/config/compat/is/fib/lookup/static/and/extern.h) \
-  include/net/ip_fib.h \
-  include/net/arp.h \
-  include/uapi/linux/in_route.h \
-  include/uapi/linux/route.h \
-  include/net/lwtunnel.h \
-    $(wildcard include/config/lwtunnel.h) \
-  include/uapi/linux/lwtunnel.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_verbs.h \
-    $(wildcard include/config/dynamic/debug/core.h) \
-    $(wildcard include/config/irq/poll.h) \
-    $(wildcard include/config/infiniband/virt/dma.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/irq_poll.h \
-  include/linux/irq_poll.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mmu_notifier.h \
-  include/linux/mmu_notifier.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/cgroup_rdma.h \
-  include/linux/cgroup_rdma.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/dim.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/ib_user_verbs.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/rdma_counter.h \
-  include/linux/pid_namespace.h \
-    $(wildcard include/config/pid/ns.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/restrack.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/rdma_netlink.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/rdma_netlink.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/signature.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/rdma_user_ioctl.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/ib_user_mad.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/hfi/hfi1_ioctl.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/rdma_user_ioctl_cmds.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/ib_user_ioctl_verbs.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_verbs_nvmf_def.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_verbs_nvmf.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_pack.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_cache.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/port.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/../../../compat/config.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/driver.h \
-    $(wildcard include/config/mlx5/sf.h) \
-    $(wildcard include/config/mlx5/sf/manager.h) \
-    $(wildcard include/config/mlx5/eswitch.h) \
-    $(wildcard include/config/ptp/1588/clock.h) \
-    $(wildcard include/config/mlx5/fpga.h) \
-    $(wildcard include/config/mlx5/macsec.h) \
-  include/linux/irq.h \
-    $(wildcard include/config/generic/irq/effective/aff/mask.h) \
-    $(wildcard include/config/generic/irq/ipi.h) \
-    $(wildcard include/config/irq/domain/hierarchy.h) \
-    $(wildcard include/config/generic/irq/migration.h) \
-    $(wildcard include/config/generic/pending/irq.h) \
-    $(wildcard include/config/hardirqs/sw/resend.h) \
-    $(wildcard include/config/generic/irq/legacy/alloc/hwirq.h) \
-    $(wildcard include/config/generic/irq/legacy.h) \
-    $(wildcard include/config/generic/irq/multi/handler.h) \
-  include/linux/irqhandler.h \
-  arch/x86/include/asm/irq_regs.h \
-  include/linux/irqdesc.h \
-    $(wildcard include/config/irq/preflow/fasteoi.h) \
-    $(wildcard include/config/generic/irq/debugfs.h) \
-    $(wildcard include/config/sparse/irq.h) \
-    $(wildcard include/config/handle/domain/irq.h) \
-    $(wildcard include/config/irq/domain.h) \
-  arch/x86/include/asm/hw_irq.h \
-    $(wildcard include/config/hpet/timer.h) \
-    $(wildcard include/config/dmar/table.h) \
-    $(wildcard include/config/x86/uv.h) \
-  include/linux/profile.h \
-    $(wildcard include/config/profiling.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/auxiliary_bus.h \
-    $(wildcard include/config/auxiliary/bus.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/device.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/mlx5_ifc.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/mlx5_ifc_fpga.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/bitfield.h \
-  include/linux/bitfield.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/doorbell.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/eq.h \
-  include/linux/timecounter.h \
-  include/linux/ptp_clock_kernel.h \
-  include/linux/pps_kernel.h \
-    $(wildcard include/config/ntp/pps.h) \
-  include/uapi/linux/pps.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/cdev.h \
-  include/linux/cdev.h \
-  include/uapi/linux/ptp_clock.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/net/devlink.h \
-  include/net/devlink.h \
-    $(wildcard include/config/net/devlink.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/linux/devlink.h \
-  include/uapi/linux/devlink.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/vport.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/fs.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/eswitch.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_smi.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_mad.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/ib_user_mad.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_umem_odp.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_umem.h \
-    $(wildcard include/config/infiniband/user/mem.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/interval_tree.h \
-    $(wildcard include/config/interval/tree.h) \
-  include/linux/interval_tree.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/lag.h \
-  include/net/lag.h \
-  include/linux/if_team.h \
-  include/linux/netpoll.h \
-  include/uapi/linux/if_team.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/net/bonding.h \
-  include/net/bonding.h \
-  include/linux/proc_fs.h \
-    $(wildcard include/config/proc/pid/arch/status.h) \
-  include/uapi/linux/if_bonding.h \
-  include/linux/reciprocal_div.h \
-  include/net/bond_3ad.h \
-  include/net/bond_alb.h \
-  include/net/bond_options.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/mlx5_ib.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/cq.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/qp.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/transobj.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/mlx5-abi.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/ib_user_ioctl_verbs.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/mlx5_user_ioctl_verbs.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/uverbs_ioctl.h \
-    $(wildcard include/config/compat/rhel/7/2.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/uverbs_types.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/rdma_user_ioctl.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/ib_user_ioctl_cmds.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/mlx5_user_ioctl_cmds.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/srq.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/mlx5_ib_nvmf.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/nvmf.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/mlx5_ib_ext.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/qp.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/macsec.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/net/macsec.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/ib_rep.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/cmd.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/devx.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/dm.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/fs.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/wr.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/restrack.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/counters.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/umr.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/uverbs_std_types.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/data_direct.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/scheduler.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/rdma_cm.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_sa.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/opa_addr.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/opa_smi.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/rdma_user_cm.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/ib_user_sa.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/uverbs_named_ioctl.h \
+  include/uapi/linux/blktrace_api.h \
+  include/linux/buffer_head.h \
+  include/linux/tracepoint.h \
+    $(wildcard include/config/have/syscall/tracepoints.h) \
+    $(wildcard include/config/tracepoint.h) \
+  include/trace/define_trace.h \
 
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/main.o: $(deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/main.o)
+/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/hwmon.o: $(deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/hwmon.o)
 
-$(deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/main.o):
+$(deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/hwmon.o):

@@ -1149,6 +1149,7 @@ static void notify_soft_wc_handler(struct work_struct *work)
 int mlx5_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 		      struct uverbs_attr_bundle *attrs)
 {
+	pr_info("in mlx5_ib_create_cq\n");
 	struct ib_udata *udata = &attrs->driver_udata;
 	struct ib_device *ibdev = ibcq->device;
 	int entries = attr->cqe;

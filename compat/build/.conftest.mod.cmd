@@ -1,1 +1,1 @@
-cmd_/usr/src/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod := { echo  /usr/src/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.o;  echo; } > /usr/src/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod
+cmd_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod := { echo  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.o;  echo; } > /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod

@@ -275,7 +275,9 @@ kernel: $(COMPAT_CONFIG) $(COMPAT_AUTOCONF) autoversion
 #########################
 install_modules:
 	@echo "Installing kernel modules"
-
+	@echo "INSTALL_MOD_PATH: $(INSTALL_MOD_PATH)"
+	@echo "INSTALL_MOD_DIR: $(INSTALL_MOD_DIR)"
+	@echo "WITH_MAKE_PARAMS: $(WITH_MAKE_PARAMS)"
 ifeq ($(shell /usr/bin/lsb_release -s -i 2>/dev/null | grep -qiE "debian|ubuntu" 2>/dev/null && echo YES || echo ''),)
 	$(MAKE) -C $(KSRC_OBJ) M="$(CWD)" \
 		INSTALL_MOD_PATH=$(INSTALL_MOD_PATH) \
@@ -341,8 +343,7 @@ endif
 	install -d $(INSTALL_MOD_PATH)/etc/
 
 
-clean: clean_kernel
-
+clean: clean_k
 clean_kernel:
 	$(MAKE) -C $(KSRC_OBJ) rm-files= M="$(CWD)" $(WITH_MAKE_PARAMS) clean
 

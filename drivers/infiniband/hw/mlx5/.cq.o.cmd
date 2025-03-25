@@ -1714,6 +1714,12 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   include/linux/inetdevice.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_pack.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/scheduler.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/rdma_cm.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_sa.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/opa_addr.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/opa_smi.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/rdma_user_cm.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/ib_user_sa.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/uverbs_named_ioctl.h \
 
 /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/cq.o: $(deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/cq.o)

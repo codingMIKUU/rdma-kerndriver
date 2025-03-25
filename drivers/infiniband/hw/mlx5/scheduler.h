@@ -4,6 +4,11 @@
 
 #include <linux/mutex.h>
 #include <linux/types.h>
+#include <rdma/rdma_cm.h>
+static int debug = 1;
+#define DEBUG_LOG \
+    if (debug) \
+    printk
 struct mlx5_ib_sqbuf {
     void* buf;
     struct page** pages;
@@ -22,18 +27,43 @@ struct mlx5_ib_cqbuf{
     int cur_put;
     struct mlx5_ib_cqbuf* next;//not loop
 };
+
+enum test_state
+{
+	IDLE = 1,
+	CONNECT_REQUEST,
+	ADDR_RESOLVED,
+	ROUTE_RESOLVED,
+	CONNECTED,
+	RDMA_READ_ADV,
+	RDMA_READ_COMPLETE,
+	RDMA_WRITE_ADV,
+	RDMA_WRITE_COMPLETE,
+	ERROR
+};
 struct srm_cb{
     int refcnt;
     struct mlx5_ib_qp *qp;
-    struct mlx5_ib_cq *cq;
+    struct ib_cq *cq;
     
     int page_list_len;
     char* dma_buf;
-    DEFINED_DMA_UNMAP_ADDR(dma_mapping);
+    DEFINE_DMA_UNMAP_ADDR(dma_mapping);
     struct ib_mr *mr;
     char* buf;
     int buf_sz;
     int sig_cnt;
+
+    struct rdma_cm_id *cm_id;
+    struct rdma_cm_id *child_cm_id;
+    char *addr_str;
+    uint16_t port;			 /* dst port in NBO */
+	u8 addr[16];			 /* dst addr in NBO */
+    enum test_state state;
+    wait_queue_head_t sem;
+    int txdepth;
+    int server;
+    struct ib_pd *pd;
 };
 struct mlx5_ib_srmc{
    struct srm_cb ini_cb;
@@ -68,4 +98,9 @@ int is_xrc_exists(struct mlx5_ib_sched* sched,struct ib_pd *pd,union ib_gid *dgi
 int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched* sched,int qpn);
 int mlx5_ib_destroy_srmc(struct mlx5_ib_sched* sched,int ah_id);
 int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc,struct ib_pd *pd,int flags,int qpn);
+int mlx5_sched_run_server(struct srm_cb *cb);
+int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd);
+void ib_sched_free_buf(struct srm_cb *cb);
+
+
 #endif /* _MLX5_IB_SCHEDULER_H */

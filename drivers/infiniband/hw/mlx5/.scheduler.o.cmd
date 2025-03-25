@@ -1627,6 +1627,19 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_verbs_nvmf_def.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_verbs_nvmf.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/scheduler.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/rdma_cm.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_addr.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/inetdevice.h \
+  include/linux/inetdevice.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_pack.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_sa.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_mad.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/ib_user_mad.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/opa_addr.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/opa_smi.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_smi.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/rdma_user_cm.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/ib_user_sa.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/qp.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/wr.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/mlx5_ib.h \
@@ -1634,9 +1647,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
     $(wildcard include/config/mlx5/macsec.h) \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_umem.h \
     $(wildcard include/config/infiniband/user/mem.h) \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_smi.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_mad.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi/rdma/ib_user_mad.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/mlx5/driver.h \
     $(wildcard include/config/mlx5/sf.h) \
     $(wildcard include/config/mlx5/sf/manager.h) \
@@ -1711,12 +1721,10 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/macsec.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/net/macsec.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_cache.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_addr.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/inetdevice.h \
-  include/linux/inetdevice.h \
-  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_pack.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/user_verbs.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/conn.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/inet.h \
+  include/linux/inet.h \
 
 /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/scheduler.o: $(deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/scheduler.o)
 
