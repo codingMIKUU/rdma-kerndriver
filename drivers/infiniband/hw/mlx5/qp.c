@@ -93,6 +93,7 @@ struct mlx5_ib_sqd {
 };
 
 extern struct mlx5_ib_sched sched;
+extern struct srm_cb server_cb;
 
 static int __mlx5_ib_modify_qp(struct ib_qp *ibqp,
 			       const struct ib_qp_attr *attr, int attr_mask,
@@ -5531,7 +5532,10 @@ int mlx5_ib_alloc_xrcd(struct ib_xrcd *ibxrcd, struct ib_udata *udata)
 
 	if (!MLX5_CAP_GEN(dev->mdev, xrc))
 		return -EOPNOTSUPP;
-
+	if(server_cb.xrcd == NULL){
+		pr_info("server_cb's xrcd is %p\n",xrcd);
+		server_cb.xrcd = xrcd;
+	}
 	return mlx5_cmd_xrcd_alloc(dev->mdev, &xrcd->xrcdn, 0);
 }
 

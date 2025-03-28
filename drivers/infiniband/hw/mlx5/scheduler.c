@@ -986,7 +986,7 @@ static void fill_sockaddr(struct sockaddr_storage *sin, struct srm_cb *cb)
     struct sockaddr_in *sin4 = (struct sockaddr_in *)sin;
     sin4->sin_family = AF_INET;
     memcpy((void *)&sin4->sin_addr.s_addr, cb->addr, 4);
-    sin4->sin_port = cb->port;
+    sin4->sin_port = htons(cb->port);
 	
 }
 static int reg_supported(struct ib_device *dev)
@@ -1069,7 +1069,7 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
     struct ib_qp_init_attr init_attr;
 
     cb->addr_str = IP_ADDR;
-    cb->port = 10086;
+    cb->port = 12345;
     if(!(ret = in4_pton(cb->addr_str, -1, cb->addr, -1, NULL))){
         printk(KERN_ERR "in4_pton error %d\n",ret);
         ret = -1;
@@ -1113,13 +1113,13 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
 
 	/* For flush_qp() */
 	init_attr.cap.max_send_wr++;
-	// init_attr.cap.max_recv_wr++;
+	//init_attr.cap.max_recv_wr++;
 
-	// init_attr.cap.max_recv_sge = 1;
+	//init_attr.cap.max_recv_sge = 1;
 	init_attr.cap.max_send_sge = 1;
 	init_attr.qp_type = IB_QPT_XRC_INI;
 	init_attr.send_cq = cb->cq;
-	// init_attr.recv_cq = cb->cq;
+	//init_attr.recv_cq = cb->cq;
 	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     ret = rdma_create_qp(cb->cm_id,pd,&init_attr);
     if(!ret)
@@ -1149,7 +1149,33 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
         pr_err("reg mr failed,error:%d\n",ret);
         goto err4;
     }
-    return ret; 
+
+    // struct ib_send_wr wr,*bad_wr;
+    // struct ib_sge sgl;
+    // struct ib_wc wc;
+
+    // memset(&wr,0,sizeof(wr));
+
+    // sgl.addr = cb->dma_buf;
+    // sgl.length = cb->buf_sz;
+    // sgl.lkey = cb->mr->lkey;
+    // wr.opcode = IB_WR_SEND;
+    // wr.send_flags = IB_SEND_SIGNALED;
+    // wr.sg_list = &sgl;
+    // wr.num_sge = 1;
+    // ret = ib_post_send(cb->qp,&wr,&bad_wr);
+    // if(ret){
+    //     pr_err("ib_post_send failed,error:%d\n",ret);
+    //     goto err4;
+    // }
+    // int cqe_num = 0;
+    // while(!cqe_num){
+    //     cqe_num = ib_poll_cq(cb->cq,1,&wc);
+    // }
+    // DEBUG_LOG("poll cqe_num:%d,wc status:%d\n",cqe_num,wc.status);
+
+
+    return ret?0:cb->qp->ibqp.qp_num; 
 err4:
     rdma_disconnect(cb->cm_id);
 err3:
@@ -1239,7 +1265,7 @@ int mlx5_sched_run_server(struct srm_cb *cb){
     struct ib_pd *pd;
 
     cb->addr_str = IP_ADDR;
-    cb->port = 10086;
+    cb->port = 12345;
     if(!(ret = in4_pton(cb->addr_str, -1, cb->addr, -1, NULL))){
         printk(KERN_ERR "in4_pton error %d\n",ret);
         ret = -1;
@@ -1289,23 +1315,26 @@ int mlx5_sched_run_server(struct srm_cb *cb){
 
     //create qp
 	memset(&init_attr, 0, sizeof(init_attr));
-	// init_attr.cap.max_send_wr = cb->txdepth;
+	//init_attr.cap.max_send_wr = cb->txdepth;
 	init_attr.cap.max_recv_wr = cb->txdepth;
 
 	/* For flush_qp() */
-	// init_attr.cap.max_send_wr++;
+	//init_attr.cap.max_send_wr++;
 	init_attr.cap.max_recv_wr++;
 
 	init_attr.cap.max_recv_sge = 1;
-	// init_attr.cap.max_send_sge = 1;
-	// init_attr.qp_type = IB_QPT_RC;
-	// init_attr.send_cq = cb->cq;
+	//init_attr.cap.max_send_sge = 1;
+	//init_attr.send_cq = cb->cq;
 	init_attr.recv_cq = cb->cq;
 	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
 
 
     init_attr.qp_type = IB_QPT_XRC_TGT;
-    init_attr.xrcd = NULL;//TODO:add xrcd
+    init_attr.xrcd = cb->xrcd;//TODO:add xrcd
+    if(cb->xrcd==NULL){
+        pr_err("xrcd is NULL\n");
+        goto err2;
+    }
 
     ret = rdma_create_qp(cb->child_cm_id,pd,&init_attr);
     if(!ret)
@@ -1317,23 +1346,37 @@ int mlx5_sched_run_server(struct srm_cb *cb){
     DEBUG_LOG("created qp %p\n", cb->qp);
         
     //alloc mr and buf
-    ret = mlx5_sched_alloc_mr(cb,pd);
-    if(ret){
-        pr_err("alloc mr failed\n");
-        goto err3;
-    }
+    // ret = mlx5_sched_alloc_mr(cb,pd);
+    // if(ret){
+    //     pr_err("alloc mr failed\n");
+    //     goto err3;
+    // }
+    // struct ib_sge sgl;
+    // struct ib_recv_wr recv_wr,*bad_wr;
+    // memset(&recv_wr,0,sizeof recv_wr);
+
+    // sgl.addr = cb->dma_buf;
+    // sgl.length = cb->buf_sz;
+    // sgl.lkey = cb->pd->local_dma_lkey;
+    // recv_wr.num_sge = 1;
+    // recv_wr.sg_list = &sgl;
+    // if(ib_post_recv(cb->qp,&recv_wr,&bad_wr)){
+    //     pr_err("post recv failed\n");
+    //     goto err4;
+    // }
+
     ret = srm_accept(cb);
     if(ret){
         pr_err("accept failed\n");
-        goto err4;
+        goto err3;
     }
     DEBUG_LOG("accept\n");
     //reg mr and bind buf
-    ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
-    if(ret){
-        pr_err("reg mr failed\n");
-        goto err5;
-    }
+    // ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
+    // if(ret){
+    //     pr_err("reg mr failed\n");
+    //     goto err5;
+    // }
     DEBUG_LOG("reg mr success\n");
 
     while(!kthread_should_stop()){
@@ -1341,11 +1384,9 @@ int mlx5_sched_run_server(struct srm_cb *cb){
         msleep(1000);
     }
     pr_info("srm server stop\n"); 
-err5:
-    rdma_disconnect(cb->child_cm_id);
-err4:
-    //TODO:release buf and mr.
-    ib_sched_free_buf(cb);
+// err4:
+//     //TODO:release buf and mr.
+//     ib_sched_free_buf(cb);
 err3:
     ib_destroy_qp(&cb->qp->ibqp);
 err2:

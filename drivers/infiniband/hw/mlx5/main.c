@@ -5366,7 +5366,7 @@ static void __exit mlx5_ib_cleanup(void)
 	//exit scheduler
 	mlx5_ib_sched_exit(&sched);
 	//exit server
-	if(!IS_ERR(server_task)&&server_task->state!=TASK_DEAD)
+	if(server_task)
 		kthread_stop(server_task);
 	else 
 		pr_info("server task PTR is err\n");

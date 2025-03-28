@@ -64,6 +64,7 @@ struct srm_cb{
     int txdepth;
     int server;
     struct ib_pd *pd;
+    struct ib_xrcd *xrcd;
 };
 struct mlx5_ib_srmc{
    struct srm_cb ini_cb;

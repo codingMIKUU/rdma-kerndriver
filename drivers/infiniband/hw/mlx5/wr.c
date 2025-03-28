@@ -1133,13 +1133,12 @@ int mlx5_ib_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 			}
 			qp->sq.wr_data[idx] = MLX5_IB_WR_SIG_PIPED;
 		}
-		pr_info("c\n");
 		switch (qp->type) {
 		case IB_QPT_XRC_INI:
-			xrc = seg;
-			xrc->xrc_srqn = cpu_to_be32(wr->qp_type.xrc.remote_srqn);
-			seg += sizeof(*xrc);
-			size += sizeof(*xrc) / 16;
+			// xrc = seg;
+			// xrc->xrc_srqn = cpu_to_be32(wr->qp_type.xrc.remote_srqn);
+			// seg += sizeof(*xrc);
+			// size += sizeof(*xrc) / 16;
 			fallthrough;
 		case IB_QPT_RC:
 			err = handle_qpt_rc(dev, qp, wr, &ctrl, &seg, &size,
