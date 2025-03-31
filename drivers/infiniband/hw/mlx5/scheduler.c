@@ -191,7 +191,6 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched* sched,int qpn){
     return 0;
 
 }
-
 int scheduler_polling(void* data)
 {
     int ret;
@@ -210,7 +209,7 @@ int scheduler_polling(void* data)
     int nreq;
     struct mlx5_cqe64 *cqe64,*ucqe64;
     struct ib_sge sgl;
-    memset(&rdma_wr,0,sizeof rdma_wr);
+    
     
     while(!kthread_should_stop()){
         // pr_info("polling hhhhh\n");
@@ -222,11 +221,14 @@ int scheduler_polling(void* data)
             }
             pr_info("posting wr,sizeof wr is %u\n",sizeof(struct ibv_send_wr));
             pr_info("qpn:%d,cur_post:%d,wr_id:%llu\n",sqb->qpn,sqb->cur_post,ibv_wr->wr_id);
+
+            memset(&rdma_wr,0,sizeof rdma_wr);
+
+
             //can just have one wr for now 
             rdma_wr.wr.wr_id = (((uint64_t)sqb->qpn) << 32) | sqb->cur_post;
             pr_info("rdma_wr.wr.wr_id:%llu\n",rdma_wr.wr.wr_id);
-            memcpy(&sgl,&ibv_wr->sge,sizeof(struct ib_sge)); 
-
+            memcpy(&sgl,&ibv_wr->sge,sizeof(struct ib_sge));
             pr_info("opcode:%u,send_flags:%u,imm_data:%u,srqn:%u,",ibv_wr->opcode,ibv_wr->send_flags,ibv_wr->imm_data,ibv_wr->qp_type.srm.remote_srqn);
             rdma_wr.wr.sg_list = &sgl;
             rdma_wr.wr.num_sge = 1;
@@ -251,6 +253,13 @@ int scheduler_polling(void* data)
                         break;
                     }
                     pr_info("max_gs:%d\n,max_post:%d,fbc:%u\n",srmc->ini_cb.qp->sq.max_gs,srmc->ini_cb.qp->sq.max_post,srmc->ini_cb.qp->sq.fbc);
+                    
+                    struct buf_info *bf_info;
+                    bf_info = (struct buf_info *)srmc->ini_cb.buf;
+                    rdma_wr.remote_addr = bf_info->addr;
+                    rdma_wr.rkey = bf_info->rkey;
+
+
                     if(ret = ib_post_send(&srmc->ini_cb.qp->ibqp,&rdma_wr.wr,&bad_wr)){
                         pr_err("post send error:%d\n",ret);
                     }
@@ -1043,7 +1052,7 @@ static int srm_connect_client(struct srm_cb *cb)
 	memset(&conn_param, 0, sizeof conn_param);
 	conn_param.responder_resources = 1;
 	conn_param.initiator_depth = 1;
-	conn_param.retry_count = 10;
+	conn_param.retry_count = 1;
 
 	ret = rdma_connect(cb->cm_id, &conn_param);
 	if (ret)
@@ -1080,7 +1089,7 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
     cb->txdepth = 256;
     cb->pd = pd;
 
-    cb->cm_id = rdma_create_id(&init_net,srm_cma_event_handler,cb,RDMA_PS_TCP,IB_QPT_XRC_INI);
+    cb->cm_id = rdma_create_id(&init_net,srm_cma_event_handler,cb,RDMA_PS_TCP,IB_QPT_RC);
     if (IS_ERR(cb->cm_id))
 	{
 		ret = PTR_ERR(cb->cm_id);
@@ -1109,17 +1118,17 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
     //create qp
 	memset(&init_attr, 0, sizeof(init_attr));
 	init_attr.cap.max_send_wr = cb->txdepth;
-	// init_attr.cap.max_recv_wr = 2;
+	init_attr.cap.max_recv_wr = cb->txdepth;
 
 	/* For flush_qp() */
 	init_attr.cap.max_send_wr++;
-	//init_attr.cap.max_recv_wr++;
+	init_attr.cap.max_recv_wr++;
 
-	//init_attr.cap.max_recv_sge = 1;
+	init_attr.cap.max_recv_sge = 1;
 	init_attr.cap.max_send_sge = 1;
-	init_attr.qp_type = IB_QPT_XRC_INI;
+	init_attr.qp_type = IB_QPT_RC;
 	init_attr.send_cq = cb->cq;
-	//init_attr.recv_cq = cb->cq;
+	init_attr.recv_cq = cb->cq;
 	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     ret = rdma_create_qp(cb->cm_id,pd,&init_attr);
     if(!ret)
@@ -1136,6 +1145,18 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
         pr_err("alloc mr failed,error:%d\n",ret);
         goto err2;
     }
+    // struct ib_sge sgl;
+    // struct ib_recv_wr recv_wr,*bad_wr;
+    // memset(&recv_wr,0,sizeof recv_wr);
+    // sgl.addr = cb->dma_buf;
+    // sgl.length = sizeof(struct buf_info);
+    // sgl.lkey = cb->mr->lkey;
+    // recv_wr.num_sge = 1;
+    // recv_wr.sg_list = &sgl;
+    // if(ib_post_recv(cb->qp,&recv_wr,&bad_wr)){
+    //     pr_err("post recv failed\n");
+    //     goto err2;
+    // }
     //modify qp etc
     ret = srm_connect_client(cb);
     if(ret){
@@ -1143,37 +1164,37 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
         goto err3;
     }
 
+    struct ib_send_wr wr,*bad_wr;
+    struct ib_sge sgl;
+    struct ib_wc wc;
+
+    memset(&wr,0,sizeof(wr));
+
+    sgl.addr = cb->dma_buf;
+    sgl.length = cb->buf_sz;
+    sgl.lkey = cb->mr->lkey;
+    wr.opcode = IB_WR_SEND;
+    wr.send_flags = IB_SEND_SIGNALED;
+    wr.sg_list = &sgl;
+    wr.num_sge = 1;
+    ret = ib_post_send(cb->qp,&wr,&bad_wr);
+    if(ret){
+        pr_err("ib_post_send failed,error:%d\n",ret);
+        goto err4;
+    }
+    int cqe_num = 0;
+    while(!cqe_num){
+        cqe_num = ib_poll_cq(cb->cq,10,&wc);
+    }
+    DEBUG_LOG("poll cqe_num:%d,wc status:%d,opcode:%d\n",cqe_num,wc.status,wc.opcode);
+
     //reg mr and bind buf
     ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
     if(ret){
         pr_err("reg mr failed,error:%d\n",ret);
         goto err4;
     }
-
-    // struct ib_send_wr wr,*bad_wr;
-    // struct ib_sge sgl;
-    // struct ib_wc wc;
-
-    // memset(&wr,0,sizeof(wr));
-
-    // sgl.addr = cb->dma_buf;
-    // sgl.length = cb->buf_sz;
-    // sgl.lkey = cb->mr->lkey;
-    // wr.opcode = IB_WR_SEND;
-    // wr.send_flags = IB_SEND_SIGNALED;
-    // wr.sg_list = &sgl;
-    // wr.num_sge = 1;
-    // ret = ib_post_send(cb->qp,&wr,&bad_wr);
-    // if(ret){
-    //     pr_err("ib_post_send failed,error:%d\n",ret);
-    //     goto err4;
-    // }
-    // int cqe_num = 0;
-    // while(!cqe_num){
-    //     cqe_num = ib_poll_cq(cb->cq,1,&wc);
-    // }
-    // DEBUG_LOG("poll cqe_num:%d,wc status:%d\n",cqe_num,wc.status);
-
+    DEBUG_LOG("client reg mr success\n");
 
     return ret?0:cb->qp->ibqp.qp_num; 
 err4:
@@ -1275,7 +1296,7 @@ int mlx5_sched_run_server(struct srm_cb *cb){
     init_waitqueue_head(&cb->sem);
     cb->txdepth = 256;
 
-    cb->cm_id = rdma_create_id(&init_net, srm_cma_event_handler, cb, RDMA_PS_TCP, IB_QPT_XRC_TGT);
+    cb->cm_id = rdma_create_id(&init_net, srm_cma_event_handler, cb, RDMA_PS_TCP, IB_QPT_RC);
 	if (IS_ERR(cb->cm_id))
 	{
 		ret = PTR_ERR(cb->cm_id);
@@ -1315,22 +1336,22 @@ int mlx5_sched_run_server(struct srm_cb *cb){
 
     //create qp
 	memset(&init_attr, 0, sizeof(init_attr));
-	//init_attr.cap.max_send_wr = cb->txdepth;
+	init_attr.cap.max_send_wr = cb->txdepth;
 	init_attr.cap.max_recv_wr = cb->txdepth;
 
 	/* For flush_qp() */
-	//init_attr.cap.max_send_wr++;
+	init_attr.cap.max_send_wr++;
 	init_attr.cap.max_recv_wr++;
 
 	init_attr.cap.max_recv_sge = 1;
-	//init_attr.cap.max_send_sge = 1;
-	//init_attr.send_cq = cb->cq;
+	init_attr.cap.max_send_sge = 1;
+	init_attr.send_cq = cb->cq;
 	init_attr.recv_cq = cb->cq;
 	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
 
 
-    init_attr.qp_type = IB_QPT_XRC_TGT;
-    init_attr.xrcd = cb->xrcd;//TODO:add xrcd
+    init_attr.qp_type = IB_QPT_RC;
+    // init_attr.xrcd = cb->xrcd;//TODO:add xrcd
     if(cb->xrcd==NULL){
         pr_err("xrcd is NULL\n");
         goto err2;
@@ -1346,47 +1367,84 @@ int mlx5_sched_run_server(struct srm_cb *cb){
     DEBUG_LOG("created qp %p\n", cb->qp);
         
     //alloc mr and buf
-    // ret = mlx5_sched_alloc_mr(cb,pd);
-    // if(ret){
-    //     pr_err("alloc mr failed\n");
-    //     goto err3;
-    // }
-    // struct ib_sge sgl;
-    // struct ib_recv_wr recv_wr,*bad_wr;
-    // memset(&recv_wr,0,sizeof recv_wr);
+    ret = mlx5_sched_alloc_mr(cb,pd);
+    if(ret){
+        pr_err("alloc mr failed\n");
+        goto err3;
+    }
 
-    // sgl.addr = cb->dma_buf;
-    // sgl.length = cb->buf_sz;
-    // sgl.lkey = cb->pd->local_dma_lkey;
-    // recv_wr.num_sge = 1;
-    // recv_wr.sg_list = &sgl;
-    // if(ib_post_recv(cb->qp,&recv_wr,&bad_wr)){
-    //     pr_err("post recv failed\n");
-    //     goto err4;
-    // }
+
+    struct ib_sge sgl;
+    struct ib_recv_wr recv_wr,*bad_wr;
+    memset(&recv_wr,0,sizeof recv_wr);
+    sgl.addr = cb->dma_buf;
+    sgl.length = cb->buf_sz;
+    sgl.lkey = cb->pd->local_dma_lkey;
+    recv_wr.num_sge = 1;
+    recv_wr.sg_list = &sgl;
+    if(ib_post_recv(cb->qp,&recv_wr,&bad_wr)){
+        pr_err("post recv failed\n");
+        goto err4;
+    }
 
     ret = srm_accept(cb);
     if(ret){
         pr_err("accept failed\n");
-        goto err3;
+        goto err4;
     }
     DEBUG_LOG("accept\n");
     //reg mr and bind buf
-    // ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
-    // if(ret){
-    //     pr_err("reg mr failed\n");
-    //     goto err5;
-    // }
+    ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
+    if(ret){
+        pr_err("reg mr failed\n");
+        goto err5;
+    }
+
     DEBUG_LOG("reg mr success\n");
+
+
+
+    // struct ib_send_wr wr,*bad_wr;
+    // struct ib_sge sgl;
+    // struct ib_wc wc;
+
+    // memset(&wr,0,sizeof(wr));
+
+
+    // struct buf_info *bf_info;
+    // bf_info = (struct buf_info*)cb->buf;
+    // bf_info->addr = cb->dma_buf;
+    // bf_info->buf_sz = cb->buf_sz;
+    // bf_info->rkey = cb->mr->rkey;
+
+    // sgl.addr = cb->dma_buf;
+    // sgl.length = sizeof(struct buf_info);
+    // sgl.lkey = cb->pd->local_dma_lkey;
+    // wr.opcode = IB_WR_SEND;
+    // wr.send_flags = IB_SEND_SIGNALED;
+    // wr.sg_list = &sgl;
+    // wr.num_sge = 1;
+    // ret = ib_post_send(cb->qp,&wr,&bad_wr);
+    // if(ret){
+    //     pr_err("ib_post_send failed,error:%d\n",ret);
+    //     goto err4;
+    // }
+    // int cqe_num = 0;
+    // while(!cqe_num){
+    //     cqe_num = ib_poll_cq(cb->cq,1,&wc);
+    // }
+    // DEBUG_LOG("poll cqe_num:%d,wc status:%d\n",cqe_num,wc.status);
 
     while(!kthread_should_stop()){
         //waiting
         msleep(1000);
     }
     pr_info("srm server stop\n"); 
-// err4:
-//     //TODO:release buf and mr.
-//     ib_sched_free_buf(cb);
+err5:
+    rdma_disconnect(cb->child_cm_id);
+err4:
+    //TODO:release buf and mr.
+    ib_sched_free_buf(cb);
 err3:
     ib_destroy_qp(&cb->qp->ibqp);
 err2:

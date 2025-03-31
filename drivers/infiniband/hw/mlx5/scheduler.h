@@ -66,6 +66,11 @@ struct srm_cb{
     struct ib_pd *pd;
     struct ib_xrcd *xrcd;
 };
+struct buf_info{
+    char* addr;
+    int buf_sz;
+    u32 rkey;
+};
 struct mlx5_ib_srmc{
    struct srm_cb ini_cb;
    struct srm_cb tgt_cb;
