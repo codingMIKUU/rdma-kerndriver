@@ -1089,7 +1089,7 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
     cb->txdepth = 256;
     cb->pd = pd;
 
-    cb->cm_id = rdma_create_id(&init_net,srm_cma_event_handler,cb,RDMA_PS_TCP,IB_QPT_RC);
+    cb->cm_id = rdma_create_id(&init_net,srm_cma_event_handler,cb,RDMA_PS_TCP,IB_QPT_XRC_INI);
     if (IS_ERR(cb->cm_id))
 	{
 		ret = PTR_ERR(cb->cm_id);
@@ -1102,6 +1102,9 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
         printk(KERN_ERR "bind client failed\n");
         goto err0;
     }
+
+
+
 
     //create cq
     memset(&cq_attr,0,sizeof cq_attr);
@@ -1118,17 +1121,17 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
     //create qp
 	memset(&init_attr, 0, sizeof(init_attr));
 	init_attr.cap.max_send_wr = cb->txdepth;
-	init_attr.cap.max_recv_wr = cb->txdepth;
+	//init_attr.cap.max_recv_wr = cb->txdepth;
 
 	/* For flush_qp() */
 	init_attr.cap.max_send_wr++;
-	init_attr.cap.max_recv_wr++;
+	//init_attr.cap.max_recv_wr++;
 
-	init_attr.cap.max_recv_sge = 1;
+	//init_attr.cap.max_recv_sge = 1;
 	init_attr.cap.max_send_sge = 1;
-	init_attr.qp_type = IB_QPT_RC;
+	init_attr.qp_type = IB_QPT_XRC_INI;
 	init_attr.send_cq = cb->cq;
-	init_attr.recv_cq = cb->cq;
+	//init_attr.recv_cq = cb->cq;
 	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     ret = rdma_create_qp(cb->cm_id,pd,&init_attr);
     if(!ret)
@@ -1145,8 +1148,46 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
         pr_err("alloc mr failed,error:%d\n",ret);
         goto err2;
     }
+
+    //modify qp etc
+    ret = srm_connect_client(cb);
+    if(ret){
+        pr_err("connect client failed,error:%d\n",ret);
+        goto err3;
+    }
+
+    //reg mr and bind buf
+    ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
+    if(ret){
+        pr_err("reg mr failed,error:%d\n",ret);
+        goto err4;
+    }
+    DEBUG_LOG("client reg mr success\n");
+
+
+
+    // struct ib_send_wr wr,*bad_wr;
+    // struct ib_sge sgl;
+    // struct ib_wc wc;
+
+    // memset(&wr,0,sizeof(wr));
+
+    // sgl.addr = cb->dma_buf;
+    // sgl.length = cb->buf_sz;
+    // sgl.lkey = cb->mr->lkey;
+    // wr.opcode = IB_WR_SEND;
+    // wr.send_flags = IB_SEND_SIGNALED;
+    // wr.sg_list = &sgl;
+    // wr.num_sge = 1;
+    // ret = ib_post_send(cb->qp,&wr,&bad_wr);
+    // if(ret){
+    //     pr_err("ib_post_send failed,error:%d\n",ret);
+    //     goto err4;
+    // }
+
     // struct ib_sge sgl;
     // struct ib_recv_wr recv_wr,*bad_wr;
+    // struct ib_wc wc;
     // memset(&recv_wr,0,sizeof recv_wr);
     // sgl.addr = cb->dma_buf;
     // sgl.length = sizeof(struct buf_info);
@@ -1157,44 +1198,12 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
     //     pr_err("post recv failed\n");
     //     goto err2;
     // }
-    //modify qp etc
-    ret = srm_connect_client(cb);
-    if(ret){
-        pr_err("connect client failed,error:%d\n",ret);
-        goto err3;
-    }
+    // int cqe_num = 0;
+    // while(!cqe_num){
+    //     cqe_num = ib_poll_cq(cb->cq,10,&wc);
+    // }
+    // DEBUG_LOG("poll cqe_num:%d,wc status:%d,opcode:%d\n",cqe_num,wc.status,wc.opcode);
 
-    struct ib_send_wr wr,*bad_wr;
-    struct ib_sge sgl;
-    struct ib_wc wc;
-
-    memset(&wr,0,sizeof(wr));
-
-    sgl.addr = cb->dma_buf;
-    sgl.length = cb->buf_sz;
-    sgl.lkey = cb->mr->lkey;
-    wr.opcode = IB_WR_SEND;
-    wr.send_flags = IB_SEND_SIGNALED;
-    wr.sg_list = &sgl;
-    wr.num_sge = 1;
-    ret = ib_post_send(cb->qp,&wr,&bad_wr);
-    if(ret){
-        pr_err("ib_post_send failed,error:%d\n",ret);
-        goto err4;
-    }
-    int cqe_num = 0;
-    while(!cqe_num){
-        cqe_num = ib_poll_cq(cb->cq,10,&wc);
-    }
-    DEBUG_LOG("poll cqe_num:%d,wc status:%d,opcode:%d\n",cqe_num,wc.status,wc.opcode);
-
-    //reg mr and bind buf
-    ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
-    if(ret){
-        pr_err("reg mr failed,error:%d\n",ret);
-        goto err4;
-    }
-    DEBUG_LOG("client reg mr success\n");
 
     return ret?0:cb->qp->ibqp.qp_num; 
 err4:
@@ -1296,7 +1305,7 @@ int mlx5_sched_run_server(struct srm_cb *cb){
     init_waitqueue_head(&cb->sem);
     cb->txdepth = 256;
 
-    cb->cm_id = rdma_create_id(&init_net, srm_cma_event_handler, cb, RDMA_PS_TCP, IB_QPT_RC);
+    cb->cm_id = rdma_create_id(&init_net, srm_cma_event_handler, cb, RDMA_PS_TCP, IB_QPT_XRC_TGT);
 	if (IS_ERR(cb->cm_id))
 	{
 		ret = PTR_ERR(cb->cm_id);
@@ -1336,22 +1345,22 @@ int mlx5_sched_run_server(struct srm_cb *cb){
 
     //create qp
 	memset(&init_attr, 0, sizeof(init_attr));
-	init_attr.cap.max_send_wr = cb->txdepth;
+	//init_attr.cap.max_send_wr = cb->txdepth;
 	init_attr.cap.max_recv_wr = cb->txdepth;
 
 	/* For flush_qp() */
-	init_attr.cap.max_send_wr++;
+	//init_attr.cap.max_send_wr++;
 	init_attr.cap.max_recv_wr++;
 
 	init_attr.cap.max_recv_sge = 1;
-	init_attr.cap.max_send_sge = 1;
-	init_attr.send_cq = cb->cq;
+	//init_attr.cap.max_send_sge = 1;
+	//init_attr.send_cq = cb->cq;
 	init_attr.recv_cq = cb->cq;
 	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
 
 
-    init_attr.qp_type = IB_QPT_RC;
-    // init_attr.xrcd = cb->xrcd;//TODO:add xrcd
+    init_attr.qp_type = IB_QPT_XRC_TGT;
+    init_attr.xrcd = cb->xrcd;//TODO:add xrcd
     if(cb->xrcd==NULL){
         pr_err("xrcd is NULL\n");
         goto err2;
@@ -1374,18 +1383,18 @@ int mlx5_sched_run_server(struct srm_cb *cb){
     }
 
 
-    struct ib_sge sgl;
-    struct ib_recv_wr recv_wr,*bad_wr;
-    memset(&recv_wr,0,sizeof recv_wr);
-    sgl.addr = cb->dma_buf;
-    sgl.length = cb->buf_sz;
-    sgl.lkey = cb->pd->local_dma_lkey;
-    recv_wr.num_sge = 1;
-    recv_wr.sg_list = &sgl;
-    if(ib_post_recv(cb->qp,&recv_wr,&bad_wr)){
-        pr_err("post recv failed\n");
-        goto err4;
-    }
+    // struct ib_sge sgl;
+    // struct ib_recv_wr recv_wr,*bad_wr;
+    // memset(&recv_wr,0,sizeof recv_wr);
+    // sgl.addr = cb->dma_buf;
+    // sgl.length = cb->buf_sz;
+    // sgl.lkey = cb->pd->local_dma_lkey;
+    // recv_wr.num_sge = 1;
+    // recv_wr.sg_list = &sgl;
+    // if(ib_post_recv(cb->qp,&recv_wr,&bad_wr)){
+    //     pr_err("post recv failed\n");
+    //     goto err4;
+    // }
 
     ret = srm_accept(cb);
     if(ret){
