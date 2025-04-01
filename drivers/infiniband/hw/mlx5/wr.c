@@ -1225,7 +1225,7 @@ int mlx5_ib_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 		{
 		case IB_QPT_XRC_INI:
 			xrc = seg;
-			xrc->xrc_srqn = cpu_to_be32(wr->qp_type.xrc.remote_srqn);
+			//xrc->xrc_srqn = cpu_to_be32(wr->qp_type.xrc.remote_srqn);
 			seg += sizeof(*xrc);
 			size += sizeof(*xrc) / 16;
 			fallthrough;
@@ -1294,7 +1294,7 @@ int mlx5_ib_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 			}
 		}
 		qp->next_fence = next_fence;
-		//pr_info("wr opcode:%d,mlx5_ib_opcode:%d,cur_post:%d\n",wr->opcode,mlx5_ib_opcode[wr->opcode],qp->sq.cur_post);
+		// pr_info("wr opcode:%d,mlx5_ib_opcode:%d,cur_post:%d\n",wr->opcode,mlx5_ib_opcode[wr->opcode],qp->sq.cur_post);
 		mlx5r_finish_wqe(qp, ctrl, seg, size, cur_edge, idx, wr->wr_id,
 						 nreq, fence, mlx5_ib_opcode[wr->opcode]);
 	skip_psv:

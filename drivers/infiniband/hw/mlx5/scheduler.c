@@ -253,13 +253,6 @@ int scheduler_polling(void* data)
                         break;
                     }
                     pr_info("max_gs:%d\n,max_post:%d,fbc:%u\n",srmc->ini_cb.qp->sq.max_gs,srmc->ini_cb.qp->sq.max_post,srmc->ini_cb.qp->sq.fbc);
-                    
-                    struct buf_info *bf_info;
-                    bf_info = (struct buf_info *)srmc->ini_cb.buf;
-                    rdma_wr.remote_addr = bf_info->addr;
-                    rdma_wr.rkey = bf_info->rkey;
-
-
                     if(ret = ib_post_send(&srmc->ini_cb.qp->ibqp,&rdma_wr.wr,&bad_wr)){
                         pr_err("post send error:%d\n",ret);
                     }
@@ -1103,9 +1096,17 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
         goto err0;
     }
 
+    // //create pd:now replace the userspace pd with kernel pd
+    // cb->pd = ib_alloc_pd(cb->cm_id->device);
+    // pd = cb->pd;
+    // if (IS_ERR(cb->pd)){
+    //     printk(KERN_ERR "ib_alloc_pd failed,pd:%s\n",PTR_ERR(cb->pd));
+    //     ret = PTR_ERR(cb->pd);
+    //     goto err0;
+    // }
 
 
-
+    
     //create cq
     memset(&cq_attr,0,sizeof cq_attr);
     cq_attr.cqe = cb->txdepth;
@@ -1375,12 +1376,12 @@ int mlx5_sched_run_server(struct srm_cb *cb){
     }
     DEBUG_LOG("created qp %p\n", cb->qp);
         
-    //alloc mr and buf
-    ret = mlx5_sched_alloc_mr(cb,pd);
-    if(ret){
-        pr_err("alloc mr failed\n");
-        goto err3;
-    }
+    // //alloc mr and buf
+    // ret = mlx5_sched_alloc_mr(cb,pd);
+    // if(ret){
+    //     pr_err("alloc mr failed\n");
+    //     goto err3;
+    // }
 
 
     // struct ib_sge sgl;
@@ -1399,17 +1400,17 @@ int mlx5_sched_run_server(struct srm_cb *cb){
     ret = srm_accept(cb);
     if(ret){
         pr_err("accept failed\n");
-        goto err4;
+        goto err3;
     }
     DEBUG_LOG("accept\n");
-    //reg mr and bind buf
-    ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
-    if(ret){
-        pr_err("reg mr failed\n");
-        goto err5;
-    }
-
-    DEBUG_LOG("reg mr success\n");
+    
+    // //reg mr and bind buf
+    // ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
+    // if(ret){
+    //     pr_err("reg mr failed\n");
+    //     goto err5;
+    // }
+    // DEBUG_LOG("reg mr success\n");
 
 
 
@@ -1449,11 +1450,11 @@ int mlx5_sched_run_server(struct srm_cb *cb){
         msleep(1000);
     }
     pr_info("srm server stop\n"); 
-err5:
-    rdma_disconnect(cb->child_cm_id);
 err4:
-    //TODO:release buf and mr.
-    ib_sched_free_buf(cb);
+    rdma_disconnect(cb->child_cm_id);
+// err4:
+//     //TODO:release buf and mr.
+//     ib_sched_free_buf(cb);
 err3:
     ib_destroy_qp(&cb->qp->ibqp);
 err2:
