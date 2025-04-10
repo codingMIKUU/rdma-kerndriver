@@ -23,7 +23,8 @@
 #define IP_ADDR "192.168.1.5"
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched* sched,unsigned long virt_addr,size_t size,int qpn,int cqn){
     pr_info("in mlx5_ib_map_ubuf\n");
-    pr_info("内核态virt_addr:%px\n",virt_addr);
+    pr_info("内核态virt_addr:%px,size:%d,qpn:%d,cqn%d\n",virt_addr,size,qpn,cqn);
+    //目前srm qp 的wqe大小为128
     struct mm_struct *mm = current->mm;
     int ret;
     int i;
@@ -52,7 +53,6 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched* sched,unsigned long virt_addr,size_t 
     }
     uq->cqn = cqn;
     uq->qpn = qpn;
-    pr_info("内核态qpn:%d\n",uq->qpn);
     uq->sq_size = size;
     uq->buf = vmap(pages,npages,VM_MAP,PAGE_KERNEL);//map the pages(phys addr) to kernel space（virtual addr），非连续物理页映射到虚拟页
     uq->pages = pages;
@@ -101,6 +101,7 @@ int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched* sched,unsigned long virt_addr,size
     uq->cq_size = size;
     uq->buf = vmap(pages,npages,VM_MAP,PAGE_KERNEL);
     uq->pages = pages;
+    uq->cqe_sz = 64;
     if(!uq->buf){
         kfree(uq);
         for (i = 0; i < ret; i++)
@@ -209,9 +210,11 @@ int scheduler_polling(void* data)
     int nreq;
     struct mlx5_cqe64 *cqe64,*ucqe64;
     struct ib_sge sgl;
-    
+    int op_own;
+    bool qp_attr_inpolling_flag=1;
     
     while(!kthread_should_stop()){
+        
         // pr_info("polling hhhhh\n");
         mutex_lock(&sched->sq_lock);
         for(sqb = sched->sq_head;sqb;sqb=sqb->next){//是否应该加一个检查该QP有几个WR，都拉下来的逻辑？
@@ -220,15 +223,15 @@ int scheduler_polling(void* data)
                 continue;
             }
             pr_info("posting wr,sizeof wr is %u\n",sizeof(struct ibv_send_wr));
-            pr_info("qpn:%d,cur_post:%d,wr_id:%llu\n",sqb->qpn,sqb->cur_post,ibv_wr->wr_id);
+            pr_info("qpn:%d,cur_post:%d,wr_id:%llu,sq buffer size:%d\n",sqb->qpn,sqb->cur_post,ibv_wr->wr_id,sqb->sq_size);
 
             memset(&rdma_wr,0,sizeof rdma_wr);
 
 
             //can just have one wr for now 
             rdma_wr.wr.wr_id = (((uint64_t)sqb->qpn) << 32) | sqb->cur_post;
-            pr_info("rdma_wr.wr.wr_id:%llu\n",rdma_wr.wr.wr_id);
-            memcpy(&sgl,&ibv_wr->sge,sizeof(struct ib_sge));
+            DEBUG_LOG("rdma_wr.wr.wr_id:%llu\n",rdma_wr.wr.wr_id);
+            DEBUG_LOG(&sgl,&ibv_wr->sge,sizeof(struct ib_sge));
             pr_info("opcode:%u,send_flags:%u,imm_data:%u,srqn:%u,",ibv_wr->opcode,ibv_wr->send_flags,ibv_wr->imm_data,ibv_wr->qp_type.srm.remote_srqn);
             rdma_wr.wr.sg_list = &sgl;
             rdma_wr.wr.num_sge = 1;
@@ -240,10 +243,19 @@ int scheduler_polling(void* data)
             rdma_wr.rkey = ibv_wr->wr.rdma.rkey;
             ibv_wr->wr_id = 0;
             sqb->cur_post++;
-            pr_info("发送端的数据缓存区地址: %px\n", sgl.addr);
-            pr_info("发送端要写入的缓存区地址: %px\n", rdma_wr.remote_addr);
-            pr_info("服务端lkey：%d，收到的rkey：%d\n", sgl.lkey, rdma_wr.rkey);
-    
+            DEBUG_LOG("发送端的数据缓存区地址: %px\n", sgl.addr);
+            DEBUG_LOG("发送端要写入的缓存区地址: %px\n", rdma_wr.remote_addr);
+            DEBUG_LOG("服务端lkey：%d，收到的rkey：%d\n", sgl.lkey, rdma_wr.rkey);
+
+            // for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
+            //     struct ib_qp_attr qp_attr_inpolling2;
+            //     struct ib_qp_init_attr qp_init_attr_inpolling2;
+            //     ib_query_qp(&srmc->ini_cb.qp->ibqp,&qp_attr_inpolling2,0,&qp_init_attr_inpolling2);
+            //     if(qp_attr_inpolling2.cur_qp_state==3)DEBUG_LOG("in scheduler_polling2, qp cur state:%d\n",qp_attr_inpolling2.cur_qp_state);
+            //     else {DEBUG_LOG("in scheduler_polling2, qp cur state:%d\n",qp_attr_inpolling2.cur_qp_state);
+            //         DEBUG_LOG("msleep2 100ms\n");msleep(100);}
+            // }
+
             //find the srmc qp to send this req
             mutex_lock(&sched->srmc_lock);
             for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
@@ -252,7 +264,7 @@ int scheduler_polling(void* data)
                         pr_err("Unexpected:ini qp for this srmc is NULL\n");
                         break;
                     }
-                    pr_info("max_gs:%d\n,max_post:%d,fbc:%u\n",srmc->ini_cb.qp->sq.max_gs,srmc->ini_cb.qp->sq.max_post,srmc->ini_cb.qp->sq.fbc);
+                    DEBUG_LOG("max_gs:%d\n,max_post:%d,fbc:%u\n",srmc->ini_cb.qp->sq.max_gs,srmc->ini_cb.qp->sq.max_post,srmc->ini_cb.qp->sq.fbc);
                     if(ret = ib_post_send(&srmc->ini_cb.qp->ibqp,&rdma_wr.wr,&bad_wr)){
                         pr_err("post send error:%d\n",ret);
                     }
@@ -275,18 +287,11 @@ int scheduler_polling(void* data)
                 memset(&wc,1,sizeof wc);
                 int cqe_num=0;
                 while(!cqe_num){
-                    cqe_num=ib_poll_cq(srmc->ini_cb.qp->ibqp.send_cq,1,&wc);
-                    // cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->init_qp->ibqp.send_cq,1,&wc,&cqe);
+                    //cqe_num=ib_poll_cq(srmc->ini_cb.qp->ibqp.send_cq,1,&wc);
+                    cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.qp->ibqp.send_cq,1,&wc,&cqe);
                 }
-                pr_warn("cqe_num:%d,wc status:%d\n",cqe_num,wc.status);
-                // ret = mlx5_ib_poll_cq_with_cqe(srmc->init_qp->ibqp.send_cq,1,&wc,&cqe);//is that ok to get cqe?
-                // pr_warn("ret: %d, wc status:%d",ret,wc.status);
-                // if(!ret)
-                //     continue;
+                DEBUG_LOG("cqe_num:%d,wc status:%d\n",cqe_num,wc.status);
                 srmc->ini_cb.sig_cnt--;
-                if(wc.status!=IB_WC_SUCCESS){
-                    continue;
-                }
                 cqe64 =(to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
                 //Two attr to change
                 
@@ -310,16 +315,22 @@ int scheduler_polling(void* data)
                     if(cqb->cqn == cqn){
                         //distribute
                         //TODO:change the owner bit
-                        pr_info("find cqn:%d\n",cqn);
+                        DEBUG_LOG("find cqn:%d\n",cqn);
                         ucqe = cqb->buf + cqb->cur_put * cqb->cqe_sz;
                         ucqe64 = (cqb->cqe_sz == 64) ? ucqe : ucqe + 64;
                         memcpy(ucqe,cqe,cqb->cqe_sz);
-                        ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn)-srmc->ini_cb.qp->ibqp.qp_num + qpn);
-                        ucqe64->wqe_counter =  htonl(wc.wr_id & 0xffffffff);
+                        DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n",ucqe64->op_own,cqb->cqe_sz);
+                        ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn)&(~0xffffff) | qpn);
+                        ucqe64->wqe_counter =  htons(wc.wr_id & 0xffff);
+                        //反转用户态cqe的owner_bit
+                        ucqe64->op_own = (ucqe64->op_own & (~0xf)) | cqb->op_own;
+                        DEBUG_LOG("ucqe64->op_own:%x,op_own:%d\n",ucqe64->op_own,op_own);
                         cqb->cur_put ++ ;
                         if(cqb->cur_put* cqb->cqe_sz >= cqb->cq_size){
                             cqb->cur_put = 0;
+                            cqb->op_own ^= MLX5_CQE_OWNER_MASK;
                         }
+                        DEBUG_LOG("distribute cqe finished\n");
                         break;
                     }
                 }
@@ -328,10 +339,9 @@ int scheduler_polling(void* data)
             //pr_info("polling cqe\n");
         }
         mutex_unlock(&sched->srmc_lock);
-        msleep(10000);
+        msleep(100);
     }
     pr_info("scheduler thread exit\n");
-    pr_info("kthread_should_stop: %d\n", kthread_should_stop());
 	return 0;
 }
 
@@ -388,6 +398,7 @@ int scheduler_polling(void* data)
 
 int mlx5_ib_sched_init(struct mlx5_ib_sched* sched)
 {
+    
     sched->task = kthread_create(scheduler_polling,(void*)sched,"polling thread");//void* can accept any type of pointer
 	sched->sq_head = NULL;
     sched->cq_head = NULL;
@@ -455,7 +466,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched* sched)
         
         if(srmc->ini_cb.state == CONNECTED){
             rdma_disconnect(srmc->ini_cb.cm_id);
-            ib_sched_free_buf(&srmc->ini_cb);
+            //ib_sched_free_buf(&srmc->ini_cb);
             ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
             ib_destroy_cq(srmc->ini_cb.cq);
             rdma_destroy_id(srmc->ini_cb.cm_id);
@@ -1045,7 +1056,7 @@ static int srm_connect_client(struct srm_cb *cb)
 	memset(&conn_param, 0, sizeof conn_param);
 	conn_param.responder_resources = 1;
 	conn_param.initiator_depth = 1;
-	conn_param.retry_count = 1;
+	conn_param.retry_count = 5;
 
 	ret = rdma_connect(cb->cm_id, &conn_param);
 	if (ret)
@@ -1106,7 +1117,7 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
     // }
 
 
-    
+
     //create cq
     memset(&cq_attr,0,sizeof cq_attr);
     cq_attr.cqe = cb->txdepth;
@@ -1122,17 +1133,17 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
     //create qp
 	memset(&init_attr, 0, sizeof(init_attr));
 	init_attr.cap.max_send_wr = cb->txdepth;
-	//init_attr.cap.max_recv_wr = cb->txdepth;
+	init_attr.cap.max_recv_wr = cb->txdepth;
 
 	/* For flush_qp() */
-	init_attr.cap.max_send_wr++;
+	//init_attr.cap.max_send_wr++;
 	//init_attr.cap.max_recv_wr++;
 
-	//init_attr.cap.max_recv_sge = 1;
+	init_attr.cap.max_recv_sge = 1;
 	init_attr.cap.max_send_sge = 1;
 	init_attr.qp_type = IB_QPT_XRC_INI;
 	init_attr.send_cq = cb->cq;
-	//init_attr.recv_cq = cb->cq;
+	init_attr.recv_cq = cb->cq;
 	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     ret = rdma_create_qp(cb->cm_id,pd,&init_attr);
     if(!ret)
@@ -1143,12 +1154,12 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
     }
     DEBUG_LOG("created qp %p\n", cb->qp);
         
-    //alloc mr and buf
-    ret = mlx5_sched_alloc_mr(cb,pd);
-    if(ret){
-        pr_err("alloc mr failed,error:%d\n",ret);
-        goto err2;
-    }
+    // //alloc mr and buf
+    // ret = mlx5_sched_alloc_mr(cb,pd);
+    // if(ret){
+    //     pr_err("alloc mr failed,error:%d\n",ret);
+    //     goto err2;
+    // }
 
     //modify qp etc
     ret = srm_connect_client(cb);
@@ -1158,16 +1169,17 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
     }
 
     //reg mr and bind buf
-    ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
-    if(ret){
-        pr_err("reg mr failed,error:%d\n",ret);
-        goto err4;
-    }
-    DEBUG_LOG("client reg mr success\n");
+    // ret = mlx5_sched_reg_mr(cb->mr,cb->qp,cb->dma_buf,cb->buf_sz,cb->page_list_len);
+    // if(ret){
+    //     pr_err("reg mr failed,error:%d\n",ret);
+    //     goto err4;
+    // }
+    // DEBUG_LOG("client reg mr success\n");
 
 
-
-    // struct ib_send_wr wr,*bad_wr;
+    
+    // struct ib_rdma_wr wr;
+    // struct ib_send_wr bad_wr;
     // struct ib_sge sgl;
     // struct ib_wc wc;
 
@@ -1176,10 +1188,11 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd){
     // sgl.addr = cb->dma_buf;
     // sgl.length = cb->buf_sz;
     // sgl.lkey = cb->mr->lkey;
-    // wr.opcode = IB_WR_SEND;
-    // wr.send_flags = IB_SEND_SIGNALED;
-    // wr.sg_list = &sgl;
-    // wr.num_sge = 1;
+    // wr.wr.opcode = IB_WR_RDMA_WRITE;
+    // wr.wr.qp_type.xrc.remote_srqn = 1145;
+    // wr.wr.send_flags = IB_SEND_SIGNALED;
+    // wr.wr.sg_list = &sgl;
+    // wr.wr.num_sge = 1;
     // ret = ib_post_send(cb->qp,&wr,&bad_wr);
     // if(ret){
     //     pr_err("ib_post_send failed,error:%d\n",ret);
@@ -1211,7 +1224,7 @@ err4:
     rdma_disconnect(cb->cm_id);
 err3:
     //TODO:free buf and mr resources.
-    ib_sched_free_buf(cb);
+    //ib_sched_free_buf(cb);
 err2:
     ib_destroy_qp(&cb->qp->ibqp);
 err1:
@@ -1350,8 +1363,8 @@ int mlx5_sched_run_server(struct srm_cb *cb){
 	init_attr.cap.max_recv_wr = cb->txdepth;
 
 	/* For flush_qp() */
-	//init_attr.cap.max_send_wr++;
-	init_attr.cap.max_recv_wr++;
+	// init_attr.cap.max_send_wr++;
+	// init_attr.cap.max_recv_wr++;
 
 	init_attr.cap.max_recv_sge = 1;
 	//init_attr.cap.max_send_sge = 1;
@@ -1447,7 +1460,7 @@ int mlx5_sched_run_server(struct srm_cb *cb){
 
     while(!kthread_should_stop()){
         //waiting
-        msleep(1000);
+        msleep(100);
     }
     pr_info("srm server stop\n"); 
 err4:
@@ -1471,6 +1484,7 @@ out:
 }
 
 void ib_sched_free_buf(struct srm_cb *cb){
+    DEBUG_LOG("ib_sched_free_buf\n");
     ib_dereg_mr(cb->mr);
     dma_unmap_single(cb->pd->device->dma_device, dma_unmap_addr(cb,dma_mapping), cb->buf_sz, DMA_BIDIRECTIONAL);
     kfree(cb->buf);

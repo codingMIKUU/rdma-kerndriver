@@ -1,3 +1,8 @@
 {
-
+    "files.associations": {
+        "*.h": "cpp",
+        "random": "c",
+        "*.tcc": "c",
+        "streambuf": "c"
+    }
 }

@@ -653,8 +653,8 @@ static int sq_overhead(struct ib_qp_init_attr *attr)
 			    sizeof(struct mlx5_wqe_raddr_seg),
 			    sizeof(struct mlx5_wqe_umr_ctrl_seg) +
 			    sizeof(struct mlx5_mkey_seg) +
-			    MLX5_IB_SQ_UMR_INLINE_THRESHOLD /
-			    MLX5_IB_UMR_OCTOWORD);
+			    MLX5_IB_SQ_UMR_INLINE_THRESHOLD/MLX5_IB_UMR_OCTOWORD
+			);
 		break;
 
 	case IB_QPT_XRC_TGT:
@@ -702,6 +702,7 @@ static int calc_send_wqe(struct ib_qp_init_attr *attr)
 	int size;
 
 	size = sq_overhead(attr);
+	pr_info("sq_overhead %d\n", size);
 	if (size < 0)
 		return size;
 
@@ -783,6 +784,7 @@ static int calc_sq_size(struct mlx5_ib_dev *dev, struct ib_qp_init_attr *attr,
 	qp->sq.max_post = wq_size / wqe_size;
 	attr->cap.max_send_wr = qp->sq.max_post;
 
+	pr_info("qp type:%d, wqe_size %d,max_gs:%d,max_post:%d\n",attr->qp_type,wqe_size,qp->sq.max_gs,qp->sq.max_post);
 	return wq_size;
 }
 
@@ -820,8 +822,11 @@ static int set_user_buf_size(struct mlx5_ib_dev *dev,
 		base->ubuffer.buf_size = qp->rq.wqe_cnt << qp->rq.wqe_shift;
 		qp->raw_packet_qp.sq.ubuffer.buf_size = qp->sq.wqe_cnt << 6;
 	} else {
-		base->ubuffer.buf_size = (qp->rq.wqe_cnt << qp->rq.wqe_shift) +
-					 (qp->sq.wqe_cnt << 6);
+		if(attr->qp_type == IB_QPT_SRM)
+			base->ubuffer.buf_size = (qp->sq.wqe_cnt << 7);
+		else
+			base->ubuffer.buf_size = (qp->rq.wqe_cnt << qp->rq.wqe_shift) +
+						(qp->sq.wqe_cnt << 6);
 	}
 
 	return 0;
@@ -2574,7 +2579,6 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 	/* 0xffffff means we ask to work with cqe version 0 */
 	if (MLX5_CAP_GEN(mdev, cqe_version) == MLX5_CQE_VERSION_V1)
 		MLX5_SET(qpc, qpc, user_index, uidx);
-	pr_info("1\n");
 	if (qp->flags & IB_QP_CREATE_PCI_WRITE_END_PADDING &&
 	    init_attr->qp_type != IB_QPT_RAW_PACKET) {
 		MLX5_SET(qpc, qpc, end_padding_mode,
@@ -2591,19 +2595,19 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 					   &params->resp, init_attr);
 	} else
 		err = mlx5_qpc_create_qp(dev, &base->mqp, in, inlen, out);
-	if(init_attr->qp_type == IB_QPT_SRM){
-		if(mlx5_ib_map_ubuf(&sched,base->ubuffer.buf_addr,base->ubuffer.buf_size,
-		base->mqp.qpn,to_mcq(init_attr->send_cq)->mcq.cqn)){
-			pr_err("map sq buffer failed\n");
-		}
-		if(init_attr->send_cq){
-			send_cq = to_mcq(init_attr->send_cq);
-			if(mlx5_ib_map_cq_ubuf(&sched,send_cq->buf.umem->address,(send_cq->ibcq.cqe+1)*send_cq->cqe_size,send_cq->mcq.cqn)){
-				pr_err("map send cq buffer failed\n");
+		if(init_attr->qp_type == IB_QPT_SRM){
+			if(mlx5_ib_map_ubuf(&sched,base->ubuffer.buf_addr,base->ubuffer.buf_size,
+			base->mqp.qpn,to_mcq(init_attr->send_cq)->mcq.cqn)){
+				pr_err("map sq buffer failed\n");
 			}
-		}else{
-			pr_err("send cq is null\n");
-		}
+			if(init_attr->send_cq){
+				send_cq = to_mcq(init_attr->send_cq);
+				if(mlx5_ib_map_cq_ubuf(&sched,send_cq->buf.umem->address,(send_cq->ibcq.cqe+1)*send_cq->cqe_size,send_cq->mcq.cqn)){
+					pr_err("map send cq buffer failed\n");
+				}
+			}else{
+				pr_err("send cq is null\n");
+			}
 	}
 	kvfree(in);
 	if (err)
@@ -2711,14 +2715,22 @@ static int create_kernel_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 	else
 		MLX5_SET(qpc, qpc, no_sq, 1);
 
-	if (attr->srq) {
-		MLX5_SET(qpc, qpc, xrcd, devr->xrcdn0);
-		MLX5_SET(qpc, qpc, srqn_rmpn_xrqn,
-			 to_msrq(attr->srq)->msrq.srqn);
-	} else {
+	if(attr->qp_type == IB_QPT_XRC_INI){
+		pr_info("create_kernel_qp xrc ini set xrcd etc\n");
+		MLX5_SET(qpc, qpc, cqn_rcv, to_mcq(devr->c0)->mcq.cqn);
 		MLX5_SET(qpc, qpc, xrcd, devr->xrcdn1);
-		MLX5_SET(qpc, qpc, srqn_rmpn_xrqn,
-			 to_msrq(devr->s1)->msrq.srqn);
+		MLX5_SET(qpc, qpc, srqn_rmpn_xrqn, to_msrq(devr->s0)->msrq.srqn);
+	}
+	else{
+		if (attr->srq) {
+			MLX5_SET(qpc, qpc, xrcd, devr->xrcdn0);
+			MLX5_SET(qpc, qpc, srqn_rmpn_xrqn,
+				to_msrq(attr->srq)->msrq.srqn);
+		} else {
+			MLX5_SET(qpc, qpc, xrcd, devr->xrcdn1);
+			MLX5_SET(qpc, qpc, srqn_rmpn_xrqn,
+				to_msrq(devr->s1)->msrq.srqn);
+		}
 	}
 
 	if (attr->send_cq)
@@ -3498,7 +3510,7 @@ int mlx5_ib_create_qp(struct ib_qp *ibqp, struct ib_qp_init_attr *attr,
 		      struct ib_udata *udata)
 {
 	pr_info("in mlx5_ib_create_qp");
-	print_pd_info(ibqp->pd);
+	//print_pd_info(ibqp->pd);
 	struct mlx5_create_qp_params params = {};
 	struct mlx5_ib_dev *dev = to_mdev(ibqp->device);
 	struct mlx5_ib_qp *qp = to_mqp(ibqp);

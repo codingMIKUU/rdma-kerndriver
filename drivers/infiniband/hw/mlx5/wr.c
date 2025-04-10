@@ -1090,14 +1090,14 @@ void mlx5r_ring_db(struct mlx5_ib_qp *qp, unsigned int nreq,
 }
 void print_wqe_info(void *seg, size_t size)
 {
-	int exp_sz;
+	// int exp_sz;
 
-	exp_sz = sizeof(struct mlx5_wqe_ctrl_seg) +
-			 sizeof(struct mlx5_wqe_xrc_seg) +
-			 sizeof(struct mlx5_wqe_raddr_seg) +
-			 sizeof(struct mlx5_wqe_data_seg);
+	// exp_sz = sizeof(struct mlx5_wqe_ctrl_seg) +
+	// 		 sizeof(struct mlx5_wqe_xrc_seg) +
+	// 		 sizeof(struct mlx5_wqe_raddr_seg) +
+	// 		 sizeof(struct mlx5_wqe_data_seg);
 
-	printk("Expected size is %zu, real size is %zu\n", exp_sz, size);
+	printk("size is %zu\n", size);
 
 	// Parse and print the WQE segments
 	struct mlx5_wqe_ctrl_seg *ctrl_seg = (struct mlx5_wqe_ctrl_seg *)seg;
@@ -1225,7 +1225,7 @@ int mlx5_ib_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 		{
 		case IB_QPT_XRC_INI:
 			xrc = seg;
-			//xrc->xrc_srqn = cpu_to_be32(wr->qp_type.xrc.remote_srqn);
+			xrc->xrc_srqn = cpu_to_be32(wr->qp_type.xrc.remote_srqn);
 			seg += sizeof(*xrc);
 			size += sizeof(*xrc) / 16;
 			fallthrough;

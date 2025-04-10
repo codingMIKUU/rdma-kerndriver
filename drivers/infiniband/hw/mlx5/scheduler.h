@@ -25,6 +25,7 @@ struct mlx5_ib_cqbuf{
     int cqe_sz;
     int cqn;
     int cur_put;
+    int op_own;
     struct mlx5_ib_cqbuf* next;//not loop
 };
 
