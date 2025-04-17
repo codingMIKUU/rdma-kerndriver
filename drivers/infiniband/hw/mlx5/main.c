@@ -92,10 +92,11 @@ static LIST_HEAD(mlx5_ib_dev_list);
  */
 static DEFINE_MUTEX(mlx5_ib_multiport_mutex);
 
-struct mlx5_ib_sched sched;
+static const int num_sched = 2;
+struct mlx5_ib_sched_group sched_group;
 
-struct task_struct *server_task;
-struct srm_cb server_cb;
+
+struct mlx5_ib_server server;
 
 struct mlx5_ib_dev *mlx5_ib_get_ibdev_from_mpi(struct mlx5_ib_multiport_info *mpi)
 {
@@ -5292,6 +5293,7 @@ static struct auxiliary_driver mlx5r_driver = {
 static int __init mlx5_ib_init(void)
 {
 	int ret;
+	int i;
 
 	xlt_emergency_page = (void *)__get_free_page(GFP_KERNEL);
 	if (!xlt_emergency_page)
@@ -5329,19 +5331,23 @@ static int __init mlx5_ib_init(void)
 	ret = auxiliary_driver_register(&mlx5r_driver);
 	if (ret)
 		goto drv_err;
+
 	pr_info("mlx5_ib init\n");
 	//init scheduler
-	ret = mlx5_ib_sched_init(&sched);
+	ret = mlx5_ib_sched_init(&sched_group,num_sched);
 	if (ret)
 		goto sched_err;
-
+	
 	//init server
-	server_task = kthread_run(mlx5_sched_run_server,&server_cb, "server thread");
+	ret = mlx5_ib_server_init(&server);
+	if (ret)
+		goto server_err;
 	
 	return 0;
-
+server_err:
+	mlx5_ib_sched_exit(&sched_group);
 sched_err:
-	mlx5_ib_sched_exit(&sched);
+	auxiliary_driver_unregister(&mlx5r_driver);
 drv_err:
 	auxiliary_driver_unregister(&mlx5r_mp_driver);
 mp_err:
@@ -5363,15 +5369,12 @@ err_free_xlt_page:
 static void __exit mlx5_ib_cleanup(void)
 {
 	pr_info("mlx5_ib exit\n");
-	//exit scheduler
-	mlx5_ib_sched_exit(&sched);
-	//exit server
-	if(server_task)
-		kthread_stop(server_task);
-	else 
-		pr_info("server task PTR is err\n");
 
-	
+	mlx5_ib_sched_exit(&sched_group);
+
+	//exit server
+	mlx5_ib_server_exit(&server,&sched_group);
+
 
 	
 	mlx5_data_direct_driver_unregister();

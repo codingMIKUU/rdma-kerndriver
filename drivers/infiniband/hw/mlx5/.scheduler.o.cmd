@@ -1725,6 +1725,7 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/conn.h \
   /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/linux/inet.h \
   include/linux/inet.h \
+  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/rdma/ib_cm.h \
 
 /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/scheduler.o: $(deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/mlx5/scheduler.o)
 

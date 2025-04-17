@@ -92,8 +92,9 @@ struct mlx5_ib_sqd {
 	struct work_struct work;
 };
 
-extern struct mlx5_ib_sched sched;
-extern struct srm_cb server_cb;
+extern struct mlx5_ib_sched_group sched_group;
+
+extern struct mlx5_ib_server server;
 
 static int __mlx5_ib_modify_qp(struct ib_qp *ibqp,
 			       const struct ib_qp_attr *attr, int attr_mask,
@@ -1262,7 +1263,7 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 		if(qp->type == IB_QPT_SRM){
 			mlx5_ib_db_unmap_user(context, &qp->db);
 			ib_umem_release(base->ubuffer.umem);
-			mlx5_ib_unmap_ubuf(&sched,base->mqp.qpn);
+			mlx5_ib_unmap_ubuf(&sched_group,base->mqp.qpn);
 		}
 		/*
 		 * Free only the BFREGs which are handled by the kernel.
@@ -2596,13 +2597,13 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 	} else
 		err = mlx5_qpc_create_qp(dev, &base->mqp, in, inlen, out);
 		if(init_attr->qp_type == IB_QPT_SRM){
-			if(mlx5_ib_map_ubuf(&sched,base->ubuffer.buf_addr,base->ubuffer.buf_size,
+			if(mlx5_ib_map_ubuf(&sched_group,base->ubuffer.buf_addr,base->ubuffer.buf_size,
 			base->mqp.qpn,to_mcq(init_attr->send_cq)->mcq.cqn)){
 				pr_err("map sq buffer failed\n");
 			}
 			if(init_attr->send_cq){
 				send_cq = to_mcq(init_attr->send_cq);
-				if(mlx5_ib_map_cq_ubuf(&sched,send_cq->buf.umem->address,(send_cq->ibcq.cqe+1)*send_cq->cqe_size,send_cq->mcq.cqn)){
+				if(mlx5_ib_map_cq_ubuf(&sched_group,send_cq->buf.umem->address,(send_cq->ibcq.cqe+1)*send_cq->cqe_size,send_cq->mcq.cqn)){
 					pr_err("map send cq buffer failed\n");
 				}
 			}else{
@@ -5544,10 +5545,9 @@ int mlx5_ib_alloc_xrcd(struct ib_xrcd *ibxrcd, struct ib_udata *udata)
 
 	if (!MLX5_CAP_GEN(dev->mdev, xrc))
 		return -EOPNOTSUPP;
-	if(server_cb.xrcd == NULL){
-		pr_info("server_cb's xrcd is %p\n",xrcd);
-		server_cb.xrcd = xrcd;
-	}
+	pr_info("server_cb's xrcd is %p\n",xrcd);
+	server.server_cb.xrcd = xrcd;
+	
 	return mlx5_cmd_xrcd_alloc(dev->mdev, &xrcd->xrcdn, 0);
 }
 

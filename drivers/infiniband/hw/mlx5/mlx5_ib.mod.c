@@ -123,6 +123,7 @@ __used __section(__versions) = {
 	{ 0xc29957c3, "__x86_indirect_thunk_rcx" },
 	{ 0x1176f32f, "mlx5_frag_buf_alloc_node" },
 	{ 0x87b8798d, "sg_next" },
+	{ 0xef3056b, "rdma_read_gids" },
 	{ 0x8fa25c24, "xa_find" },
 	{ 0xd9491c14, "xa_destroy" },
 	{ 0xf2ea7549, "mlx5_query_hca_vport_pkey" },
@@ -321,7 +322,6 @@ __used __section(__versions) = {
 	{ 0xbc59a949, "ib_register_device" },
 	{ 0xbf439c, "mlx5_wc_support_get" },
 	{ 0x1000e51, "schedule" },
-	{ 0x8ddd8aad, "schedule_timeout" },
 	{ 0xb8b9f817, "kmalloc_order_trace" },
 	{ 0x4f536e99, "memtrack_free" },
 	{ 0xac5fcec0, "in4_pton" },
@@ -358,6 +358,7 @@ __used __section(__versions) = {
 	{ 0xde046cf5, "__dynamic_dev_dbg" },
 	{ 0xca21ebd3, "bitmap_free" },
 	{ 0x51760917, "_raw_spin_lock_irqsave" },
+	{ 0x6caa65e7, "rdma_reject" },
 	{ 0xa4c2cf30, "_ib_alloc_device" },
 	{ 0xa5526619, "rb_insert_color" },
 	{ 0x9f3e9172, "rdma_alloc_hw_stats_struct" },
@@ -472,4 +473,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "A14FF71DFE4F13D4B033121");
+MODULE_INFO(srcversion, "48A8569B1B1226F904C6409");

@@ -32,8 +32,7 @@
 
 #include "mlx5_ib.h"
 #include "scheduler.h"
-
-extern struct mlx5_ib_sched sched;
+extern struct mlx5_ib_sched_group sched_group;
 
 static __be16 mlx5_ah_get_udp_sport(const struct mlx5_ib_dev *dev,
 				  const struct rdma_ah_attr *ah_attr)
@@ -145,8 +144,11 @@ int mlx5_ib_create_ah(struct ib_ah *ibah, struct rdma_ah_init_attr *init_attr,
 	//find if the SRMC exists
 	const struct ib_global_route *grh = rdma_ah_read_grh(ah_attr);
 	if(ah_attr->xrc_flags)
-		{ibah->srmc_flags = is_xrc_exists(&sched,ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
-		pr_info("内核srmc_flags: %u\n", ibah->srmc_flags);}
+	{
+		int idx = sched_hash_gid(&grh->dgid,sched_group.num_sched);
+		ibah->srmc_flags = is_xrc_exists(&sched_group.scheds[idx],ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
+		pr_info("内核srmc_flags: %u\n", ibah->srmc_flags);
+	}
 	create_ib_ah(dev, ah, init_attr);
 	pr_info("out mlx5_ib_create_ah\n");
 	return 0;
