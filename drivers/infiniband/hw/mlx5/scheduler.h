@@ -6,6 +6,8 @@
 #include <linux/types.h>
 #include <rdma/rdma_cm.h>
 static int debug = 1;
+const size_t MESSAGE_SIZE_THRESHOLD = 1024*8;
+
 #define DEBUG_LOG \
     if (debug) \
     printk
@@ -81,7 +83,8 @@ struct mlx5_ib_srmc{
 struct mlx5_ib_sched{
     struct task_struct* task;
     struct mutex srmc_lock;
-    struct mlx5_ib_srmc* srmc_head;
+    struct mlx5_ib_srmc* srmc_head_small;//for small flows
+    struct mlx5_ib_srmc* srmc_head_large;//for large flows
 };
 struct mlx5_ib_sched_id{
     struct mlx5_ib_sched* sched;

@@ -264,7 +264,7 @@ int scheduler_polling(void* data)
 
             //find the srmc qp to send this req
             //mutex_lock(&sched->srmc_lock);
-            for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
+            for(srmc=sgl.length>MESSAGE_SIZE_THRESHOLD?sched->srmc_head_large:sched->srmc_head_small;srmc;srmc=srmc->next){
                 //DEBUG_LOG("found srmc,gid.interface_id:%llx,subnet_prefix:%llx\n",srmc->dgid.global.interface_id,srmc->dgid.global.subnet_prefix);
                 if(memcmp(srmc->dgid.raw,ibv_wr->qp_type.srm.remote_gid.raw,sizeof(srmc->dgid.raw))==0){
                     if(!srmc->ini_cb.qp){
@@ -289,7 +289,7 @@ int scheduler_polling(void* data)
         //mutex_unlock(&sched_group.sq_lock);  
         //poll xrc cq and distribute them
         //mutex_lock(&sched->srmc_lock);
-        for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
+        for(srmc=sgl.length>MESSAGE_SIZE_THRESHOLD?sched->srmc_head_large:sched->srmc_head_small;;srmc;srmc=srmc->next){
             if(srmc->ini_cb.sig_cnt){
                 DEBUG_LOG("distributing cqe\n");
                 memset(&wc,1,sizeof wc);
@@ -352,57 +352,6 @@ int scheduler_polling(void* data)
     DEBUG_LOG("scheduler thread exit\n");
 	return 0;
 }
-
-// //create srmc, and copy the qp struct to it.
-// int mlx5_ib_create_srmc(struct mlx5_ib_sched *sched,struct mlx5_ib_qp *init_qp,struct mlx5_ib_qp *tgt_qp,union ib_gid *dgid)
-// {
-//     pr_info("in mlx5_ib_create_srmc,gid.in_id = %llu, gid.subnet = %llu\n",dgid->global.interface_id,dgid->global.subnet_prefix);
-//     struct mlx5_ib_srmc *srmc;
-//     int ret;
-//     int find;
-//     find = 0;
-//     if(init_qp == NULL && tgt_qp == NULL){
-//         pr_err("Unexpected:Both qp are NULL\n");
-//         return -1;
-//     }
-//     mutex_lock(&sched->srmc_lock);
-//     for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
-//         if(memcmp(srmc->dgid.raw,dgid->raw,sizeof(srmc->dgid.raw))==0){
-//             find = 1;
-//             break;
-//         }
-//     }
-//     if(!find){
-//         pr_err("Unexpected:No srmc found in creating srmc function\n");
-//         mutex_unlock(&sched->srmc_lock);
-//         return -1;
-//     }
-
-//     if(init_qp){
-//         //TODO:create init qp
-//         if(srmc->init_qp == NULL){
-//             srmc->init_qp = init_qp;
-//         }else{
-//             pr_err("Unexpected:Init qp already exists\n");
-//             goto err;
-//         }
-//     }
-//     if(tgt_qp){
-//         //TODO:create tgt qp
-//         if(srmc->tgt_qp == NULL){
-//             srmc->tgt_qp = tgt_qp;
-//         }else{  
-//             pr_err("Unexpected:Tgt qp already exists\n");
-//             goto err;
-//         }
-//     }
-//     mutex_unlock(&sched->srmc_lock);
-// 	return 0;
-
-// err:
-//     mutex_unlock(&sched->srmc_lock);
-//     return -1;
-// }
 
 int mlx5_ib_sched_init(struct mlx5_ib_sched_group* sched_group,int num)
 {
@@ -467,7 +416,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group* sched_group)
             sched->task = NULL;
         }
 
-        for(srmc = sched->srmc_head;srmc;){
+        for(srmc = sched->srmc_head;srmc;srmc=srmc->next){
             if(srmc->ini_cb.state == CONNECTED){
                 rdma_disconnect(srmc->ini_cb.cm_id);
                 //ib_sched_free_buf(&srmc->ini_cb);
