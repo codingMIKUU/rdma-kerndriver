@@ -823,7 +823,7 @@ int mlx5_ib_poll_cq_with_cqe(struct ib_cq *ibcq, int num_entries, struct ib_wc *
 		mlx5_cq_set_ci(&cq->mcq);
 	// pr_info("mlx5_ib_poll_cq_with_cqe,5\n");
 out:
-	spin_unlock_irqrestore(&cq->lock, flags);
+	spin_unlock_irqrestore( &cq->lock, flags);
 	// pr_info("mlx5_ib_poll_cq_with_cqe,6\n");
 	return soft_polled + npolled;
 }

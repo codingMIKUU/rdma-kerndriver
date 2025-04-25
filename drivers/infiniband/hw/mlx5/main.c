@@ -5370,10 +5370,11 @@ static void __exit mlx5_ib_cleanup(void)
 {
 	pr_info("mlx5_ib exit\n");
 
-	mlx5_ib_sched_exit(&sched_group);
 
-	//exit server
+	//exit server.server exit must be called before scheduler exit
 	mlx5_ib_server_exit(&server,&sched_group);
+
+	mlx5_ib_sched_exit(&sched_group);
 
 
 	

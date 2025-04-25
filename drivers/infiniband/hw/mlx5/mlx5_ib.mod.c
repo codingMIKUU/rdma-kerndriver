@@ -38,7 +38,6 @@ __used __section(__versions) = {
 	{ 0x3990c30a, "mlx5_lag_is_active" },
 	{ 0xcdb630ad, "rdma_nl_put_driver_string" },
 	{ 0xeb233a45, "__kmalloc" },
-	{ 0xf9a482f9, "msleep" },
 	{ 0x90d3be59, "mlx5_eq_destroy_generic" },
 	{ 0xd9d65ab, "mlx5_alloc_bfreg" },
 	{ 0x1ed8b599, "__x86_indirect_thunk_r8" },
@@ -473,4 +472,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "48A8569B1B1226F904C6409");
+MODULE_INFO(srcversion, "8262FE23E529F3DD99CF95C");

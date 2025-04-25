@@ -23,6 +23,9 @@
 #include <rdma/ib_cm.h>
 
 #define IP_ADDR "192.168.1.5"
+const size_t MESSAGE_SIZE_THRESHOLD = 1024*8;
+const size_t QUEUE_LIMIT = 1024*256;
+const size_t SCHED_SIZE_LIMIT = 1024*8;
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group* sched_group,unsigned long virt_addr,size_t size,int qpn,int cqn){
     DEBUG_LOG("in mlx5_ib_map_ubuf\n");
     DEBUG_LOG("内核态virt_addr:%px,size:%d,qpn:%d,cqn%d\n",virt_addr,size,qpn,cqn);
@@ -225,71 +228,76 @@ int scheduler_polling(void* data)
         //mutex_lock(&sched_group.sq_lock);
         for(sqb = sched_group.sq_head;sqb;sqb=sqb->next){//是否应该加一个检查该QP有几个WR，都拉下来的逻辑？
             ibv_wr = (struct ibv_send_wr*)(sqb->buf + sqb->cur_post * sizeof(struct ibv_send_wr));
-            if(!ibv_wr->wr_id || sched_hash_gid(&ibv_wr->qp_type.srm.remote_gid,sched_group.num_sched) != id){
-                continue;
-            }
-            pr_info("posting wr,sizeof wr is %u\n",sizeof(struct ibv_send_wr));
-            pr_info("qpn:%d,cur_post:%d,wr_id:%llu,sq buffer size:%d\n",sqb->qpn,sqb->cur_post,ibv_wr->wr_id,sqb->sq_size);
-
-            memset(&rdma_wr,0,sizeof rdma_wr);
-
-
-            //can just have one wr for now 
-            rdma_wr.wr.wr_id = (((uint64_t)sqb->qpn) << 32) | sqb->cur_post;
-            DEBUG_LOG("rdma_wr.wr.wr_id:%llu\n",rdma_wr.wr.wr_id);
-            memcpy(&sgl,&ibv_wr->sge,sizeof(struct ib_sge));
-            pr_info("opcode:%u,send_flags:%u,imm_data:%u,srqn:%u,",ibv_wr->opcode,ibv_wr->send_flags,ibv_wr->imm_data,ibv_wr->qp_type.srm.remote_srqn);
-            rdma_wr.wr.sg_list = &sgl;
-            rdma_wr.wr.num_sge = 1;
-            rdma_wr.wr.opcode = ibv_wr->opcode;
-            rdma_wr.wr.send_flags =ibv_wr->send_flags;
-            rdma_wr.wr.ex.imm_data = ibv_wr->imm_data;
-            rdma_wr.wr.qp_type.xrc.remote_srqn = ibv_wr->qp_type.srm.remote_srqn;
-            rdma_wr.remote_addr = ibv_wr->wr.rdma.remote_addr;
-            rdma_wr.rkey = ibv_wr->wr.rdma.rkey;
-            ibv_wr->wr_id = 0;
-            sqb->cur_post++;
-            DEBUG_LOG("发送端的数据缓存区地址: %px\n", sgl.addr);
-            DEBUG_LOG("发送端要写入的缓存区地址: %px\n", rdma_wr.remote_addr);
-            DEBUG_LOG("服务端lkey：%d，收到的rkey：%d\n", sgl.lkey, rdma_wr.rkey);
-
-            // for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
-            //     struct ib_qp_attr qp_attr_inpolling2;
-            //     struct ib_qp_init_attr qp_init_attr_inpolling2;
-            //     ib_query_qp(&srmc->ini_cb.qp->ibqp,&qp_attr_inpolling2,0,&qp_init_attr_inpolling2);
-            //     if(qp_attr_inpolling2.cur_qp_state==3)DEBUG_LOG("in scheduler_polling2, qp cur state:%d\n",qp_attr_inpolling2.cur_qp_state);
-            //     else {DEBUG_LOG("in scheduler_polling2, qp cur state:%d\n",qp_attr_inpolling2.cur_qp_state);
-            //         DEBUG_LOG("msleep2 100ms\n");msleep(100);}
-            // }
-
-            //find the srmc qp to send this req
-            //mutex_lock(&sched->srmc_lock);
-            for(srmc=sgl.length>MESSAGE_SIZE_THRESHOLD?sched->srmc_head_large:sched->srmc_head_small;srmc;srmc=srmc->next){
-                //DEBUG_LOG("found srmc,gid.interface_id:%llx,subnet_prefix:%llx\n",srmc->dgid.global.interface_id,srmc->dgid.global.subnet_prefix);
-                if(memcmp(srmc->dgid.raw,ibv_wr->qp_type.srm.remote_gid.raw,sizeof(srmc->dgid.raw))==0){
-                    if(!srmc->ini_cb.qp){
-                        pr_err("Unexpected:ini qp for this srmc is NULL\n");
-                        break;
-                    }
-                    DEBUG_LOG("max_gs:%d\n,max_post:%d,fbc:%u\n",srmc->ini_cb.qp->sq.max_gs,srmc->ini_cb.qp->sq.max_post,srmc->ini_cb.qp->sq.fbc);
-                    if(ret = ib_post_send(&srmc->ini_cb.qp->ibqp,&rdma_wr.wr,&bad_wr)){
-                        pr_err("post send error:%d\n",ret);
-                    }
-                    DEBUG_LOG("send finished\n");
-                    srmc->ini_cb.sig_cnt+=(rdma_wr.wr.send_flags & IB_SEND_SIGNALED) ? 1 : 0;
+            size_t sched_size = 0;
+            while(1){
+                if(!ibv_wr->wr_id || sched_hash_gid(&ibv_wr->qp_type.srm.remote_gid,sched_group.num_sched) != id){
                     break;
                 }
+                if(ibv_wr->sge.length+sched_size>SCHED_SIZE_LIMIT)
+                    break;
+                // for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
+                //     struct ib_qp_attr qp_attr_inpolling2;
+                //     struct ib_qp_init_attr qp_init_attr_inpolling2;
+                //     ib_query_qp(&srmc->ini_cb.qp->ibqp,&qp_attr_inpolling2,0,&qp_init_attr_inpolling2);
+                //     if(qp_attr_inpolling2.cur_qp_state==3)DEBUG_LOG("in scheduler_polling2, qp cur state:%d\n",qp_attr_inpolling2.cur_qp_state);
+                //     else {DEBUG_LOG("in scheduler_polling2, qp cur state:%d\n",qp_attr_inpolling2.cur_qp_state);
+                //         DEBUG_LOG("msleep2 100ms\n");msleep(100);}
+                // }
+
+                //find the srmc qp to send this req
+                //mutex_lock(&sched->srmc_lock);
+                for(srmc=sgl.length>MESSAGE_SIZE_THRESHOLD?sched->srmc_head_large:sched->srmc_head_small;srmc;srmc=srmc->next){
+                    //DEBUG_LOG("found srmc,gid.interface_id:%llx,subnet_prefix:%llx\n",srmc->dgid.global.interface_id,srmc->dgid.global.subnet_prefix);
+                    if(memcmp(srmc->dgid.raw,ibv_wr->qp_type.srm.remote_gid.raw,sizeof(srmc->dgid.raw))==0){
+                        if(!srmc->ini_cb.qp){
+                            pr_err("Unexpected:ini qp for this srmc is NULL\n");
+                            break;
+                        }
+                        if(srmc->pending_bytes+sgl.length>QUEUE_LIMIT){
+                            break;
+                        }
+
+                        pr_info("posting wr,sizeof wr is %u\n",sizeof(struct ibv_send_wr));
+                        pr_info("qpn:%d,cur_post:%d,wr_id:%llu,sq buffer size:%d\n",sqb->qpn,sqb->cur_post,ibv_wr->wr_id,sqb->sq_size);
+                        memset(&rdma_wr,0,sizeof rdma_wr);
+                        rdma_wr.wr.wr_id = (((uint64_t)sqb->qpn) << 32) | sqb->cur_post;
+                        DEBUG_LOG("rdma_wr.wr.wr_id:%llu\n",rdma_wr.wr.wr_id);
+                        memcpy(&sgl,&ibv_wr->sge,sizeof(struct ib_sge));
+                        pr_info("opcode:%u,send_flags:%u,imm_data:%u,srqn:%u,",ibv_wr->opcode,ibv_wr->send_flags,ibv_wr->imm_data,ibv_wr->qp_type.srm.remote_srqn);
+                        rdma_wr.wr.sg_list = &sgl;
+                        rdma_wr.wr.num_sge = 1;
+                        rdma_wr.wr.opcode = ibv_wr->opcode;
+                        rdma_wr.wr.send_flags =ibv_wr->send_flags;
+                        rdma_wr.wr.ex.imm_data = ibv_wr->imm_data;
+                        rdma_wr.wr.qp_type.xrc.remote_srqn = ibv_wr->qp_type.srm.remote_srqn;
+                        rdma_wr.remote_addr = ibv_wr->wr.rdma.remote_addr;
+                        rdma_wr.rkey = ibv_wr->wr.rdma.rkey;
+                        ibv_wr->wr_id = 0;
+                        sqb->cur_post++;
+                        DEBUG_LOG("发送端的数据缓存区地址: %px\n", sgl.addr);
+                        DEBUG_LOG("发送端要写入的缓存区地址: %px\n", rdma_wr.remote_addr);
+                        DEBUG_LOG("服务端lkey：%d，收到的rkey：%d\n", sgl.lkey, rdma_wr.rkey);
+                        DEBUG_LOG("max_gs:%d\n,max_post:%d,fbc:%u\n",srmc->ini_cb.qp->sq.max_gs,srmc->ini_cb.qp->sq.max_post,srmc->ini_cb.qp->sq.fbc);
+                        if(ret = ib_post_send(&srmc->ini_cb.qp->ibqp,&rdma_wr.wr,&bad_wr)){
+                            pr_err("post send error:%d\n",ret);
+                        }
+                        DEBUG_LOG("send finished\n");
+                        srmc->ini_cb.sig_cnt+=(rdma_wr.wr.send_flags & IB_SEND_SIGNALED) ? 1 : 0;
+                        srmc->pending_bytes+=sgl.length;
+                        break;
+                    }
+                }
+                // mutex_unlock(&sched->srmc_lock);
+                sched_size+=ibv_wr->sge.length;
+                if(sqb->cur_post*sizeof(struct ibv_send_wr) >= sqb->sq_size){
+                    sqb->cur_post = 0;
+                }
             }
-           // mutex_unlock(&sched->srmc_lock);
-            if(sqb->cur_post*sizeof(struct ibv_send_wr) >= sqb->sq_size){
-                sqb->cur_post = 0;
-            }
-            
         }
         //mutex_unlock(&sched_group.sq_lock);  
         //poll xrc cq and distribute them
         //mutex_lock(&sched->srmc_lock);
-        for(srmc=sgl.length>MESSAGE_SIZE_THRESHOLD?sched->srmc_head_large:sched->srmc_head_small;;srmc;srmc=srmc->next){
+        for(srmc=sgl.length>MESSAGE_SIZE_THRESHOLD?sched->srmc_head_large:sched->srmc_head_small;srmc;srmc=srmc->next){
             if(srmc->ini_cb.sig_cnt){
                 DEBUG_LOG("distributing cqe\n");
                 memset(&wc,1,sizeof wc);
@@ -298,8 +306,9 @@ int scheduler_polling(void* data)
                     //cqe_num=ib_poll_cq(srmc->ini_cb.qp->ibqp.send_cq,1,&wc);
                     cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.qp->ibqp.send_cq,1,&wc,&cqe);
                 }
-                DEBUG_LOG("cqe_num:%d,wc status:%d\n",cqe_num,wc.status);
+                DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n",cqe_num,wc.status,cqe64->byte_cnt);
                 srmc->ini_cb.sig_cnt--;
+                srmc->pending_bytes-=cqe64->byte_cnt;
                 cqe64 =(to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
                 //Two attr to change
                 
@@ -347,7 +356,7 @@ int scheduler_polling(void* data)
             //pr_info("polling cqe\n");
         }
         //mutex_unlock(&sched->srmc_lock);
-        msleep(100);
+        // msleep(100);
     }
     DEBUG_LOG("scheduler thread exit\n");
 	return 0;
@@ -369,7 +378,6 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group* sched_group,int num)
     sched_group->scheds = kzalloc(num*sizeof(struct mlx5_ib_sched),GFP_KERNEL);
     char thread_info[64];
     for(i=0;i<num;i++){
-        sched_group->scheds[i].srmc_head = NULL;
 
         snprintf(thread_info, sizeof(thread_info), "sched_thread_%d", i);
         
@@ -416,7 +424,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group* sched_group)
             sched->task = NULL;
         }
 
-        for(srmc = sched->srmc_head;srmc;srmc=srmc->next){
+        for(srmc = sched->srmc_head_small;srmc;){
             if(srmc->ini_cb.state == CONNECTED){
                 rdma_disconnect(srmc->ini_cb.cm_id);
                 //ib_sched_free_buf(&srmc->ini_cb);
@@ -425,8 +433,21 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group* sched_group)
                 rdma_destroy_id(srmc->ini_cb.cm_id);
             }
             srmc = srmc->next;
-            kfree(sched->srmc_head);
-            sched->srmc_head = srmc;
+            kfree(sched->srmc_head_small);
+            sched->srmc_head_small = srmc;
+        }
+
+        for(srmc = sched->srmc_head_large;srmc;){
+            if(srmc->ini_cb.state == CONNECTED){
+                rdma_disconnect(srmc->ini_cb.cm_id);
+                //ib_sched_free_buf(&srmc->ini_cb);
+                ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
+                ib_destroy_cq(srmc->ini_cb.cq);
+                rdma_destroy_id(srmc->ini_cb.cm_id);
+            }
+            srmc = srmc->next;
+            kfree(sched->srmc_head_large);
+            sched->srmc_head_large = srmc;
         }
         DEBUG_LOG("clean thread %d srmc success\n",i);
     }
@@ -476,8 +497,17 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server,struct mlx5_ib_sched_grou
 		kthread_stop(server->task);
 		for(i=0 ;i<sched_group->num_sched;i++){
 			sched = &sched_group->scheds[i];
-			for(srmc = sched->srmc_head;srmc=srmc;srmc=srmc->next){
-				if(srmc->tgt_cb.refcnt){
+			for(srmc = sched->srmc_head_small;srmc;srmc=srmc->next){
+				if(srmc->tgt_cb.state == CONNECTED){
+                    DEBUG_LOG("Freeing tgt cb's cm connection resources.\n");
+					rdma_disconnect(srmc->tgt_cb.cm_id);
+					ib_destroy_qp(&srmc->tgt_cb.qp->ibqp);
+                	ib_destroy_cq(srmc->tgt_cb.cq);
+					rdma_destroy_id(srmc->tgt_cb.cm_id);
+				}
+			}
+            for(srmc = sched->srmc_head_large;srmc;srmc=srmc->next){
+				if(srmc->tgt_cb.state == CONNECTED){
 					rdma_disconnect(srmc->tgt_cb.cm_id);
 					ib_destroy_qp(&srmc->tgt_cb.qp->ibqp);
                 	ib_destroy_cq(srmc->tgt_cb.cq);
@@ -495,65 +525,62 @@ void mlx5_ib_gid2ip(char addr[4],union ib_gid *gid){
 //return 0 means xrc exists, other means xrc not exists
 int is_xrc_exists(struct mlx5_ib_sched* sched,struct ib_pd *pd,union ib_gid *dgid,int flags,int qpn){
     
-    pr_info("in is_xrc_exists,gid.in_id = %llx, gid.subnet = %llx\n",dgid->global.interface_id,dgid->global.subnet_prefix);
-    struct mlx5_ib_srmc *srmc;
+    DEBUG_LOG("in is_xrc_exists,gid.in_id = %llx, gid.subnet = %llx\n",dgid->global.interface_id,dgid->global.subnet_prefix);
+    struct mlx5_ib_srmc *srmc_small,*srmc_large;
     int ret = 1;
-    int srmc_exists = 0;
     mutex_lock(&sched->srmc_lock);
-    for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
-        if(memcmp(srmc->dgid.raw,dgid->raw,sizeof(srmc->dgid.raw))==0){
-            srmc_exists = 1;
+    for(srmc_small=sched->srmc_head_small,srmc_large = sched->srmc_head_large;srmc_small;
+        srmc_small=srmc_small->next,srmc_large = srmc_large->next){
+        if(memcmp(srmc_small->dgid.raw,dgid->raw,sizeof(srmc_small->dgid.raw))==0){
             if(flags == SRMC_CREATE_FLAG_INIT_QP){
-                if(srmc->ini_cb.refcnt == 0){
-                    srmc->ini_cb.refcnt = 1;
+                if(srmc_small->ini_cb.refcnt == 0){
+                    srmc_small->ini_cb.refcnt = 1;
+                    srmc_large->ini_cb.refcnt = 1;
                     ret = 1;
                 }else{
-                    srmc->ini_cb.refcnt++;
-                    ret = 0;
-                }
-            }else if(flags == SRMC_CREATE_FLAG_TGT_QP){
-                if(srmc->tgt_cb.refcnt == 0){
-                    srmc->tgt_cb.refcnt = 1;
-                    ret = 1;
-                }else{
-                    srmc->tgt_cb.refcnt++;
+                    srmc_small->ini_cb.refcnt++;
+                    srmc_large->ini_cb.refcnt++;
                     ret = 0;
                 }
             }
             break;
         }
     }
-    if(srmc == NULL){
+    if(srmc_small == NULL){
         //srmc no exists
-        srmc =  kzalloc(sizeof(struct mlx5_ib_srmc),GFP_KERNEL);
-        memcpy(srmc->dgid.raw,dgid->raw,sizeof(srmc->dgid.raw));
+        srmc_small =  kzalloc(sizeof(struct mlx5_ib_srmc),GFP_KERNEL);
+        srmc_large = kzalloc(sizeof(struct mlx5_ib_srmc),GFP_KERNEL);
+        memcpy(srmc_small->dgid.raw,dgid->raw,sizeof(srmc_small->dgid.raw));
+        memcpy(srmc_large->dgid.raw,dgid->raw,sizeof(srmc_large->dgid.raw));
         if(flags == SRMC_CREATE_FLAG_INIT_QP){
-            srmc->ini_cb.refcnt = 1;
-         }else{
-            srmc->tgt_cb.refcnt = 1;
-         }
-        
-        if(sched->srmc_head == NULL){
-            sched->srmc_head = srmc;
-        }else{
-            srmc->next = sched->srmc_head->next;
-            sched->srmc_head->next = srmc;
+            srmc_small->ini_cb.refcnt = 1;
+            srmc_large->ini_cb.refcnt = 1;
         }
+        
+        if(sched->srmc_head_small == NULL){
+            sched->srmc_head_small = srmc_small;
+            sched->srmc_head_large = srmc_large;
+        }else{
+            srmc_small->next = sched->srmc_head_small->next;
+            sched->srmc_head_small->next = srmc_small;
+
+            srmc_large->next = sched->srmc_head_large->next;
+            sched->srmc_head_large->next = srmc_large;
+        }
+
         
     }
     mutex_unlock(&sched->srmc_lock);
-    // if(ret&&flags == SRMC_CREATE_FLAG_INIT_QP){
-    // if(ret){
-    //     if((ret = mlx5_ib_create_srmc_qp(sched,srmc,pd,flags,qpn))<0){
-    //         pr_err("Failed to create srmc qp\n");
-    //     }
-    // }
 
     if(ret){
-        ret = create_srmc_qp_cm(&srmc->ini_cb,pd,dgid);
-        DEBUG_LOG("create_srmc_qp_cm ret:%d\n",ret);
+        ret = create_srmc_qp_cm(&srmc_small->ini_cb,pd,dgid,MESSAGE_SIZE_SMALL);
+        DEBUG_LOG("create_srmc_qp_cm small ret:%d\n",ret);
+        if(ret){
+            ret = create_srmc_qp_cm(&srmc_large->ini_cb,pd,dgid,MESSAGE_SIZE_LARGE);
+            DEBUG_LOG("create_srmc_qp_cm large ret:%d\n",ret);
+        }
     }
-    pr_info("out is_xrc_exists,ret:%d\n",ret);
+    DEBUG_LOG("out is_xrc_exists,ret:%d\n",ret);
     return ret;
 }
 
@@ -693,251 +720,257 @@ int mlx5_sched_reg_mr(struct ib_mr *mr,struct mlx5_ib_qp *qp,char *dma_buf,size_
     return ret;
 }
 
-//return 0 if success, return -1 if failed. return >0 for qpn.
-int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc,struct ib_pd *pd,int flags,int qpn){
-    struct ib_qp *qp;
-    struct ib_qp_init_attr create_attr;
-    struct ib_cq *cq;
-    struct ib_cq_init_attr cq_attr;
-    struct ib_xrcd *xrcd;
-    struct ibv_qp_info local_qp_info,remote_qp_info;
-    memset(&local_qp_info,0,sizeof(local_qp_info));
-    memset(&remote_qp_info,0,sizeof(remote_qp_info));
-    memset(&cq_attr,0,sizeof cq_attr);
-    const int sq_depth = 256;
-    const int cq_depth = 256;
-    const int rq_depth = 256;
-    const int psn = 3100;
-    const int max_rd_atomic = 16;
-    const int port_num = 1;
-    memset(&create_attr,0,sizeof create_attr);
-    struct ib_qp_attr conn_attr;
-    int ret;
-    // struct ib_device *ibdev;
-    print_pd_info(pd);
+// //return 0 if success, return -1 if failed. return >0 for qpn.
+// int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc,struct ib_pd *pd,int flags,int qpn){
+//     struct ib_qp *qp;
+//     struct ib_qp_init_attr create_attr;
+//     struct ib_cq *cq;
+//     struct ib_cq_init_attr cq_attr;
+//     struct ib_xrcd *xrcd;
+//     struct ibv_qp_info local_qp_info,remote_qp_info;
+//     memset(&local_qp_info,0,sizeof(local_qp_info));
+//     memset(&remote_qp_info,0,sizeof(remote_qp_info));
+//     memset(&cq_attr,0,sizeof cq_attr);
+//     const int sq_depth = 256;
+//     const int cq_depth = 256;
+//     const int rq_depth = 256;
+//     const int psn = 3100;
+//     const int max_rd_atomic = 16;
+//     const int port_num = 1;
+//     memset(&create_attr,0,sizeof create_attr);
+//     struct ib_qp_attr conn_attr;
+//     int ret;
+//     // struct ib_device *ibdev;
+//     print_pd_info(pd);
     
-    cq_attr.cqe = cq_depth;
-    cq_attr.comp_vector = 0;// CPU 0
-    cq = ib_create_cq(pd->device,NULL,NULL,NULL,&cq_attr);
-    if(!cq){
-        pr_err("Create CQ false\n");
-        return -1;
-    }
-    if(flags == SRMC_CREATE_FLAG_INIT_QP){
-        if(srmc->ini_cb.qp){
-            pr_err("Unexpected:init qp exists\n");
-            return -1;
-        }
-        // //alloc mr
-        // srmc->ini_mr = ib_alloc_mr(pd,IB_MR_TYPE_MEM_REG,1);
-        // if(srmc->ini_mr==NULL){
-        //     pr_err("Alloc mr false\n");
-        //     return -1;
-        // }
+//     cq_attr.cqe = cq_depth;
+//     cq_attr.comp_vector = 0;// CPU 0
+//     cq = ib_create_cq(pd->device,NULL,NULL,NULL,&cq_attr);
+//     if(!cq){
+//         pr_err("Create CQ false\n");
+//         return -1;
+//     }
+//     if(flags == SRMC_CREATE_FLAG_INIT_QP){
+//         if(srmc->ini_cb.qp){
+//             pr_err("Unexpected:init qp exists\n");
+//             return -1;
+//         }
+//         // //alloc mr
+//         // srmc->ini_mr = ib_alloc_mr(pd,IB_MR_TYPE_MEM_REG,1);
+//         // if(srmc->ini_mr==NULL){
+//         //     pr_err("Alloc mr false\n");
+//         //     return -1;
+//         // }
 
-        //alloc mr 
-        if(mlx5_sched_alloc_mr(&srmc->ini_cb,pd)){
-            pr_err("mr alloc false");
-            return -1;
-        }
-
-
-        create_attr.qp_type = IB_QPT_XRC_INI;
-        create_attr.send_cq = cq;
+//         //alloc mr 
+//         if(mlx5_sched_alloc_mr(&srmc->ini_cb,pd)){
+//             pr_err("mr alloc false");
+//             return -1;
+//         }
 
 
-        // create_attr.qp_type = IB_QPT_RC;
-        // create_attr.recv_cq = cq;//RC
-        // create_attr.cap.max_recv_wr = 1;
-        // create_attr.cap.max_recv_sge = 1;//RC
+//         create_attr.qp_type = IB_QPT_XRC_INI;
+//         create_attr.send_cq = cq;
 
-        create_attr.cap.max_send_wr = sq_depth;
-        create_attr.cap.max_send_sge = 1;
-        create_attr.cap.max_inline_data = 128;
-        // create_attr.cap.max_rdma_ctxs = 1;
-        create_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
-        pr_info("ready to ib_create_qp_kernel\n");
-        qp = ib_create_qp_kernel(pd,&create_attr,"scheduler");
-        pr_info("flags == SRMC_CREATE_FLAG_INIT_QP create qp_kernel\n");
-        if(!qp){
-            pr_err("Create Kernel qp false\n");
-            return -1;
-        }
-        local_qp_info.qpn = qp->qp_num;
-        // 打印 subnet_prefix 和 interface_id（需注意大端序转换）
-        printk(KERN_INFO "Subnet Prefix: %llx\n", srmc->dgid.global.subnet_prefix);
-        printk(KERN_INFO "Interface ID: %llx\n", srmc->dgid.global.interface_id);
-        // memcpy(local_qp_info.gid.raw,srmc->dgid.raw,sizeof(union ib_gid));//now just the same server,TODO:change to local gid.
-        printk(KERN_INFO "local_qp_info GID (raw): %u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u\n",
-            local_qp_info.gid.raw[0], local_qp_info.gid.raw[1], local_qp_info.gid.raw[2], local_qp_info.gid.raw[3],
-            local_qp_info.gid.raw[4], local_qp_info.gid.raw[5], local_qp_info.gid.raw[6], local_qp_info.gid.raw[7],
-            local_qp_info.gid.raw[8], local_qp_info.gid.raw[9], local_qp_info.gid.raw[10], local_qp_info.gid.raw[11],
-            local_qp_info.gid.raw[12], local_qp_info.gid.raw[13], local_qp_info.gid.raw[14], local_qp_info.gid.raw[15]);
+
+//         // create_attr.qp_type = IB_QPT_RC;
+//         // create_attr.recv_cq = cq;//RC
+//         // create_attr.cap.max_recv_wr = 1;
+//         // create_attr.cap.max_recv_sge = 1;//RC
+
+//         create_attr.cap.max_send_wr = sq_depth;
+//         create_attr.cap.max_send_sge = 1;
+//         create_attr.cap.max_inline_data = 128;
+//         // create_attr.cap.max_rdma_ctxs = 1;
+//         create_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
+//         pr_info("ready to ib_create_qp_kernel\n");
+//         qp = ib_create_qp_kernel(pd,&create_attr,"scheduler");
+//         pr_info("flags == SRMC_CREATE_FLAG_INIT_QP create qp_kernel\n");
+//         if(!qp){
+//             pr_err("Create Kernel qp false\n");
+//             return -1;
+//         }
+//         local_qp_info.qpn = qp->qp_num;
+//         // 打印 subnet_prefix 和 interface_id（需注意大端序转换）
+//         printk(KERN_INFO "Subnet Prefix: %llx\n", srmc->dgid.global.subnet_prefix);
+//         printk(KERN_INFO "Interface ID: %llx\n", srmc->dgid.global.interface_id);
+//         // memcpy(local_qp_info.gid.raw,srmc->dgid.raw,sizeof(union ib_gid));//now just the same server,TODO:change to local gid.
+//         printk(KERN_INFO "local_qp_info GID (raw): %u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u\n",
+//             local_qp_info.gid.raw[0], local_qp_info.gid.raw[1], local_qp_info.gid.raw[2], local_qp_info.gid.raw[3],
+//             local_qp_info.gid.raw[4], local_qp_info.gid.raw[5], local_qp_info.gid.raw[6], local_qp_info.gid.raw[7],
+//             local_qp_info.gid.raw[8], local_qp_info.gid.raw[9], local_qp_info.gid.raw[10], local_qp_info.gid.raw[11],
+//             local_qp_info.gid.raw[12], local_qp_info.gid.raw[13], local_qp_info.gid.raw[14], local_qp_info.gid.raw[15]);
         
-        // ibdev = ib_device_get_by_name("mlx5_0", RDMA_DRIVER_MLX5);//内核打开设备，类似open_device
-        // 打印 ibdev->name 以确认设备名称
-        pr_info("Successfully got IB device: %s\n", pd->device->name);
-        // ret= ibdev->ops.query_gid(ibdev, port_num, 0, &local_qp_info.gid);//不适用于Rocev2
-        // ret = pd->device->ops.query_gid(pd->device,port_num,0,&local_qp_info.gid);
-        ret=rdma_query_gid(pd->device,port_num,0,&local_qp_info.gid);
-        if(ret){
-            pr_err("local query_gid false,error code:%d\n",ret);
-            return -1;
-        }
-        pr_info("local gid interface_id: 0x%llx, subnet_prefix:0x%llx\n",local_qp_info.gid.global.interface_id,local_qp_info.gid.global.subnet_prefix);
-        memset(&remote_qp_info,0,sizeof(remote_qp_info));
+//         // ibdev = ib_device_get_by_name("mlx5_0", RDMA_DRIVER_MLX5);//内核打开设备，类似open_device
+//         // 打印 ibdev->name 以确认设备名称
+//         pr_info("Successfully got IB device: %s\n", pd->device->name);
+//         // ret= ibdev->ops.query_gid(ibdev, port_num, 0, &local_qp_info.gid);//不适用于Rocev2
+//         // ret = pd->device->ops.query_gid(pd->device,port_num,0,&local_qp_info.gid);
+//         ret=rdma_query_gid(pd->device,port_num,0,&local_qp_info.gid);
+//         if(ret){
+//             pr_err("local query_gid false,error code:%d\n",ret);
+//             return -1;
+//         }
+//         pr_info("local gid interface_id: 0x%llx, subnet_prefix:0x%llx\n",local_qp_info.gid.global.interface_id,local_qp_info.gid.global.subnet_prefix);
+//         memset(&remote_qp_info,0,sizeof(remote_qp_info));
         
-        mutex_unlock(&sched->srmc_lock);//give the lock to server
-        int rtry_cnt = 0;
-        while(conn_server_kernel("127.0.0.1",12345,&local_qp_info,&remote_qp_info) < 0){
-            pr_err("conn_server_kernel failed\n");
-            rtry_cnt++;
-            if(rtry_cnt > 10){
-                pr_err("conn_server_kernel failed %d times\n",rtry_cnt);
-                mutex_lock(&sched->srmc_lock);
-                return -1;
-            }
-        }
-        mutex_lock(&sched->srmc_lock);
+//         mutex_unlock(&sched->srmc_lock);//give the lock to server
+//         int rtry_cnt = 0;
+//         while(conn_server_kernel("127.0.0.1",12345,&local_qp_info,&remote_qp_info) < 0){
+//             pr_err("conn_server_kernel failed\n");
+//             rtry_cnt++;
+//             if(rtry_cnt > 10){
+//                 pr_err("conn_server_kernel failed %d times\n",rtry_cnt);
+//                 mutex_lock(&sched->srmc_lock);
+//                 return -1;
+//             }
+//         }
+//         mutex_lock(&sched->srmc_lock);
 
-        srmc->ini_cb.qp = to_mqp(qp);
-        srmc->ini_cb.cq = to_mcq(cq);
-        pr_info("srmc->init_qp is OK\n");
-    }else{
-        if(srmc->tgt_cb.qp){
-            pr_err("Unexpected:tgt qp exists\n");
-            return -1;
-        }
-        // //alloc mr
-        // srmc->tgt_mr = ib_alloc_mr(pd,IB_MR_TYPE_MEM_REG,1);
-        // if(srmc->tgt_mr==NULL){
-        //     pr_err("Alloc mr false\n");
-        //     return -1;
-        // }
+//         srmc->ini_cb.qp = to_mqp(qp);
+//         srmc->ini_cb.cq = to_mcq(cq);
+//         pr_info("srmc->init_qp is OK\n");
+//     }else{
+//         if(srmc->tgt_cb.qp){
+//             pr_err("Unexpected:tgt qp exists\n");
+//             return -1;
+//         }
+//         // //alloc mr
+//         // srmc->tgt_mr = ib_alloc_mr(pd,IB_MR_TYPE_MEM_REG,1);
+//         // if(srmc->tgt_mr==NULL){
+//         //     pr_err("Alloc mr false\n");
+//         //     return -1;
+//         // }
 
-        if(mlx5_sched_alloc_mr(&srmc->tgt_cb,pd)){
-            pr_err("mr alloc false");
-            return -1;
-        }
+//         if(mlx5_sched_alloc_mr(&srmc->tgt_cb,pd)){
+//             pr_err("mr alloc false");
+//             return -1;
+//         }
 
-        //为了统一modify操作赋值remote qp info
-        remote_qp_info.qpn = qpn;
-        remote_qp_info.gid.global.interface_id = srmc->dgid.global.interface_id;   
-        remote_qp_info.gid.global.subnet_prefix = srmc->dgid.global.subnet_prefix;
+//         //为了统一modify操作赋值remote qp info
+//         remote_qp_info.qpn = qpn;
+//         remote_qp_info.gid.global.interface_id = srmc->dgid.global.interface_id;   
+//         remote_qp_info.gid.global.subnet_prefix = srmc->dgid.global.subnet_prefix;
 
 
-        create_attr.qp_type = IB_QPT_XRC_TGT;
-        create_attr.xrcd = xrcd;
+//         create_attr.qp_type = IB_QPT_XRC_TGT;
+//         create_attr.xrcd = xrcd;
     
-        create_attr.send_cq = cq;
-        create_attr.qp_type = IB_QPT_RC;
-        create_attr.cap.max_send_sge = 1;
-        create_attr.cap.max_send_wr = sq_depth;//RC
+//         create_attr.send_cq = cq;
+//         create_attr.qp_type = IB_QPT_RC;
+//         create_attr.cap.max_send_sge = 1;
+//         create_attr.cap.max_send_wr = sq_depth;//RC
     
-        create_attr.recv_cq = cq;
-        create_attr.cap.max_recv_wr = rq_depth;  
-        create_attr.cap.max_recv_sge = 1;
-        create_attr.cap.max_inline_data = 128;
-        pr_info("ready to ib_create_qp_kernel else\n");
-        qp = ib_create_qp_kernel(pd,&create_attr,"scheduler");
-        if(!qp){
-            pr_err("Create Kernel qp false\n");
-            return -1;
-        }
-        pr_info("flags != SRMC_CREATE_FLAG_INIT_QP create qp_kernel\n");
-        srmc->tgt_cb.qp = to_mqp(qp);
-    }
-    //modify qp
-    memset(&conn_attr,0,sizeof conn_attr);
-    conn_attr.qp_state = IB_QPS_INIT;
-    conn_attr.pkey_index = 0;
-    conn_attr.port_num = port_num;//is that ok?
-    conn_attr.qp_access_flags = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_REMOTE_READ | IB_ACCESS_REMOTE_ATOMIC;
-    if (ib_modify_qp(qp, &conn_attr,
-            IB_QP_STATE | IB_QP_PKEY_INDEX | IB_QP_PORT |
-                IB_QP_ACCESS_FLAGS)) {
-        pr_err("Failed to modify conn QP to INIT\n");
-        return -1;
-    }
+//         create_attr.recv_cq = cq;
+//         create_attr.cap.max_recv_wr = rq_depth;  
+//         create_attr.cap.max_recv_sge = 1;
+//         create_attr.cap.max_inline_data = 128;
+//         pr_info("ready to ib_create_qp_kernel else\n");
+//         qp = ib_create_qp_kernel(pd,&create_attr,"scheduler");
+//         if(!qp){
+//             pr_err("Create Kernel qp false\n");
+//             return -1;
+//         }
+//         pr_info("flags != SRMC_CREATE_FLAG_INIT_QP create qp_kernel\n");
+//         srmc->tgt_cb.qp = to_mqp(qp);
+//     }
+//     //modify qp
+//     memset(&conn_attr,0,sizeof conn_attr);
+//     conn_attr.qp_state = IB_QPS_INIT;
+//     conn_attr.pkey_index = 0;
+//     conn_attr.port_num = port_num;//is that ok?
+//     conn_attr.qp_access_flags = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_REMOTE_READ | IB_ACCESS_REMOTE_ATOMIC;
+//     if (ib_modify_qp(qp, &conn_attr,
+//             IB_QP_STATE | IB_QP_PKEY_INDEX | IB_QP_PORT |
+//                 IB_QP_ACCESS_FLAGS)) {
+//         pr_err("Failed to modify conn QP to INIT\n");
+//         return -1;
+//     }
 
-    memset(&conn_attr, 0, sizeof(struct ib_qp_attr));
-    conn_attr.qp_state = IB_QPS_RTR;
-    conn_attr.path_mtu = IB_MTU_1024;
-    conn_attr.dest_qp_num = remote_qp_info.qpn;
-    pr_info("remote qpn: %d\n",remote_qp_info.qpn);
-    conn_attr.rq_psn = psn;
+//     memset(&conn_attr, 0, sizeof(struct ib_qp_attr));
+//     conn_attr.qp_state = IB_QPS_RTR;
+//     conn_attr.path_mtu = IB_MTU_1024;
+//     conn_attr.dest_qp_num = remote_qp_info.qpn;
+//     pr_info("remote qpn: %d\n",remote_qp_info.qpn);
+//     conn_attr.rq_psn = psn;
 
-    //conn_attr.ah_attr.is_global = 1; RoCE or IB???
-    conn_attr.ah_attr.ib.dlid = 0;
-    conn_attr.ah_attr.sl = 0;
-    conn_attr.ah_attr.ib.src_path_bits = 0;
-    conn_attr.ah_attr.port_num = 1;  // Local port?is that ok?
+//     //conn_attr.ah_attr.is_global = 1; RoCE or IB???
+//     conn_attr.ah_attr.ib.dlid = 0;
+//     conn_attr.ah_attr.sl = 0;
+//     conn_attr.ah_attr.ib.src_path_bits = 0;
+//     conn_attr.ah_attr.port_num = 1;  // Local port?is that ok?
 
 
-    struct ib_global_route *grh = &conn_attr.ah_attr.grh;
-    grh->dgid.global.interface_id = remote_qp_info.gid.global.interface_id;
-    grh->dgid.global.subnet_prefix = remote_qp_info.gid.global.subnet_prefix;
-    pr_info("remote gid interface_id: %llx, subnet_prefix:%llx\n",remote_qp_info.gid.global.interface_id,remote_qp_info.gid.global.subnet_prefix);
-    grh->sgid_index = 0;
-    grh->hop_limit = 1;
+//     struct ib_global_route *grh = &conn_attr.ah_attr.grh;
+//     grh->dgid.global.interface_id = remote_qp_info.gid.global.interface_id;
+//     grh->dgid.global.subnet_prefix = remote_qp_info.gid.global.subnet_prefix;
+//     pr_info("remote gid interface_id: %llx, subnet_prefix:%llx\n",remote_qp_info.gid.global.interface_id,remote_qp_info.gid.global.subnet_prefix);
+//     grh->sgid_index = 0;
+//     grh->hop_limit = 1;
 
-    conn_attr.ah_attr.type = RDMA_AH_ATTR_TYPE_ROCE;
-    conn_attr.ah_attr.ah_flags = IB_AH_GRH;
+//     conn_attr.ah_attr.type = RDMA_AH_ATTR_TYPE_ROCE;
+//     conn_attr.ah_attr.ah_flags = IB_AH_GRH;
     
 
-    int rtr_flags = IB_QP_STATE | IB_QP_AV | IB_QP_PATH_MTU | IB_QP_DEST_QPN |
-                    IB_QP_RQ_PSN;
+//     int rtr_flags = IB_QP_STATE | IB_QP_AV | IB_QP_PATH_MTU | IB_QP_DEST_QPN |
+//                     IB_QP_RQ_PSN;
 
-    //if(flags == SRMC_CREATE_FLAG_TGT_QP){
-        conn_attr.max_dest_rd_atomic = max_rd_atomic;
-        conn_attr.min_rnr_timer = 12;
-        rtr_flags |= IB_QP_MAX_DEST_RD_ATOMIC | IB_QP_MIN_RNR_TIMER;
-    //}
+//     //if(flags == SRMC_CREATE_FLAG_TGT_QP){
+//         conn_attr.max_dest_rd_atomic = max_rd_atomic;
+//         conn_attr.min_rnr_timer = 12;
+//         rtr_flags |= IB_QP_MAX_DEST_RD_ATOMIC | IB_QP_MIN_RNR_TIMER;
+//     //}
 
-    if (ib_modify_qp(qp, &conn_attr, rtr_flags)) {
-        pr_err("Failed to modify QP to RTR\n");
-        return -1;
-    }
+//     if (ib_modify_qp(qp, &conn_attr, rtr_flags)) {
+//         pr_err("Failed to modify QP to RTR\n");
+//         return -1;
+//     }
 
-    memset(&conn_attr, 0, sizeof(conn_attr));
-    conn_attr.qp_state = IB_QPS_RTS;
-    conn_attr.sq_psn = psn;
+//     memset(&conn_attr, 0, sizeof(conn_attr));
+//     conn_attr.qp_state = IB_QPS_RTS;
+//     conn_attr.sq_psn = psn;
 
-    int rts_flags = IB_QP_STATE | IB_QP_SQ_PSN;
+//     int rts_flags = IB_QP_STATE | IB_QP_SQ_PSN;
 
-    conn_attr.timeout = 18;
-    conn_attr.retry_cnt = 30;//增大重试时间
-    conn_attr.rnr_retry = 30;
-    conn_attr.max_rd_atomic = max_rd_atomic;
-    conn_attr.max_dest_rd_atomic = max_rd_atomic;
-    rts_flags |= IB_QP_TIMEOUT | IB_QP_RETRY_CNT | IB_QP_RNR_RETRY |
-                IB_QP_MAX_QP_RD_ATOMIC;
+//     conn_attr.timeout = 18;
+//     conn_attr.retry_cnt = 30;//增大重试时间
+//     conn_attr.rnr_retry = 30;
+//     conn_attr.max_rd_atomic = max_rd_atomic;
+//     conn_attr.max_dest_rd_atomic = max_rd_atomic;
+//     rts_flags |= IB_QP_TIMEOUT | IB_QP_RETRY_CNT | IB_QP_RNR_RETRY |
+//                 IB_QP_MAX_QP_RD_ATOMIC;
     
     
-    if (ib_modify_qp(qp, &conn_attr, rts_flags)) {
-        pr_err("Failed to modify QP to RTS\n");
-        return -1;
-    }
+//     if (ib_modify_qp(qp, &conn_attr, rts_flags)) {
+//         pr_err("Failed to modify QP to RTS\n");
+//         return -1;
+//     }
 
-    //reg mr
-    if(flags == SRMC_CREATE_FLAG_INIT_QP){
-        if(mlx5_sched_reg_mr(srmc->ini_cb.mr,srmc->ini_cb.qp,srmc->ini_cb.dma_buf,srmc->ini_cb.buf_sz,srmc->ini_cb.page_list_len)){
-            pr_err("reg mr false\n");
-            return -1;
-        }
-    }else{
+//     //reg mr
+//     if(flags == SRMC_CREATE_FLAG_INIT_QP){
+//         if(mlx5_sched_reg_mr(srmc->ini_cb.mr,srmc->ini_cb.qp,srmc->ini_cb.dma_buf,srmc->ini_cb.buf_sz,srmc->ini_cb.page_list_len)){
+//             pr_err("reg mr false\n");
+//             return -1;
+//         }
+//     }else{
        
-        if(mlx5_sched_reg_mr(srmc->tgt_cb.mr,srmc->tgt_cb.qp,srmc->tgt_cb.dma_buf,srmc->tgt_cb.buf_sz,srmc->tgt_cb.page_list_len)){
-            pr_err("reg mr false\n");
-            return -1;
-        }
-    }
+//         if(mlx5_sched_reg_mr(srmc->tgt_cb.mr,srmc->tgt_cb.qp,srmc->tgt_cb.dma_buf,srmc->tgt_cb.buf_sz,srmc->tgt_cb.page_list_len)){
+//             pr_err("reg mr false\n");
+//             return -1;
+//         }
+//     }
 
-    pr_info("Successfully created SRMC\n");
-    return qp->qp_num;
-}
+//     pr_info("Successfully created SRMC\n");
+//     return qp->qp_num;
+// }
+struct server_conn_info{
+    struct rdma_cm_id *cm_id;
+    int flags;
+};
 
-int srm_create_connection(struct rdma_cm_id *cm_id){
+int srm_create_connection(struct server_conn_info *conn_info){
+    struct rdma_cm_id *cm_id = conn_info->cm_id;
+    int flags = conn_info->flags;
     extern struct mlx5_ib_sched_group sched_group;
     struct mlx5_ib_srmc *srmc;
     struct mlx5_ib_sched *sched;
@@ -959,7 +992,7 @@ int srm_create_connection(struct rdma_cm_id *cm_id){
     sched = &sched_group.scheds[idx];
 
     mutex_lock(&sched->srmc_lock);
-    for(srmc = sched->srmc_head;srmc;srmc = srmc->next){
+    for(srmc =(flags==MESSAGE_SIZE_LARGE? sched->srmc_head_large:sched->srmc_head_small);srmc;srmc = srmc->next){
         if(memcmp(srmc->dgid.raw,dgid.raw,sizeof(srmc->dgid.raw))==0){
             break;
         }
@@ -975,12 +1008,18 @@ int srm_create_connection(struct rdma_cm_id *cm_id){
         memcpy(srmc->dgid.raw,dgid.raw,sizeof(srmc->dgid.raw));
 
         //将srmc 加入到srmc_head中
-        if(sched->srmc_head ==NULL){
-            sched->srmc_head = srmc;
+        if(flags==MESSAGE_SIZE_SMALL&&sched->srmc_head_small==NULL || flags==MESSAGE_SIZE_LARGE&&sched->srmc_head_large==NULL){
+            if(flags==MESSAGE_SIZE_LARGE)
+                sched->srmc_head_large = srmc;
+            else
+                sched->srmc_head_small = srmc;
         }
         else{
-            srmc->next = sched->srmc_head->next;
-            sched->srmc_head->next = srmc;
+            srmc->next = (flags == MESSAGE_SIZE_LARGE? sched->srmc_head_large->next:sched->srmc_head_small->next);
+            if(flags == MESSAGE_SIZE_LARGE)
+                sched->srmc_head_large->next = srmc;
+            else
+                sched->srmc_head_small->next = srmc;
         }
     }
     //srmc->tgt_cb.refcnt == 0
@@ -1064,6 +1103,7 @@ int srm_create_connection(struct rdma_cm_id *cm_id){
 
 
     DEBUG_LOG("srm_create_connection success\n");
+    kfree(conn_info);
     return 0;
 
 
@@ -1076,6 +1116,7 @@ err1:
 err0:
     rdma_reject(cm_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);
     rdma_destroy_id(cm_id);
+    kfree(conn_info);
     return ret;
 
 }
@@ -1083,6 +1124,8 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
 									struct rdma_cm_event *event)
 {
 	int ret;
+    int flags;
+    struct server_conn_info *conn_info;
 	struct srm_cb *cb = cma_id->context;
 
 	DEBUG_LOG("cma_event type %d cma_id %p (%s)\n", event->event, cma_id,
@@ -1107,7 +1150,12 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
 		break;
 
 	case RDMA_CM_EVENT_CONNECT_REQUEST:
-        kthread_run(srm_create_connection,cma_id, "server connection thread");
+        flags = *(int*)event->param.conn.private_data;
+        DEBUG_LOG("connect request,flags = %d\n",flags);
+        conn_info = kzalloc(sizeof(struct server_conn_info),GFP_KERNEL);
+        conn_info->cm_id = cma_id;
+        conn_info->flags = flags;
+        kthread_run(srm_create_connection,conn_info, "server connection thread");
 		DEBUG_LOG("child cma %p\n", cma_id);
 		break;
 
@@ -1205,7 +1253,7 @@ static int srm_bind_client(struct srm_cb *cb)
 	return 0;
 }
 
-static int srm_connect_client(struct srm_cb *cb)
+static int srm_connect_client(struct srm_cb *cb,int flags)
 {
 	struct rdma_conn_param conn_param;
 	int ret;
@@ -1214,6 +1262,9 @@ static int srm_connect_client(struct srm_cb *cb)
 	conn_param.responder_resources = 1;
 	conn_param.initiator_depth = 1;
 	conn_param.retry_count = 5;
+
+    conn_param.private_data = &flags;
+    conn_param.private_data_len = sizeof(int);
 
 	ret = rdma_connect(cb->cm_id, &conn_param);
 	if (ret)
@@ -1233,7 +1284,7 @@ static int srm_connect_client(struct srm_cb *cb)
 	return 0;
 }
 
-int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd,union ib_gid *dgid){
+int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd,union ib_gid *dgid,int flags){
     int ret ;
     struct ib_cq_init_attr cq_attr;
     struct ib_qp_init_attr init_attr;
@@ -1323,7 +1374,7 @@ int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd,union ib_gid *dgid){
     // }
 
     //modify qp etc
-    ret = srm_connect_client(cb);
+    ret = srm_connect_client(cb,flags);
     if(ret){
         pr_err("connect client failed,error:%d\n",ret);
         goto err3;
