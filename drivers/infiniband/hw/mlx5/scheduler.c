@@ -231,10 +231,13 @@ int scheduler_polling(void* data)
             size_t sched_size = 0;
             while(1){
                 if(!ibv_wr->wr_id || sched_hash_gid(&ibv_wr->qp_type.srm.remote_gid,sched_group.num_sched) != id){
+                    DEBUG_LOG("wr_id is 0 or wr_id is not in this sched,id is %d\n",id);
                     break;
                 }
-                if(ibv_wr->sge.length+sched_size>SCHED_SIZE_LIMIT)
+                if(ibv_wr->sge.length+sched_size>SCHED_SIZE_LIMIT){
+                    DEBUG_LOG("sched once\n");
                     break;
+                }
                 // for(srmc=sched->srmc_head;srmc;srmc=srmc->next){
                 //     struct ib_qp_attr qp_attr_inpolling2;
                 //     struct ib_qp_init_attr qp_init_attr_inpolling2;
@@ -247,7 +250,7 @@ int scheduler_polling(void* data)
                 //find the srmc qp to send this req
                 //mutex_lock(&sched->srmc_lock);
                 for(srmc=sgl.length>MESSAGE_SIZE_THRESHOLD?sched->srmc_head_large:sched->srmc_head_small;srmc;srmc=srmc->next){
-                    //DEBUG_LOG("found srmc,gid.interface_id:%llx,subnet_prefix:%llx\n",srmc->dgid.global.interface_id,srmc->dgid.global.subnet_prefix);
+                    DEBUG_LOG("found srmc,gid.interface_id:%llx,subnet_prefix:%llx\n",srmc->dgid.global.interface_id,srmc->dgid.global.subnet_prefix);
                     if(memcmp(srmc->dgid.raw,ibv_wr->qp_type.srm.remote_gid.raw,sizeof(srmc->dgid.raw))==0){
                         if(!srmc->ini_cb.qp){
                             pr_err("Unexpected:ini qp for this srmc is NULL\n");
@@ -257,13 +260,13 @@ int scheduler_polling(void* data)
                             break;
                         }
 
-                        pr_info("posting wr,sizeof wr is %u\n",sizeof(struct ibv_send_wr));
-                        pr_info("qpn:%d,cur_post:%d,wr_id:%llu,sq buffer size:%d\n",sqb->qpn,sqb->cur_post,ibv_wr->wr_id,sqb->sq_size);
+                        DEBUG_LOG("posting wr,sizeof wr is %u\n",sizeof(struct ibv_send_wr));
+                        DEBUG_LOG("qpn:%d,cur_post:%d,wr_id:%llu,sq buffer size:%d\n",sqb->qpn,sqb->cur_post,ibv_wr->wr_id,sqb->sq_size);
                         memset(&rdma_wr,0,sizeof rdma_wr);
                         rdma_wr.wr.wr_id = (((uint64_t)sqb->qpn) << 32) | sqb->cur_post;
                         DEBUG_LOG("rdma_wr.wr.wr_id:%llu\n",rdma_wr.wr.wr_id);
                         memcpy(&sgl,&ibv_wr->sge,sizeof(struct ib_sge));
-                        pr_info("opcode:%u,send_flags:%u,imm_data:%u,srqn:%u,",ibv_wr->opcode,ibv_wr->send_flags,ibv_wr->imm_data,ibv_wr->qp_type.srm.remote_srqn);
+                        DEBUG_LOG("opcode:%u,send_flags:%u,imm_data:%u,srqn:%u,",ibv_wr->opcode,ibv_wr->send_flags,ibv_wr->imm_data,ibv_wr->qp_type.srm.remote_srqn);
                         rdma_wr.wr.sg_list = &sgl;
                         rdma_wr.wr.num_sge = 1;
                         rdma_wr.wr.opcode = ibv_wr->opcode;
@@ -284,11 +287,13 @@ int scheduler_polling(void* data)
                         DEBUG_LOG("send finished\n");
                         srmc->ini_cb.sig_cnt+=(rdma_wr.wr.send_flags & IB_SEND_SIGNALED) ? 1 : 0;
                         srmc->pending_bytes+=sgl.length;
+
+                        sched_size+=ibv_wr->sge.length;
                         break;
                     }
                 }
                 // mutex_unlock(&sched->srmc_lock);
-                sched_size+=ibv_wr->sge.length;
+              
                 if(sqb->cur_post*sizeof(struct ibv_send_wr) >= sqb->sq_size){
                     sqb->cur_post = 0;
                 }
@@ -356,7 +361,7 @@ int scheduler_polling(void* data)
             //pr_info("polling cqe\n");
         }
         //mutex_unlock(&sched->srmc_lock);
-        // msleep(100);
+        msleep(100);
     }
     DEBUG_LOG("scheduler thread exit\n");
 	return 0;
@@ -365,6 +370,7 @@ int scheduler_polling(void* data)
 int mlx5_ib_sched_init(struct mlx5_ib_sched_group* sched_group,int num)
 {
     int i;
+    int j;
     int ret;
     struct mlx5_ib_sched_id *sched_id; 
 
@@ -376,12 +382,21 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group* sched_group,int num)
 
     sched_group->num_sched = num;
     sched_group->scheds = kzalloc(num*sizeof(struct mlx5_ib_sched),GFP_KERNEL);
+    if(sched_group->scheds == NULL){
+        pr_err("Failed to allocate memory for sched_group\n");
+        return -ENOMEM;
+    }
     char thread_info[64];
     for(i=0;i<num;i++){
 
         snprintf(thread_info, sizeof(thread_info), "sched_thread_%d", i);
         
         sched_id = kzalloc(sizeof(struct mlx5_ib_sched_id),GFP_KERNEL);
+        if(sched_id == NULL){
+            pr_err("Failed to allocate memory for sched_id\n");
+            ret = -ENOMEM;
+            goto err;
+        }
         sched_id->sched = &sched_group->scheds[i];
         sched_id->id = i;
         sched_group->scheds[i].task = kthread_create(scheduler_polling,(void*)sched_id,thread_info);
@@ -398,10 +413,10 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group* sched_group,int num)
     }
     return 0;
 err:
-    for(i=0;i<num;i++){
-        if(sched_group->scheds[i].task){
+    for(j=0;j<i;j++){
+        if(sched_group->scheds[j].task){
             kthread_stop(sched_group->scheds[i].task);
-            sched_group->scheds[i].task = NULL;
+            sched_group->scheds[j].task = NULL;
         }
     }
     kfree(sched_group->scheds);
@@ -423,15 +438,17 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group* sched_group)
             kthread_stop(sched->task); 
             sched->task = NULL;
         }
-
+        mutex_lock(&sched->srmc_lock);
         for(srmc = sched->srmc_head_small;srmc;){
+            DEBUG_LOG("srmc ini_cb state:%d\n",srmc->ini_cb.state);
             if(srmc->ini_cb.state == CONNECTED){
                 rdma_disconnect(srmc->ini_cb.cm_id);
                 //ib_sched_free_buf(&srmc->ini_cb);
-                ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
-                ib_destroy_cq(srmc->ini_cb.cq);
+            }
+            if(srmc->ini_cb.cm_id){
                 rdma_destroy_id(srmc->ini_cb.cm_id);
             }
+            
             srmc = srmc->next;
             kfree(sched->srmc_head_small);
             sched->srmc_head_small = srmc;
@@ -441,17 +458,19 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group* sched_group)
             if(srmc->ini_cb.state == CONNECTED){
                 rdma_disconnect(srmc->ini_cb.cm_id);
                 //ib_sched_free_buf(&srmc->ini_cb);
-                ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
-                ib_destroy_cq(srmc->ini_cb.cq);
+            }
+            if(srmc->ini_cb.cm_id){
                 rdma_destroy_id(srmc->ini_cb.cm_id);
             }
             srmc = srmc->next;
             kfree(sched->srmc_head_large);
             sched->srmc_head_large = srmc;
         }
+        mutex_unlock(&sched->srmc_lock);
         DEBUG_LOG("clean thread %d srmc success\n",i);
     }
     //cleanup scheduler
+    mutex_lock(&sched_group->sq_lock);
     for(sqb=sched_group->sq_head;sqb;){
         vunmap(sqb->buf);
         npages = (sqb->sq_size +PAGE_SIZE-1)/PAGE_SIZE;
@@ -464,7 +483,10 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group* sched_group)
         kfree(sched_group->sq_head);
         sched_group->sq_head = sqb;
     }
+    mutex_unlock(&sched_group->sq_lock);
     DEBUG_LOG("clean sqb success\n");
+
+    mutex_lock(&sched_group->cq_lock);
     for(cqb=sched_group->cq_head;cqb;){
         vunmap(cqb->buf);
         npages = (cqb->cq_size +PAGE_SIZE-1)/PAGE_SIZE;
@@ -475,6 +497,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group* sched_group)
         kfree(sched_group->cq_head);
         sched_group->cq_head = cqb;
     }
+    mutex_unlock(&sched_group->cq_lock);
     DEBUG_LOG("clean cqb success\n");
 	
     // mlx5_ib_unmap_ubuf(sched,0);
@@ -497,24 +520,28 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server,struct mlx5_ib_sched_grou
 		kthread_stop(server->task);
 		for(i=0 ;i<sched_group->num_sched;i++){
 			sched = &sched_group->scheds[i];
+            mutex_lock(&sched->srmc_lock);
 			for(srmc = sched->srmc_head_small;srmc;srmc=srmc->next){
 				if(srmc->tgt_cb.state == CONNECTED){
                     DEBUG_LOG("Freeing tgt cb's cm connection resources.\n");
 					rdma_disconnect(srmc->tgt_cb.cm_id);
-					ib_destroy_qp(&srmc->tgt_cb.qp->ibqp);
-                	ib_destroy_cq(srmc->tgt_cb.cq);
-					rdma_destroy_id(srmc->tgt_cb.cm_id);
 				}
+                if(srmc->tgt_cb.cm_id){
+                    rdma_destroy_id(srmc->ini_cb.cm_id);
+                }
 			}
             for(srmc = sched->srmc_head_large;srmc;srmc=srmc->next){
 				if(srmc->tgt_cb.state == CONNECTED){
 					rdma_disconnect(srmc->tgt_cb.cm_id);
-					ib_destroy_qp(&srmc->tgt_cb.qp->ibqp);
-                	ib_destroy_cq(srmc->tgt_cb.cq);
-					rdma_destroy_id(srmc->tgt_cb.cm_id);
 				}
+                if(srmc->tgt_cb.cm_id){
+                    rdma_destroy_id(srmc->ini_cb.cm_id);
+                }
 			}
+            mutex_unlock(&sched->srmc_lock);
 		}
+        if(server->server_cb.cm_id)
+            rdma_destroy_id(server->server_cb.cm_id);
 	}
 	else 
 		pr_info("server task PTR is err\n");
@@ -1179,6 +1206,8 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
 	case RDMA_CM_EVENT_DISCONNECTED:
 		printk(KERN_ERR "DISCONNECT EVENT...\n");
 		cb->state = ERROR;
+        ib_destroy_qp(&cb->qp->ibqp);
+        ib_destroy_cq(cb->cq);
 		wake_up_interruptible(&cb->sem);
 		break;
 
@@ -1443,6 +1472,7 @@ err1:
     ib_destroy_cq(cb->cq);
 err0:
     rdma_destroy_id(cb->cm_id);
+    cb->cm_id = NULL;
 out:
     return ret?0:cb->qp->ibqp.qp_num;
 }
@@ -1536,9 +1566,10 @@ int mlx5_sched_run_server(struct srm_cb *cb){
 
     wait_event_interruptible(cb->sem,kthread_should_stop());
     pr_info("srm server stop\n"); 
-    
+    return ret;
 err0:
     rdma_destroy_id(cb->cm_id);
+    cb->cm_id = NULL;
 out:
     wait_event_interruptible(cb->sem, kthread_should_stop());
     return ret;
