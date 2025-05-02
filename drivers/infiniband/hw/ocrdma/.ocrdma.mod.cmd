@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/ocrdma/ocrdma.mod := { echo  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/ocrdma/ocrdma.o;  echo; } > /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/ocrdma/ocrdma.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/ocrdma/ocrdma.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/ocrdma/ocrdma.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/ocrdma/ocrdma.mod

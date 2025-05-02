@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/core/ib_umad.mod := { echo  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/core/user_mad.o;  echo; } > /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/core/ib_umad.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_umad.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/core/user_mad.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_umad.mod

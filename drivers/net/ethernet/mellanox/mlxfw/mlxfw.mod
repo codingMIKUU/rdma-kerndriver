@@ -1,2 +1,2 @@
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/net/ethernet/mellanox/mlxfw/mlxfw_fsm.o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/net/ethernet/mellanox/mlxfw/mlxfw_mfa2_tlv_multi.o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/net/ethernet/mellanox/mlxfw/mlxfw_mfa2.o
+/root/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxfw/mlxfw_fsm.o /root/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxfw/mlxfw_mfa2_tlv_multi.o /root/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxfw/mlxfw_mfa2.o
 

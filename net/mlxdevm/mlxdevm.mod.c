@@ -59,7 +59,7 @@ __used __section(__versions) = {
 	{ 0xa916b694, "strnlen" },
 	{ 0x49c41a57, "_raw_spin_unlock_bh" },
 	{ 0xdecd0b29, "__stack_chk_fail" },
-	{ 0xb6a43883, "memtrack_inject_error" },
+	{ 0x696547f1, "memtrack_inject_error" },
 	{ 0x8b3b40cb, "kfree_skb" },
 	{ 0x4f536e99, "memtrack_free" },
 	{ 0x1622d999, "is_non_trackable_free_func" },

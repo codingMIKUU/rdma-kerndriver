@@ -1,8 +1,8 @@
-cmd_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod.o := gcc -Wp,-MD,/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/.conftest.mod.o.d  -nostdinc -isystem /usr/lib/gcc/x86_64-linux-gnu/9/include -include generated/autoconf.h -I/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/mach-xen -D__XEN_INTERFACE_VERSION__=  -I/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include -Iarch/x86/include/generated -Iinclude -I/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/uapi -Iarch/x86/include/generated/uapi -I/usr/src/linux-headers-5.4.0-86-generic/include -I/usr/src/linux-headers-5.4.0-86-generic/include/uapi -Iinclude/generated/uapi -I/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include -Iarch/x86/include/generated -I/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include -I/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/generated -I/usr/src/linux-headers-5.4.0-86-generic/include -I/usr/src/linux-headers-5.4.0-86-generic/include -I/usr/src/linux-headers-5.4.0-86-generic/include2 -include /usr/src/linux-headers-5.4.0-86-generic/include/linux/kconfig.h -include ./include/linux/compiler_types.h -D__KERNEL__ -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs -fno-strict-aliasing -fno-common -fshort-wchar -fno-PIE -Werror=implicit-function-declaration -Werror=implicit-int -Werror=return-type -Wno-format-security -std=gnu89 -mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx -fcf-protection=none -m64 -falign-jumps=1 -falign-loops=1 -mno-80387 -mno-fp-ret-in-387 -mpreferred-stack-boundary=3 -mskip-rax-setup -mtune=generic -mno-red-zone -mcmodel=kernel -DCONFIG_X86_X32_ABI -DCONFIG_AS_CFI=1 -DCONFIG_AS_CFI_SIGNAL_FRAME=1 -DCONFIG_AS_CFI_SECTIONS=1 -DCONFIG_AS_SSSE3=1 -DCONFIG_AS_AVX=1 -DCONFIG_AS_AVX2=1 -DCONFIG_AS_AVX512=1 -DCONFIG_AS_SHA1_NI=1 -DCONFIG_AS_SHA256_NI=1 -Wno-sign-compare -fno-asynchronous-unwind-tables -mindirect-branch=thunk-extern -mindirect-branch-register -fno-jump-tables -fno-delete-null-pointer-checks -Wno-frame-address -Wno-format-truncation -Wno-format-overflow -Wno-address-of-packed-member -O2 --param=allow-store-data-races=0 -Wframe-larger-than=1024 -fstack-protector-strong -Wimplicit-fallthrough -Wno-unused-but-set-variable -Wno-unused-const-variable -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-var-tracking-assignments -pg -mrecord-mcount -mfentry -DCC_USING_FENTRY -flive-patching=inline-clone -Wdeclaration-after-statement -Wvla -Wno-pointer-sign -Wno-stringop-truncation -Wno-array-bounds -Wno-stringop-overflow -Wno-restrict -Wno-maybe-uninitialized -fno-strict-overflow -fno-merge-all-constants -fmerge-constants -fno-stack-check -fconserve-stack -Werror=date-time -Werror=incompatible-pointer-types -Werror=designated-init -fmacro-prefix-map=./= -Wno-packed-not-aligned -Werror-implicit-function-declaration -Wno-unused-variable -Wno-uninitialized  -DMODULE  -DKBUILD_BASENAME='"conftest.mod"' -DKBUILD_MODNAME='"conftest"' -c -o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod.o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod.c
+cmd_/root/zxm/rdma-kerndriver/compat/build/conftest.mod.o := gcc -Wp,-MD,/root/zxm/rdma-kerndriver/compat/build/.conftest.mod.o.d  -nostdinc -isystem /usr/lib/gcc/x86_64-linux-gnu/9/include -include generated/autoconf.h -I/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/mach-xen -D__XEN_INTERFACE_VERSION__=  -I/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include -Iarch/x86/include/generated -Iinclude -I/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/uapi -Iarch/x86/include/generated/uapi -I/usr/src/linux-headers-5.4.0-86-generic/include -I/usr/src/linux-headers-5.4.0-86-generic/include/uapi -Iinclude/generated/uapi -I/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include -Iarch/x86/include/generated -I/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include -I/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/generated -I/usr/src/linux-headers-5.4.0-86-generic/include -I/usr/src/linux-headers-5.4.0-86-generic/include -I/usr/src/linux-headers-5.4.0-86-generic/include2 -include /usr/src/linux-headers-5.4.0-86-generic/include/linux/kconfig.h -include ./include/linux/compiler_types.h -D__KERNEL__ -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs -fno-strict-aliasing -fno-common -fshort-wchar -fno-PIE -Werror=implicit-function-declaration -Werror=implicit-int -Werror=return-type -Wno-format-security -std=gnu89 -mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx -fcf-protection=none -m64 -falign-jumps=1 -falign-loops=1 -mno-80387 -mno-fp-ret-in-387 -mpreferred-stack-boundary=3 -mskip-rax-setup -mtune=generic -mno-red-zone -mcmodel=kernel -DCONFIG_X86_X32_ABI -DCONFIG_AS_CFI=1 -DCONFIG_AS_CFI_SIGNAL_FRAME=1 -DCONFIG_AS_CFI_SECTIONS=1 -DCONFIG_AS_SSSE3=1 -DCONFIG_AS_AVX=1 -DCONFIG_AS_AVX2=1 -DCONFIG_AS_AVX512=1 -DCONFIG_AS_SHA1_NI=1 -DCONFIG_AS_SHA256_NI=1 -Wno-sign-compare -fno-asynchronous-unwind-tables -mindirect-branch=thunk-extern -mindirect-branch-register -fno-jump-tables -fno-delete-null-pointer-checks -Wno-frame-address -Wno-format-truncation -Wno-format-overflow -Wno-address-of-packed-member -O2 --param=allow-store-data-races=0 -Wframe-larger-than=1024 -fstack-protector-strong -Wimplicit-fallthrough -Wno-unused-but-set-variable -Wno-unused-const-variable -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-var-tracking-assignments -pg -mrecord-mcount -mfentry -DCC_USING_FENTRY -flive-patching=inline-clone -Wdeclaration-after-statement -Wvla -Wno-pointer-sign -Wno-stringop-truncation -Wno-array-bounds -Wno-stringop-overflow -Wno-restrict -Wno-maybe-uninitialized -fno-strict-overflow -fno-merge-all-constants -fmerge-constants -fno-stack-check -fconserve-stack -Werror=date-time -Werror=incompatible-pointer-types -Werror=designated-init -fmacro-prefix-map=./= -Wno-packed-not-aligned -Werror-implicit-function-declaration -Wno-unused-variable -Wno-uninitialized  -DMODULE  -DKBUILD_BASENAME='"conftest.mod"' -DKBUILD_MODNAME='"conftest"' -c -o /root/zxm/rdma-kerndriver/compat/build/conftest.mod.o /root/zxm/rdma-kerndriver/compat/build/conftest.mod.c
 
-source_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod.o := /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod.c
+source_/root/zxm/rdma-kerndriver/compat/build/conftest.mod.o := /root/zxm/rdma-kerndriver/compat/build/conftest.mod.c
 
-deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod.o := \
+deps_/root/zxm/rdma-kerndriver/compat/build/conftest.mod.o := \
     $(wildcard include/config/retpoline.h) \
   /usr/src/linux-headers-5.4.0-86-generic/include/linux/kconfig.h \
     $(wildcard include/config/cpu/big/endian.h) \
@@ -42,7 +42,8 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conft
   /usr/src/linux-headers-5.4.0-86-generic/include/uapi/asm-generic/types.h \
   include/asm-generic/int-ll64.h \
   include/uapi/asm-generic/int-ll64.h \
-  include/asm/bitsperlong.h \
+  /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/uapi/asm/bitsperlong.h \
+  include/asm-generic/bitsperlong.h \
   include/uapi/asm-generic/bitsperlong.h \
   /usr/src/linux-headers-5.4.0-86-generic/include/uapi/linux/posix_types.h \
   include/linux/stddef.h \
@@ -209,7 +210,8 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conft
   include/linux/apm_bios.h \
   include/uapi/linux/apm_bios.h \
   /usr/src/linux-headers-5.4.0-86-generic/include/uapi/linux/ioctl.h \
-  include/asm/ioctl.h \
+  arch/x86/include/generated/uapi/asm/ioctl.h \
+  include/asm-generic/ioctl.h \
   include/uapi/asm-generic/ioctl.h \
   include/linux/edd.h \
   include/uapi/linux/edd.h \
@@ -455,7 +457,8 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conft
   include/linux/timex.h \
   include/uapi/linux/timex.h \
   /usr/src/linux-headers-5.4.0-86-generic/include/uapi/linux/param.h \
-  include/asm/param.h \
+  arch/x86/include/generated/uapi/asm/param.h \
+  include/asm-generic/param.h \
     $(wildcard include/config/hz.h) \
   include/uapi/asm-generic/param.h \
   /usr/src/linux-headers-5.4.0-86-generic/arch/x86/include/asm/timex.h \
@@ -680,6 +683,6 @@ deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conft
   include/linux/vermagic.h \
   include/generated/utsrelease.h \
 
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod.o: $(deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod.o)
+/root/zxm/rdma-kerndriver/compat/build/conftest.mod.o: $(deps_/root/zxm/rdma-kerndriver/compat/build/conftest.mod.o)
 
-$(deps_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod.o):
+$(deps_/root/zxm/rdma-kerndriver/compat/build/conftest.mod.o):

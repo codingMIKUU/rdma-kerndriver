@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/net/smc/smc_diag.mod := { echo  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/net/smc/smc_diag_dummy.o;  echo; } > /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/net/smc/smc_diag.mod
+cmd_/root/zxm/rdma-kerndriver/net/smc/smc_diag.mod := { echo  /root/zxm/rdma-kerndriver/net/smc/smc_diag_dummy.o;  echo; } > /root/zxm/rdma-kerndriver/net/smc/smc_diag.mod

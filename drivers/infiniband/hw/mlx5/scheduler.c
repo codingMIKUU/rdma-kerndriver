@@ -295,10 +295,6 @@ int scheduler_polling(void *data)
                     pr_err("Unexpected:No srmc found for this wr\n");
                     goto err;
                 }
-                if (srmc->pending_bytes + ibv_wr->sge.length > QUEUE_LIMIT)
-                {
-                    break;
-                }
 
                 DEBUG_LOG("posting wr,sizeof wr is %u\n", sizeof(struct ibv_send_wr));
                 DEBUG_LOG("qpn:%d,cur_post:%d,wr_id:%llu,sq buffer size:%d\n", sqb->qpn, sqb->cur_post, ibv_wr->wr_id, sqb->sq_size);
@@ -310,7 +306,7 @@ int scheduler_polling(void *data)
                 rdma_wr.wr.sg_list = &sgl;
                 rdma_wr.wr.num_sge = 1;
                 rdma_wr.wr.opcode = ibv_wr->opcode;
-                rdma_wr.wr.send_flags = ibv_wr->send_flags;ib
+                rdma_wr.wr.send_flags = ibv_wr->send_flags;
                 rdma_wr.wr.ex.imm_data = ibv_wr->imm_data;
                 rdma_wr.wr.qp_type.xrc.remote_srqn = ibv_wr->qp_type.srm.remote_srqn;
                 rdma_wr.remote_addr = ibv_wr->wr.rdma.remote_addr;
@@ -328,7 +324,6 @@ int scheduler_polling(void *data)
                 }
                 DEBUG_LOG("send finished\n");
                 srmc->ini_cb.sig_cnt += (rdma_wr.wr.send_flags & IB_SEND_SIGNALED) ? 1 : 0;
-                srmc->pending_bytes += sgl.length;
 
                 sched_size += ibv_wr->sge.length;
                 if (sqb->cur_post * sizeof(struct ibv_send_wr) >= sqb->sq_size)
@@ -354,7 +349,6 @@ int scheduler_polling(void *data)
                 }
                 DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc.status, cqe64->byte_cnt);
                 srmc->ini_cb.sig_cnt--;
-                srmc->pending_bytes -= cqe64->byte_cnt;
                 cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
                 // Two attr to change
 
@@ -506,10 +500,10 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
                 ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
                 ib_destroy_cq(srmc->ini_cb.cq);
             }
-            // if (srmc->ini_cb.cm_id)
-            // {
-            //     rdma_destroy_id(srmc->ini_cb.cm_id);
-            // }
+            if (srmc->ini_cb.cm_id)
+            {
+                rdma_destroy_id(srmc->ini_cb.cm_id);
+            }
 
             srmc = srmc->next;
             kfree(sched->srmc_head_small);
@@ -595,14 +589,17 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
             mutex_lock(&sched->srmc_lock);
             for (srmc = sched->srmc_head_small; srmc; srmc = srmc->next)
             {
+
                 if (srmc->tgt_cb.state == CONNECTED)
                 {
                     DEBUG_LOG("Freeing tgt cb's cm connection resources.\n");
                     rdma_disconnect(srmc->tgt_cb.cm_id);
+                    ib_destroy_qp(&srmc->tgt_cb.qp->ibqp);
+                    ib_destroy_cq(srmc->tgt_cb.cq);
                 }
                 if (srmc->tgt_cb.cm_id)
                 {
-                    rdma_destroy_id(srmc->ini_cb.cm_id);
+                    rdma_destroy_id(srmc->tgt_cb.cm_id);
                 }
             }
             for (srmc = sched->srmc_head_large; srmc; srmc = srmc->next)
@@ -610,10 +607,12 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
                 if (srmc->tgt_cb.state == CONNECTED)
                 {
                     rdma_disconnect(srmc->tgt_cb.cm_id);
+                    ib_destroy_qp(&srmc->tgt_cb.qp->ibqp);
+                    ib_destroy_cq(srmc->tgt_cb.cq);
                 }
                 if (srmc->tgt_cb.cm_id)
                 {
-                    rdma_destroy_id(srmc->ini_cb.cm_id);
+                    rdma_destroy_id(srmc->tgt_cb.cm_id);
                 }
             }
             mutex_unlock(&sched->srmc_lock);
@@ -1221,6 +1220,7 @@ int srm_create_connection(struct server_conn_info *conn_info)
         goto err2;
     }
     DEBUG_LOG("created qp %p\n", cb->qp);
+    cm_id->context = (void *)&srmc->tgt_cb;
 
     // accept
     ret = srm_accept(cb);
@@ -1231,7 +1231,7 @@ int srm_create_connection(struct server_conn_info *conn_info)
     }
     DEBUG_LOG("accept\n");
 
-    cm_id->context = (void *)&srmc->tgt_cb;
+
 
     DEBUG_LOG("srm_create_connection success\n");
     kfree(conn_info);

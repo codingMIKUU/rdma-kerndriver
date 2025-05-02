@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/bnxt_re/bnxt_re.mod := { echo  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/bnxt_re/main.o;  echo; } > /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/hw/bnxt_re/bnxt_re.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/bnxt_re.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/bnxt_re.mod

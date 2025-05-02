@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/target/nvme-loop.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/target/nvme-loop.o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/target/loop.o
+cmd_/root/zxm/rdma-kerndriver/drivers/nvme/target/nvme-loop.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/drivers/nvme/target/nvme-loop.o /root/zxm/rdma-kerndriver/drivers/nvme/target/loop.o

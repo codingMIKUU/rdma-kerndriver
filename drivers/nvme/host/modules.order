@@ -1,8 +1,8 @@
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/nvme-core.ko
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/nvme.ko
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/nvme-fabrics.ko
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/nvme-rdma.ko
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/nvme-fc.ko
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/nvme-tcp.ko
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/qla2xxx.ko
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/host/tcm_qla2xxx.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-core.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/host/nvme.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fabrics.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-rdma.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fc.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-tcp.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/host/qla2xxx.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/host/tcm_qla2xxx.ko

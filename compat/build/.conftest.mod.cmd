@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod := { echo  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.o;  echo; } > /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/compat/build/conftest.mod
+cmd_/root/zxm/rdma-kerndriver/compat/build/conftest.mod := { echo  /root/zxm/rdma-kerndriver/compat/build/conftest.o;  echo; } > /root/zxm/rdma-kerndriver/compat/build/conftest.mod

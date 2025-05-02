@@ -1,2 +1,2 @@
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/nvme/target/fc.o
+/root/zxm/rdma-kerndriver/drivers/nvme/target/fc.o
 

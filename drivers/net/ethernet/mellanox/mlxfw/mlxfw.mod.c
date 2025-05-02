@@ -43,7 +43,7 @@ __used __section(__versions) = {
 	{ 0x40a9b349, "vzalloc" },
 	{ 0xb601be4c, "__x86_indirect_thunk_rdx" },
 	{ 0xdecd0b29, "__stack_chk_fail" },
-	{ 0xb6a43883, "memtrack_inject_error" },
+	{ 0x696547f1, "memtrack_inject_error" },
 	{ 0x4f536e99, "memtrack_free" },
 	{ 0x1622d999, "is_non_trackable_free_func" },
 	{ 0x6b2dc060, "dump_stack" },

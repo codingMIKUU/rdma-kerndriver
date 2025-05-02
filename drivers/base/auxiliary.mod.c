@@ -54,7 +54,7 @@ __used __section(__versions) = {
 	{ 0xf9758623, "pm_generic_runtime_suspend" },
 	{ 0x717d3462, "dev_pm_domain_detach" },
 	{ 0x9f984513, "strrchr" },
-	{ 0xb6a43883, "memtrack_inject_error" },
+	{ 0x696547f1, "memtrack_inject_error" },
 	{ 0x4f536e99, "memtrack_free" },
 	{ 0x1622d999, "is_non_trackable_free_func" },
 	{ 0x6b2dc060, "dump_stack" },

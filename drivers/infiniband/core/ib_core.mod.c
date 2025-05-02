@@ -203,7 +203,7 @@ __used __section(__versions) = {
 	{ 0xb2fcb56d, "queue_delayed_work_on" },
 	{ 0xdecd0b29, "__stack_chk_fail" },
 	{ 0x9cb986f2, "vmalloc_base" },
-	{ 0xb6a43883, "memtrack_inject_error" },
+	{ 0x696547f1, "memtrack_inject_error" },
 	{ 0xb8b9f817, "kmalloc_order_trace" },
 	{ 0x1d24c881, "___ratelimit" },
 	{ 0x8b3b40cb, "kfree_skb" },

@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/ulp/opa_vnic/opa_vnic.mod := { echo  /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/ulp/opa_vnic/main.o;  echo; } > /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/ulp/opa_vnic/opa_vnic.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/opa_vnic/opa_vnic.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/opa_vnic/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/opa_vnic/opa_vnic.mod

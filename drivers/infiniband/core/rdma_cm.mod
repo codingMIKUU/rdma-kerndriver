@@ -1,2 +1,2 @@
-/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/core/cma.o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/core/cma_trace.o /home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/drivers/infiniband/core/cma_configfs.o
+/root/zxm/rdma-kerndriver/drivers/infiniband/core/cma.o /root/zxm/rdma-kerndriver/drivers/infiniband/core/cma_trace.o /root/zxm/rdma-kerndriver/drivers/infiniband/core/cma_configfs.o
 
