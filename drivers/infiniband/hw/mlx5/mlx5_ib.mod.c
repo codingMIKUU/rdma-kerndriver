@@ -473,4 +473,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "E2E880F7DABD8BEA425C810");
+MODULE_INFO(srcversion, "4F9AF9F1B420D58A3A06E9E");

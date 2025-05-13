@@ -136,7 +136,7 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group* sched_group,int qpn);
 int mlx5_ib_destroy_srmc(struct mlx5_ib_sched* sched,int ah_id);
 int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc,struct ib_pd *pd,int flags,int qpn);
 int mlx5_sched_run_server(struct srm_cb *cb);
-int create_srmc_qp_cm(struct srm_cb *cb,struct ib_pd *pd,union ib_gid *dgid,int flags);
+int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc,struct ib_pd *pd,union ib_gid *dgid,int flags);
 void ib_sched_free_buf(struct srm_cb *cb);
 int sched_hash_gid(union ib_gid *gid,int n);
 int srm_accept(struct srm_cb *cb);
