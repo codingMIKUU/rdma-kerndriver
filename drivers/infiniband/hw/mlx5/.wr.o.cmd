@@ -1719,6 +1719,13 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/wr.o := \
   include/linux/inetdevice.h \
   /root/zxm/rdma-kerndriver/include/rdma/ib_pack.h \
   /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/umr.h \
+  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/scheduler.h \
+  /root/zxm/rdma-kerndriver/include/rdma/rdma_cm.h \
+  /root/zxm/rdma-kerndriver/include/rdma/ib_sa.h \
+  /root/zxm/rdma-kerndriver/include/rdma/opa_addr.h \
+  /root/zxm/rdma-kerndriver/include/rdma/opa_smi.h \
+  /root/zxm/rdma-kerndriver/include/uapi/rdma/rdma_user_cm.h \
+  /root/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_sa.h \
 
 /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/wr.o: $(deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/wr.o)
 

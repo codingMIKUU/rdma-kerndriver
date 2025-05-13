@@ -2597,10 +2597,6 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 	} else
 		err = mlx5_qpc_create_qp(dev, &base->mqp, in, inlen, out);
 		if(init_attr->qp_type == IB_QPT_SRM){
-			if(mlx5_ib_map_ubuf(&sched_group,base->ubuffer.buf_addr,base->ubuffer.buf_size,
-			base->mqp.qpn,to_mcq(init_attr->send_cq)->mcq.cqn)){
-				pr_err("map sq buffer failed\n");
-			}
 			if(init_attr->send_cq){
 				send_cq = to_mcq(init_attr->send_cq);
 				if(mlx5_ib_map_cq_ubuf(&sched_group,send_cq->buf.umem->address,(send_cq->ibcq.cqe+1)*send_cq->cqe_size,send_cq->mcq.cqn)){
@@ -2608,6 +2604,10 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 				}
 			}else{
 				pr_err("send cq is null\n");
+			}
+			if(mlx5_ib_map_ubuf(&sched_group,base->ubuffer.buf_addr,base->ubuffer.buf_size,
+			base->mqp.qpn,to_mcq(init_attr->send_cq)->mcq.cqn)){
+				pr_err("map sq buffer failed\n");
 			}
 	}
 	kvfree(in);

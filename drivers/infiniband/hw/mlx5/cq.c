@@ -601,7 +601,7 @@ static int mlx5_poll_one_with_cqe(struct mlx5_ib_cq *cq,
 	uint32_t qpn;
 	u16 wqe_ctr;
 	int idx;
-	pr_info("2\n");
+	DEBUG_LOG("2\n");
 repoll:
 	*cqe = next_cqe_sw(cq);
 	if (!*cqe)
@@ -610,7 +610,7 @@ repoll:
 	cqe64 = (cq->mcq.cqe_sz == 64) ? *cqe : *cqe + 64;
 
 	++cq->mcq.cons_index;
-	pr_info("3\n");
+	DEBUG_LOG("3\n");
 
 	/* Make sure we read CQ entry contents after we've checked the
 	 * ownership bit.
@@ -618,7 +618,7 @@ repoll:
 	rmb();
 
 	opcode = get_cqe_opcode(cqe64);
-	pr_info("opcode:%d\n",opcode);
+	DEBUG_LOG("opcode:%d\n",opcode);
 	if (unlikely(opcode == MLX5_CQE_RESIZE_CQ)) {
 		if (likely(cq->resize_buf)) {
 			free_cq_buf(dev, &cq->buf);
@@ -640,7 +640,7 @@ repoll:
 		mqp = radix_tree_lookup(&dev->qp_table.tree, qpn);
 		*cur_qp = to_mibqp(mqp);
 	}
-	pr_info("cur_qp:%d\n",*cur_qp);
+	DEBUG_LOG("cur_qp:%d\n",*cur_qp);
 	wc->qp  = &(*cur_qp)->ibqp;
 	switch (opcode) {
 	case MLX5_CQE_REQ:
@@ -723,7 +723,7 @@ repoll:
 		goto repoll;
 	}
 	}
-	pr_info("mlx5_poll_one_with_cqe finished\n");
+	DEBUG_LOG("mlx5_poll_one_with_cqe finished\n");
 	return 0;
 }
 
@@ -791,7 +791,7 @@ out:
 }
 
 int mlx5_ib_poll_cq_with_cqe(struct ib_cq *ibcq, int num_entries, struct ib_wc *wc,void **cqe){
-	pr_info("in mlx5_ib_poll_cq_with_cqe\n");
+	DEBUG_LOG("in mlx5_ib_poll_cq_with_cqe\n");
 	struct mlx5_ib_cq *cq = to_mcq(ibcq);
 	struct mlx5_ib_qp *cur_qp = NULL;
 	struct mlx5_ib_dev *dev = to_mdev(cq->ibcq.device);
@@ -799,7 +799,7 @@ int mlx5_ib_poll_cq_with_cqe(struct ib_cq *ibcq, int num_entries, struct ib_wc *
 	unsigned long flags;
 	int soft_polled = 0;
 	int npolled;
-	// pr_info("mlx5_ib_poll_cq_with_cqe,0\n");
+	DEBUG_LOG("mlx5_ib_poll_cq_with_cqe,0\n");
 	spin_lock_irqsave(&cq->lock, flags);
 	if (mdev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR) {
 		/* make sure no soft wqe's are waiting */
@@ -810,7 +810,7 @@ int mlx5_ib_poll_cq_with_cqe(struct ib_cq *ibcq, int num_entries, struct ib_wc *
 				     wc + soft_polled, &npolled);
 		goto out;
 	}
-	// pr_info("mlx5_ib_poll_cq_with_cqe,1\n");
+	DEBUG_LOG("mlx5_ib_poll_cq_with_cqe,1\n");
 	if (unlikely(!list_empty(&cq->wc_list)))
 		soft_polled = poll_soft_wc(cq, num_entries, wc, false);
 
@@ -818,13 +818,13 @@ int mlx5_ib_poll_cq_with_cqe(struct ib_cq *ibcq, int num_entries, struct ib_wc *
 		if (mlx5_poll_one_with_cqe(cq, &cur_qp, wc + soft_polled + npolled,cqe))
 			break;
 	}
-	// pr_info("mlx5_ib_poll_cq_with_cqe,4\n");
+	DEBUG_LOG("mlx5_ib_poll_cq_with_cqe,4\n");
 	if (npolled)
 		mlx5_cq_set_ci(&cq->mcq);
-	// pr_info("mlx5_ib_poll_cq_with_cqe,5\n");
+    DEBUG_LOG("mlx5_ib_poll_cq_with_cqe,5\n");
 out:
 	spin_unlock_irqrestore( &cq->lock, flags);
-	// pr_info("mlx5_ib_poll_cq_with_cqe,6\n");
+	DEBUG_LOG("mlx5_ib_poll_cq_with_cqe,6\n");
 	return soft_polled + npolled;
 }
 

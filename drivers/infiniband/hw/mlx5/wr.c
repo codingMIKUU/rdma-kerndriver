@@ -8,6 +8,7 @@
 #include <linux/mlx5/driver.h>
 #include "wr.h"
 #include "umr.h"
+#include "scheduler.h"
 
 static const u32 mlx5_ib_opcode[] = {
 	[IB_WR_SEND] = MLX5_OPCODE_SEND,
@@ -1307,7 +1308,7 @@ out:
 		mlx5r_ring_db(qp, nreq, ctrl);
 
 	spin_unlock_irqrestore(&qp->sq.lock, flags);
-	if (qp->type == IB_QPT_XRC_INI)
+	if (qp->type == IB_QPT_XRC_INI && debug)
 		print_wqe_info(ctrl, size);
 	return err;
 }

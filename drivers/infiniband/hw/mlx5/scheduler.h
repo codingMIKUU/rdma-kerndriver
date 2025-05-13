@@ -5,21 +5,13 @@
 #include <linux/mutex.h>
 #include <linux/types.h>
 #include <rdma/rdma_cm.h>
-static int debug = 1;
-
+#define SQ_DEPTH 256
+static int debug = 0;
 
 #define DEBUG_LOG \
     if (debug) \
     printk
-struct mlx5_ib_sqbuf {
-    void* buf;
-    struct page** pages;
-    size_t sq_size;//
-    int qpn;
-    int cqn;
-    int cur_post;
-    struct mlx5_ib_sqbuf* next;//not loop
-};
+
 struct mlx5_ib_cqbuf{
     void* buf;
     struct page** pages;
@@ -28,9 +20,18 @@ struct mlx5_ib_cqbuf{
     int cqn;
     int cur_put;
     int op_own;
+    struct mutex lock;
     struct mlx5_ib_cqbuf* next;//not loop
 };
-
+struct mlx5_ib_sqbuf {
+    void* buf;
+    struct page** pages;
+    size_t sq_size;//
+    int qpn;
+    int cur_post;
+    struct mlx5_ib_cqbuf* cqb;
+    struct mlx5_ib_sqbuf* next;//not loop
+};
 enum test_state
 {
 	IDLE = 1,
@@ -78,10 +79,17 @@ struct buf_info{
     int buf_sz;
     u32 rkey;
 };
+struct mlx5_wqe_info{
+    u32 qpn;
+    struct mlx5_ib_sqbuf* sqb;
+    u16 wqe_counter;
+    size_t pending_bytes;
+};
 struct mlx5_ib_srmc{
    struct srm_cb ini_cb;
    struct srm_cb tgt_cb;
    union ib_gid dgid;
+   struct mlx5_wqe_info wqe_infos[SQ_DEPTH];
    size_t pending_bytes;
    struct mlx5_ib_srmc* next;//not loop
 };
