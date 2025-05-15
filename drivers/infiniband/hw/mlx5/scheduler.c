@@ -21,12 +21,13 @@
 #include <linux/inet.h>
 #include <linux/jhash.h>
 #include <rdma/ib_cm.h>
+#include <linux/delay.h>
 
 #define IP_ADDR "192.168.1.5"
 const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 8;
 const size_t QUEUE_LIMIT = 1024 * 256;
 const size_t SCHED_SIZE_LIMIT = 1024 * 8;
-int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn)
+int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx)
 {
     DEBUG_LOG("in mlx5_ib_map_ubuf\n");
     DEBUG_LOG("内核态virt_addr:%px,size:%d,qpn:%d,cqn%d\n", virt_addr, size, qpn, cqn);
@@ -54,7 +55,10 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
     mutex_lock(&sched_group->sq_lock);
     uq = kzalloc(sizeof(struct mlx5_ib_sqbuf), GFP_KERNEL);
     uq->qpn = qpn;
+    uq->uidx = uidx;
     uq->sq_size = size;
+    uq->wqe_cnt = size / sizeof(struct ibv_send_wr);
+    DEBUG_LOG("sqb->wqe_cnt:%d\n", uq->wqe_cnt);
     uq->buf = vmap(pages, npages, VM_MAP, PAGE_KERNEL); // map the pages(phys addr) to kernel space（virtual addr），非连续物理页映射到虚拟页
     uq->pages = pages;
     if (!uq->buf)
@@ -67,6 +71,22 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
         mutex_unlock(&sched_group->sq_lock);
         return -ENOMEM;
     }
+
+    mutex_lock(&sched_group->cq_lock);
+    for (cqb = sched_group->cq_head; cqb; cqb = cqb->next)
+    {
+        if (cqb->cqn == cqn)
+        {
+            uq->cqb = cqb;
+            break;
+        }
+    }
+    if (uq->cqb == NULL)
+    {
+        pr_err("cqn %d not found\n", cqn);
+    }
+    mutex_unlock(&sched_group->cq_lock);
+
     if (sched_group->sq_head == NULL)
     {
         sched_group->sq_head = uq;
@@ -77,20 +97,8 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
         sched_group->sq_head->next = uq;
     }
     DEBUG_LOG("map sq buf success\n");
-
-    mutex_lock(&sched_group->cq_lock);
-    for(cqb=sched_group->cq_head;cqb;cqb=cqb->next){
-        if(cqb->cqn==cqn){
-            uq->cqb=cqb;
-            break;
-        }
-    }
-    if(uq->cqb==NULL){
-        pr_err("cqn %d not found\n",cqn);
-    }
-    mutex_unlock(&sched_group->cq_lock);
     mutex_unlock(&sched_group->sq_lock);
-   
+
     return 0;
 }
 
@@ -232,7 +240,8 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
     mutex_unlock(&sched_group->cq_lock);
     return 0;
 }
-static void srm_cq_event_handler(struct ib_cq *cq,void *ctx){
+static void srm_cq_event_handler(struct ib_cq *cq, void *ctx)
+{
     struct mlx5_ib_srmc *srmc;
     struct ib_wc wc;
     void *cqe, *ucqe;
@@ -242,51 +251,53 @@ static void srm_cq_event_handler(struct ib_cq *cq,void *ctx){
     struct mlx5_cqe64 *ucqe64;
     int idx;
     srmc = ctx;
+
     DEBUG_LOG("distributing cqe\n");
-    //memset(&wc, 1, sizeof wc);
+    // memset(&wc, 1, sizeof wc);
     int cqe_num = 0;
-    while (!cqe_num)
+    while ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.qp->ibqp.send_cq, 1, &wc, &cqe)) == 1)
     {
-        //cqe_num=ib_poll_cq(srmc->ini_cb.qp->ibqp.send_cq,1,&wc);
-        cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.qp->ibqp.send_cq, 1, &wc, &cqe);
-    }
-    //cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
-    // Two attr to change
-    idx = wc.wr_id;
-    //qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
-    qpn = srmc->wqe_infos[idx].qpn;
-    DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc.status,srmc->wqe_infos[idx].pending_bytes);
-    DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn,srmc->wqe_infos[idx].wqe_counter);
-    sqb = srmc->wqe_infos[idx].sqb;
-    if (sqb==NULL || sqb->cqb == NULL)
-    {
-        pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
-    }
-    cqb = sqb->cqb;
-    mutex_lock(&cqb->lock);//多个线程可能同时写入同一个cq
-    // distribute
-    // TODO:change the owner bit
-    DEBUG_LOG("cqn:%d\n", cqb->cqn);
-    ucqe = cqb->buf + cqb->cur_put * cqb->cqe_sz;
-    ucqe64 = (cqb->cqe_sz == 64) ? ucqe : ucqe + 64;
-    memcpy(ucqe, cqe, cqb->cqe_sz);
-    DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
-    ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
-    ucqe64->wqe_counter = htons(srmc->wqe_infos[idx].wqe_counter & 0xffff);
-    // 反转用户态cqe的owner_bit
-    ucqe64->op_own = (ucqe64->op_own & (~0xf)) | cqb->op_own;
-    //减去发送中的字节数
-    srmc->pending_bytes -= srmc->wqe_infos[idx].pending_bytes;
-    DEBUG_LOG("ucqe64->op_own:%x,op_own:%d\n", ucqe64->op_own, cqb->op_own);
-    cqb->cur_put++;
-    if (cqb->cur_put * cqb->cqe_sz >= cqb->cq_size)
-    {
-        cqb->cur_put = 0;
-        cqb->op_own ^= MLX5_CQE_OWNER_MASK;
+        // cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
+        //  Two attr to change
+        idx = wc.wr_id;
+        // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
+        qpn = srmc->wqe_infos[idx].qpn;
+        DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc.status, srmc->wqe_infos[idx].pending_bytes);
+        DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, srmc->wqe_infos[idx].wqe_counter);
+        sqb = srmc->wqe_infos[idx].sqb;
+        if (sqb == NULL || sqb->cqb == NULL)
+        {
+            pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
+        }
+        cqb = sqb->cqb;
+        mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
+        // distribute
+        // TODO:change the owner bit
+        DEBUG_LOG("cqn:%d\n", cqb->cqn);
+        ucqe = cqb->buf + cqb->cur_put * cqb->cqe_sz;
+        ucqe64 = (cqb->cqe_sz == 64) ? ucqe : ucqe + 64;
+        memcpy(ucqe, cqe, cqb->cqe_sz);
+        DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
+        ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
+        ucqe64->wqe_counter = htons(srmc->wqe_infos[idx].wqe_counter & 0xffff);
+        // 反转用户态cqe的owner_bit
+        ucqe64->op_own = (ucqe64->op_own & (~0xf)) | cqb->op_own;
+        // 根据cqe v1，保存uidx
+        ucqe64->srqn = htonl(sqb->uidx);
+        // 减去发送中的字节数
+        srmc->pending_bytes -= srmc->wqe_infos[idx].pending_bytes;
+        DEBUG_LOG("ucqe64->op_own:%x,op_own:%d\n", ucqe64->op_own, cqb->op_own);
+        cqb->cur_put++;
+        if (cqb->cur_put * cqb->cqe_sz >= cqb->cq_size)
+        {
+            cqb->cur_put = 0;
+            cqb->op_own ^= MLX5_CQE_OWNER_MASK;
+        }
+
+        mutex_unlock(&cqb->lock);
     }
     DEBUG_LOG("distribute cqe finished\n");
-    mutex_unlock(&cqb->lock);
-    
+    ib_req_notify_cq(srmc->ini_cb.qp->ibqp.send_cq, IB_CQ_NEXT_COMP);
 }
 int scheduler_polling(void *data)
 {
@@ -311,23 +322,23 @@ int scheduler_polling(void *data)
     struct ib_sge sgl;
     int op_own;
     int idx;
-    memset(&rdma_wr, 0, sizeof rdma_wr); //可以注释掉吗？
+    memset(&rdma_wr, 0, sizeof rdma_wr); // 可以注释掉吗？
     kfree(sched_id);
 
     while (!kthread_should_stop())
     {
-
         // pr_info("polling hhhhh\n");
         // mutex_lock(&sched_group.sq_lock);
         for (sqb = sched_group.sq_head; sqb; sqb = sqb->next)
-        { // 是否应该加一个检查该QP有几个WR，都拉下来的逻辑？
-            ibv_wr = (struct ibv_send_wr *)(sqb->buf + sqb->cur_post * sizeof(struct ibv_send_wr));
+        {
+            idx = sqb->cur_post & (sqb->wqe_cnt - 1);
+            ibv_wr = (struct ibv_send_wr *)(sqb->buf + (idx << 7));
             size_t sched_size = 0;
             while (!kthread_should_stop())
             {
                 if (!ibv_wr->wr_id || sched_hash_gid(&ibv_wr->qp_type.srm.remote_gid, sched_group.num_sched) != id)
                 {
-                    //DEBUG_LOG("wr_id is 0 or wr_id is not in this sched,id is %d\n", id);
+                    // DEBUG_LOG("wr_id is 0 or wr_id is not in this sched,id is %d\n", id);
                     break;
                 }
                 if (sched_size > SCHED_SIZE_LIMIT)
@@ -361,18 +372,20 @@ int scheduler_polling(void *data)
                     }
                 }
                 // mutex_unlock(&sched->srmc_lock);
-                if(srmc==NULL){
+                if (srmc == NULL)
+                {
                     pr_err("Unexpected:No srmc found for this wr\n");
                     goto err;
                 }
-                if(srmc->pending_bytes>QUEUE_LIMIT){
+                if (srmc->pending_bytes > QUEUE_LIMIT)
+                {
                     DEBUG_LOG("Pending bytes is too large or too much wqes\n");
                     break;
                 }
 
                 DEBUG_LOG("posting wr,sizeof wr is %u\n", sizeof(struct ibv_send_wr));
                 DEBUG_LOG("qpn:%d,cur_post:%d,wr_id:%llu,sq buffer size:%d\n", sqb->qpn, sqb->cur_post, ibv_wr->wr_id, sqb->sq_size);
-                //rdma_wr.wr.wr_id = (((uint64_t)sqb->qpn) << 32) | sqb->cur_post;
+                // rdma_wr.wr.wr_id = (((uint64_t)sqb->qpn) << 32) | sqb->cur_post;
                 DEBUG_LOG("srmc qp's wqe_cnt:%d\n", srmc->ini_cb.qp->sq.wqe_cnt);
                 idx = srmc->ini_cb.qp->sq.head - srmc->ini_cb.qp->sq.tail;
                 rdma_wr.wr.wr_id = idx;
@@ -391,7 +404,6 @@ int scheduler_polling(void *data)
                 rdma_wr.wr.qp_type.xrc.remote_srqn = ibv_wr->qp_type.srm.remote_srqn;
                 rdma_wr.remote_addr = ibv_wr->wr.rdma.remote_addr;
                 rdma_wr.rkey = ibv_wr->wr.rdma.rkey;
-                ibv_wr->wr_id = 0;
                 sqb->cur_post++;
                 DEBUG_LOG("发送端的数据缓存区地址: %px\n", sgl.addr);
                 DEBUG_LOG("发送端要写入的缓存区地址: %px\n", rdma_wr.remote_addr);
@@ -403,23 +415,21 @@ int scheduler_polling(void *data)
                     goto err;
                 }
                 DEBUG_LOG("send finished\n");
-                //srmc->ini_cb.sig_cnt += (rdma_wr.wr.send_flags & IB_SEND_SIGNALED) ? 1 : 0;
+                // srmc->ini_cb.sig_cnt += (rdma_wr.wr.send_flags & IB_SEND_SIGNALED) ? 1 : 0;
 
                 sched_size += ibv_wr->sge.length;
                 srmc->pending_bytes += ibv_wr->sge.length;
-
-                if (sqb->cur_post * sizeof(struct ibv_send_wr) >= sqb->sq_size)
-                {
-                    sqb->cur_post = 0;
-                }
+                ibv_wr->wr_id = 0;
             }
         }
-       msleep(100);
+        // mutex_unlock(&sched_group.sq_lock);
+        // DEBUG_LOG("cnt:%d\n", cnt);
+        //usleep_range(100,200);
     }
-    DEBUG_LOG("scheduler thread %d exit\n",id);
+    DEBUG_LOG("scheduler thread %d exit\n", id);
     return 0;
 err:
-    pr_err("scheduler thread %d exit in error state\n",id);
+    pr_err("scheduler thread %d exit in error state\n", id);
     sched->task = NULL;
     return -1;
 }
@@ -467,9 +477,9 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
             ret = PTR_ERR(sched_group->scheds[i].task);
             goto err;
         }
-        kthread_bind(sched_group->scheds[i].task, i+1);
+        kthread_bind(sched_group->scheds[i].task, i + 1);
         wake_up_process(sched_group->scheds[i].task);
-        pr_info("Polling thread %d started and bound to CPU %d\n", i, i+1);
+        pr_info("Polling thread %d started and bound to CPU %d\n", i, i + 1);
     }
     return 0;
 err:
@@ -1189,7 +1199,7 @@ int srm_create_connection(struct server_conn_info *conn_info)
     cq_attr.cqe = cb->txdepth;
     cq_attr.comp_vector = 0;
     // change to event?
-    cb->cq = ib_create_cq(cb->cm_id->device, NULL,NULL , NULL, &cq_attr);
+    cb->cq = ib_create_cq(cb->cm_id->device, NULL, NULL, NULL, &cq_attr);
     if (IS_ERR(cb->cq))
     {
         printk(KERN_ERR "ib_create_cq failed\n");
@@ -1244,8 +1254,6 @@ int srm_create_connection(struct server_conn_info *conn_info)
     }
     DEBUG_LOG("accept\n");
 
-
-
     DEBUG_LOG("srm_create_connection success\n");
     kfree(conn_info);
     return 0;
@@ -1270,8 +1278,8 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
     struct server_conn_info *conn_info;
     struct srm_cb *cb = cma_id->context;
 
-    DEBUG_LOG("cma_event type %d cma_id %p (%s)\n", event->event, cma_id,
-              (cma_id == cb->cm_id) ? "parent" : "child");
+    printk("cma_event type %d cma_id %p (%s)\n", event->event, cma_id,
+           (cma_id == cb->cm_id) ? "parent" : "child");
 
     switch (event->event)
     {
@@ -1298,11 +1306,11 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
         conn_info->cm_id = cma_id;
         conn_info->flags = flags;
         kthread_run(srm_create_connection, conn_info, "server connection thread");
-        DEBUG_LOG("child cma %p\n", cma_id);
+        printk("child cma %p\n", cma_id);
         break;
 
     case RDMA_CM_EVENT_ESTABLISHED:
-        DEBUG_LOG("ESTABLISHED\n");
+        printk("ESTABLISHED\n");
         cb->state = CONNECTED;
         wake_up_interruptible(&cb->sem);
         break;
@@ -1339,9 +1347,6 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
     }
     return 0;
 }
-
-
-
 
 static void fill_sockaddr(struct sockaddr_storage *sin, struct srm_cb *cb)
 {
@@ -1484,14 +1489,19 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
     cq_attr.cqe = cb->txdepth;
     cq_attr.comp_vector = 0;
     // change to event?
-    cb->cq = ib_create_cq(cb->cm_id->device, srm_cq_event_handler,NULL,srmc, &cq_attr);
+    cb->cq = ib_create_cq(cb->cm_id->device, srm_cq_event_handler, NULL, srmc, &cq_attr);
     if (IS_ERR(cb->cq))
     {
         printk(KERN_ERR "ib_create_cq failed,cq:%s\n", PTR_ERR(cb->cq));
         ret = PTR_ERR(cb->cq);
         goto err0;
     }
-
+    ret = ib_req_notify_cq(cb->cq, IB_CQ_NEXT_COMP);
+    if (ret)
+    {
+        printk(KERN_ERR "ib_req_notify_cq failed,cq:%s\n", PTR_ERR(cb->cq));
+        goto err1;
+    }
     // create qp
     memset(&init_attr, 0, sizeof(init_attr));
     init_attr.cap.max_send_wr = cb->txdepth;
@@ -1678,7 +1688,7 @@ int mlx5_sched_run_server(struct srm_cb *cb)
     }
     DEBUG_LOG("bind server\n");
 
-    DEBUG_LOG("rdma_listen\n");
+    printk("rdma_listen\n");
     ret = rdma_listen(cb->cm_id, 10);
     if (ret)
     {

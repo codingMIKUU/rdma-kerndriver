@@ -26,9 +26,11 @@ struct mlx5_ib_cqbuf{
 struct mlx5_ib_sqbuf {
     void* buf;
     struct page** pages;
-    size_t sq_size;//
+    size_t sq_size;
+    uint32_t wqe_cnt;
     int qpn;
-    int cur_post;
+    u32 uidx;
+    uint32_t cur_post;
     struct mlx5_ib_cqbuf* cqb;
     struct mlx5_ib_sqbuf* next;//not loop
 };
@@ -122,7 +124,7 @@ enum srmc_create_flag{
     SRMC_CREATE_FLAG_TGT_QP = 2,
 };
 
-int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group* sched_group,unsigned long virt_addr,size_t size,int qpn,int cqn);
+int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group* sched_group,unsigned long virt_addr,size_t size,int qpn,int cqn,u32 uidx);
 int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group* sched_group,unsigned long virt_addr,size_t size,int cqn);
 int scheduler_polling(void* data);
 int mlx5_ib_create_srmc(struct mlx5_ib_sched* sched,struct mlx5_ib_qp *init_qp,struct mlx5_ib_qp *tgt_qp,union ib_gid *dgid);
