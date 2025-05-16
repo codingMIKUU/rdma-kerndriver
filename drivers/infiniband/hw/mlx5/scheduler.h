@@ -62,7 +62,6 @@ struct srm_cb{
     struct ib_mr *mr;
     char* buf;
     int buf_sz;
-    int sig_cnt;
 
     struct rdma_cm_id *cm_id;
     enum test_state state;
@@ -91,8 +90,10 @@ struct mlx5_ib_srmc{
    struct srm_cb ini_cb;
    struct srm_cb tgt_cb;
    union ib_gid dgid;
+   int sig_cnt;
    struct mlx5_wqe_info wqe_infos[SQ_DEPTH];
-   size_t pending_bytes;
+   size_t pending_bytes;//total pending bytes
+   size_t cul_pending_bytes;//next cqe's pending bytes
    struct mlx5_ib_srmc* next;//not loop
 };
 struct mlx5_ib_sched{
