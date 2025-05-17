@@ -21,7 +21,6 @@
 #include <linux/inet.h>
 #include <linux/jhash.h>
 #include <rdma/ib_cm.h>
-#include <linux/delay.h>
 
 #define IP_ADDR "192.168.1.5"
 const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 8;
@@ -339,7 +338,10 @@ int scheduler_polling(void *data)
             {
                 if (!ibv_wr->wr_id || sched_hash_gid(&ibv_wr->qp_type.srm.remote_gid, sched_group.num_sched) != id)
                 {
-                    // DEBUG_LOG("wr_id is 0 or wr_id is not in this sched,id is %d\n", id);
+                    DEBUG_LOG("wr_id is 0 or wr_id is not in this sched,id is %d\n", id);
+                    // if(sched_hash_gid(&ibv_wr->qp_type.srm.remote_gid, sched_group.num_sched) == id){
+                    //     pr_info("wr_id is 0\n");
+                    // }
                     break;
                 }
                 if (sched_size > SCHED_SIZE_LIMIT)
@@ -400,6 +402,7 @@ int scheduler_polling(void *data)
                 rdma_wr.wr.qp_type.xrc.remote_srqn = ibv_wr->qp_type.srm.remote_srqn;
                 rdma_wr.remote_addr = ibv_wr->wr.rdma.remote_addr;
                 rdma_wr.rkey = ibv_wr->wr.rdma.rkey;
+                ibv_wr->wr_id = 0;//放在哪很重要?
                 sqb->cur_post++;
                 DEBUG_LOG("发送端的数据缓存区地址: %px\n", sgl.addr);
                 DEBUG_LOG("发送端要写入的缓存区地址: %px\n", rdma_wr.remote_addr);
@@ -411,7 +414,7 @@ int scheduler_polling(void *data)
                     goto err;
                 }
                 DEBUG_LOG("send finished\n");
-                srmc->cul_pending_bytes += ibv_wr->sge.length;
+                srmc->cul_pending_bytes += sgl.length;
                 if(rdma_wr.wr.send_flags & IB_SEND_SIGNALED)
                 {
                     DEBUG_LOG("send signaled\n");
@@ -425,9 +428,9 @@ int scheduler_polling(void *data)
                     srmc->cul_pending_bytes = 0;
                 }
 
-                sched_size += ibv_wr->sge.length;
-                srmc->pending_bytes += ibv_wr->sge.length;
-                ibv_wr->wr_id = 0;
+                sched_size += sgl.length;
+                srmc->pending_bytes += sgl.length;
+                
             }
         }
         //mutex_unlock(&sched_group.sq_lock);
@@ -543,7 +546,7 @@ int scheduler_polling(void *data)
 
 
         
-        //msleep(1);
+        msleep(1);
     }
     DEBUG_LOG("scheduler thread %d exit\n", id);
     return 0;
