@@ -6,7 +6,8 @@
 #include <linux/types.h>
 #include <rdma/rdma_cm.h>
 #define SQ_DEPTH 256
-static int debug = 0;
+static int debug = 0; 
+
 
 #define DEBUG_LOG \
     if (debug) \
@@ -127,7 +128,7 @@ enum srmc_create_flag{
 
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group* sched_group,unsigned long virt_addr,size_t size,int qpn,int cqn,u32 uidx);
 int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group* sched_group,unsigned long virt_addr,size_t size,int cqn);
-int scheduler_polling(void* data);
+int scheduler_polling(void* sched_data);
 int mlx5_ib_create_srmc(struct mlx5_ib_sched* sched,struct mlx5_ib_qp *init_qp,struct mlx5_ib_qp *tgt_qp,union ib_gid *dgid);
 int mlx5_ib_sched_init(struct mlx5_ib_sched_group* sched_group,int num);
 void mlx5_ib_sched_exit(struct mlx5_ib_sched_group* sched_group);
@@ -141,7 +142,7 @@ int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc
 int mlx5_sched_run_server(struct srm_cb *cb);
 int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc,struct ib_pd *pd,union ib_gid *dgid,int flags);
 void ib_sched_free_buf(struct srm_cb *cb);
-int sched_hash_gid(union ib_gid *gid,int n);
+int sched_hash_ip(char addr[4],int n);
 int srm_accept(struct srm_cb *cb);
 void mlx5_ib_sched_exit(struct mlx5_ib_sched_group* sched_group);
 int mlx5_ib_server_init(struct mlx5_ib_server* server);

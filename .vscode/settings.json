@@ -3,6 +3,10 @@
         "*.h": "cpp",
         "random": "c",
         "*.tcc": "c",
-        "streambuf": "c"
+        "streambuf": "c",
+        "array": "c",
+        "string_view": "c",
+        "initializer_list": "c",
+        "utility": "c"
     }
 }

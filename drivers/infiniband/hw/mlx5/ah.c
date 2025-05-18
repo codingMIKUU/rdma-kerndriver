@@ -145,9 +145,9 @@ int mlx5_ib_create_ah(struct ib_ah *ibah, struct rdma_ah_init_attr *init_attr,
 	const struct ib_global_route *grh = rdma_ah_read_grh(ah_attr);
 	if(ah_attr->xrc_flags)
 	{
-		int idx = sched_hash_gid(&grh->dgid,sched_group.num_sched);
+		int idx = sched_hash_ip(grh->dgid.raw+12,sched_group.num_sched);
 		ibah->srmc_flags = is_xrc_exists(&sched_group.scheds[idx],ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
-		pr_info("内核srmc_flags: %u\n", ibah->srmc_flags);
+		DEBUG_LOG("内核srmc_flags: %u\n", ibah->srmc_flags);
 	}
 	create_ib_ah(dev, ah, init_attr);
 	pr_info("out mlx5_ib_create_ah\n");
