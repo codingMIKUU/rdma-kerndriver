@@ -38,7 +38,6 @@ __used __section(__versions) = {
 	{ 0x6c59aa8d, "mlx5_lag_is_active" },
 	{ 0x4ef31583, "rdma_nl_put_driver_string" },
 	{ 0xeb233a45, "__kmalloc" },
-	{ 0xf9a482f9, "msleep" },
 	{ 0xfcf72b8, "mlx5_eq_destroy_generic" },
 	{ 0xd0c07a29, "mlx5_alloc_bfreg" },
 	{ 0x1ed8b599, "__x86_indirect_thunk_r8" },

@@ -478,11 +478,11 @@ int scheduler_polling(void *sched_data)
                     DEBUG_LOG("Pending bytes is too large or too much wqes\n");
                     break;
                 }
-                smp_store_release(&uctrl->imm, 0);
+                
                 //DEBUG_LOG("posting wr,sizeof wr is %u\n", sizeof(struct ibv_send_wr));
                 //DEBUG_LOG("qpn:%d,cur_post:%d,wr_id:%llu,sq buffer size:%d\n", sqb->qpn, sqb->cur_post, ibv_wr->wr_id, sqb->sq_size);
                 // rdma_wr.wr.wr_id = (((uint64_t)sqb->qpn) << 32) | sqb->cur_post;
-                DEBUG_LOG("srmc qp's wqe_cnt:%d\n", srmc->ini_cb.qp->sq.wqe_cnt);
+                
                 // idx = srmc->ini_cb.qp->sq.head - srmc->ini_cb.qp->sq.tail;
                 
                 // memcpy(&sgl, &ibv_wr->sge, sizeof(struct ib_sge));
@@ -506,7 +506,7 @@ int scheduler_polling(void *sched_data)
                 //     pr_err("post send error:%d\n", ret);
                 //     goto err;
                 // }
-                start_cycles = rdtsc();
+                // start_cycles = rdtsc();
 
 
                 qp = srmc->ini_cb.qp;
@@ -522,8 +522,10 @@ int scheduler_polling(void *sched_data)
                 }
 
                 idx = qp->sq.cur_post & (qp->sq.wqe_cnt - 1);
+                DEBUG_LOG("srmc qp's wqe_cnt:%d\n", srmc->ini_cb.qp->sq.wqe_cnt);
                 ctrl = seg = mlx5_frag_buf_get_wqe(&qp->sq.fbc, idx);
                 memcpy(ctrl, uctrl, sizeof(struct mlx5_wqe_ctrl_seg));
+                ctrl->imm = 0;
 
                 seg += sizeof(struct mlx5_wqe_ctrl_seg);
                 //fence不管，可以吗?
@@ -580,11 +582,11 @@ int scheduler_polling(void *sched_data)
                 //   sizeof(struct mlx5_wqe_data_seg));
                 spin_unlock_irqrestore(&qp->sq.lock, flags);
 
-                end_cycles = rdtsc();
-                elapsed_cycles = end_cycles - start_cycles;
-                elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
-                pr_info("Function execution time: %llu cycles (%llu ns)\n",
-                    elapsed_cycles, elapsed_ns);
+                // end_cycles = rdtsc();
+                // elapsed_cycles = end_cycles - start_cycles;
+                // elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
+                // pr_info("Function execution time: %llu cycles (%llu ns)\n",
+                //     elapsed_cycles, elapsed_ns);
         
 
                 DEBUG_LOG("send finished\n");
@@ -600,6 +602,7 @@ int scheduler_polling(void *sched_data)
                     srmc->cul_pending_bytes = 0;
                 }
                 sqb->cur_post++;
+                smp_store_release(&uctrl->imm, 0);
 
                 sched_size += length;
                 srmc->pending_bytes += length;
@@ -725,8 +728,8 @@ int scheduler_polling(void *sched_data)
         //     }
         //     DEBUG_LOG("distribute cqe finished\n");
         // }
-        msleep(1);
-        
+        // msleep(1);
+        cpu_relax();
     }
     DEBUG_LOG("scheduler thread %d exit\n", id);
     return 0;
@@ -779,7 +782,7 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
             ret = PTR_ERR(sched_group->scheds[i].task);
             goto err;
         }
-        kthread_bind(sched_group->scheds[i].task, i + 1);
+        kthread_bind(sched_group->scheds[i].task, i + 8);
         wake_up_process(sched_group->scheds[i].task);
         pr_info("Polling thread %d started and bound to CPU %d\n", i, i + 1);
     }
