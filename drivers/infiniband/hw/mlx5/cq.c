@@ -815,7 +815,7 @@ int mlx5_ib_poll_cq_with_cqe(struct ib_cq *ibcq, int num_entries, struct ib_wc *
 		soft_polled = poll_soft_wc(cq, num_entries, wc, false);
 
 	for (npolled = 0; npolled < num_entries - soft_polled; npolled++) {
-		if (mlx5_poll_one_with_cqe(cq, &cur_qp, wc + soft_polled + npolled,cqe))
+		if (mlx5_poll_one_with_cqe(cq, &cur_qp, wc + soft_polled + npolled,cqe + soft_polled + npolled))
 			break;
 	}
 	DEBUG_LOG("mlx5_ib_poll_cq_with_cqe,4\n");

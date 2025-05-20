@@ -1356,7 +1356,6 @@ struct ib_qp *ib_create_qp_kernel(struct ib_pd *pd,
 	 */
 	if (qp_init_attr->cap.max_rdma_ctxs)
 		rdma_rw_init_qp(device, qp_init_attr);
-	pr_info("max_send_wr:%d\n", qp_init_attr->cap.max_send_wr);
 
 	qp = create_qp(device, pd, qp_init_attr, NULL, NULL, caller);
 	if (IS_ERR(qp))

@@ -5,7 +5,7 @@
 #include <linux/mutex.h>
 #include <linux/types.h>
 #include <rdma/rdma_cm.h>
-#define SQ_DEPTH 256
+#define SQ_DEPTH 4096
 static int debug = 0; 
 
 
@@ -86,13 +86,18 @@ struct mlx5_wqe_info{
     struct mlx5_ib_sqbuf* sqb;
     u16 wqe_counter;
     size_t pending_bytes;
+    u8 to_user;
+    u8 valid;
 };
 struct mlx5_ib_srmc{
    struct srm_cb ini_cb;
    struct srm_cb tgt_cb;
    union ib_gid dgid;
+   struct mutex sig_cnt_lock;
    int sig_cnt;
+   uint32_t cur_cqe;
    struct mlx5_wqe_info wqe_infos[SQ_DEPTH];
+   struct mutex pending_lock;
    size_t pending_bytes;//total pending bytes
    size_t cul_pending_bytes;//next cqe's pending bytes
    struct mlx5_ib_srmc* next;//not loop
@@ -115,6 +120,7 @@ struct mlx5_ib_sched_group{
     
     int num_sched;
     struct mlx5_ib_sched *scheds;
+    struct task_struct *cq_task;
 };
 struct mlx5_ib_server{
     int cm_id;
@@ -146,6 +152,7 @@ int sched_hash_ip(char addr[4],int n);
 int srm_accept(struct srm_cb *cb);
 void mlx5_ib_sched_exit(struct mlx5_ib_sched_group* sched_group);
 int mlx5_ib_server_init(struct mlx5_ib_server* server);
+int polling_cqe(void *data);
 
 
 #endif /* _MLX5_IB_SCHEDULER_H */

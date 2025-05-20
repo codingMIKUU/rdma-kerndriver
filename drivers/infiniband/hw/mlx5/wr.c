@@ -1087,6 +1087,7 @@ void mlx5r_ring_db(struct mlx5_ib_qp *qp, unsigned int nreq,
 	/* Make sure doorbells don't leak out of SQ spinlock
 	 * and reach the HCA out of order.
 	 */
+
 	bf->offset ^= bf->buf_size;
 }
 void print_wqe_info(void *seg, size_t size)
