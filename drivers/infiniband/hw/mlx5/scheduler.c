@@ -346,118 +346,118 @@ static void print_wqe_info(void *seg, size_t size)
 //     return ((uint64_t)hi << 32) | lo;
 // }
 //仅支持64B的标准wqe
-int polling_cqe(void *data){
-    extern struct mlx5_ib_sched_group sched_group;
-    struct mlx5_ib_sched *sched;
-    struct mlx5_ib_srmc *srmc;
-    int cqe_num;
-    void **cqe, *ucqe;
-    uint32_t idx;
-    struct ib_wc *wc;
-    cqe = kmalloc_array(256, sizeof(void *), GFP_KERNEL);
-    wc = kmalloc_array(256, sizeof(struct ib_wc), GFP_KERNEL);
-    u32 qpn;
-    u16 wqe_counter;
-    size_t pending_bytes;
-    u8 to_user;
-    struct mlx5_ib_sqbuf *sqb;
-    struct mlx5_ib_cqbuf *cqb;
-    struct mlx5_cqe64 *ucqe64, *cqe64;
-    int i,j;
-    int cnt; 
+// int polling_cqe(void *data){
+//     extern struct mlx5_ib_sched_group sched_group;
+//     struct mlx5_ib_sched *sched;
+//     struct mlx5_ib_srmc *srmc;
+//     int cqe_num;
+//     void **cqe, *ucqe;
+//     uint32_t idx;
+//     struct ib_wc *wc;
+//     cqe = kmalloc_array(256, sizeof(void *), GFP_KERNEL);
+//     wc = kmalloc_array(256, sizeof(struct ib_wc), GFP_KERNEL);
+//     u32 qpn;
+//     u16 wqe_counter;
+//     size_t pending_bytes;
+//     u8 to_user;
+//     struct mlx5_ib_sqbuf *sqb;
+//     struct mlx5_ib_cqbuf *cqb;
+//     struct mlx5_cqe64 *ucqe64, *cqe64;
+//     int i,j;
+//     int cnt; 
 
 
 
-    while(!kthread_should_stop()){
-        for(i=0;i<sched_group.num_sched;i++){
-            sched = &sched_group.scheds[i];
-            for(srmc = sched->srmc_head_small;srmc;srmc=srmc->next){
-                mutex_lock(&srmc->sig_cnt_lock);
-                if(srmc->sig_cnt)
-                {
-                    DEBUG_LOG("distributing cqe\n");
-                    // memset(&wc, 1, sizeof wc);
-                    if((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq,srmc->sig_cnt,wc,cqe))){
-                        //减去sig_cnt
-                        srmc->sig_cnt-=cqe_num;
-                        mutex_unlock(&srmc->sig_cnt_lock);
-                        //cnt2++;
-                        for(j=0;j<cqe_num;j++){
-                            // cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
-                            //  Two attr to change
-                            idx = wc[j].wr_id & (SQ_DEPTH - 1);//cq大小为SQ_DEPTH
-                            if(smp_load_acquire(&srmc->wqe_infos[idx].valid) == 0){
-                                pr_err("Unexpected:No valid wqe_info for idx %d\n", idx);
-                                continue;
-                            }
-                            qpn = srmc->wqe_infos[idx].qpn;
-                            wqe_counter = srmc->wqe_infos[idx].wqe_counter;
-                            pending_bytes = srmc->wqe_infos[idx].pending_bytes;
-                            to_user = srmc->wqe_infos[idx].to_user;
-                            sqb = srmc->wqe_infos[idx].sqb;
-                            smp_store_release(&srmc->wqe_infos[idx].valid,0);
+//     while(!kthread_should_stop()){
+//         for(i=0;i<sched_group.num_sched;i++){
+//             sched = &sched_group.scheds[i];
+//             for(srmc = sched->srmc_head_small;srmc;srmc=srmc->next){
+//                 mutex_lock(&srmc->sig_cnt_lock);
+//                 if(srmc->sig_cnt)
+//                 {
+//                     DEBUG_LOG("distributing cqe\n");
+//                     // memset(&wc, 1, sizeof wc);
+//                     if((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq,srmc->sig_cnt,wc,cqe))){
+//                         //减去sig_cnt
+//                         srmc->sig_cnt-=cqe_num;
+//                         mutex_unlock(&srmc->sig_cnt_lock);
+//                         //cnt2++;
+//                         for(j=0;j<cqe_num;j++){
+//                             // cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
+//                             //  Two attr to change
+//                             idx = wc[j].wr_id & (SQ_DEPTH - 1);//cq大小为SQ_DEPTH
+//                             if(smp_load_acquire(&srmc->wqe_infos[idx].valid) == 0){
+//                                 pr_err("Unexpected:No valid wqe_info for idx %d\n", idx);
+//                                 continue;
+//                             }
+//                             qpn = srmc->wqe_infos[idx].qpn;
+//                             wqe_counter = srmc->wqe_infos[idx].wqe_counter;
+//                             pending_bytes = srmc->wqe_infos[idx].pending_bytes;
+//                             to_user = srmc->wqe_infos[idx].to_user;
+//                             sqb = srmc->wqe_infos[idx].sqb;
+//                             smp_store_release(&srmc->wqe_infos[idx].valid,0);
 
-                            cqe64 = cqe[j];
+//                             cqe64 = cqe[j];
 
-                            mutex_lock(&srmc->pending_lock);
-                            // 减去发送中的字节数
-                            srmc->pending_bytes -= pending_bytes;
-                            mutex_unlock(&srmc->pending_lock);
-                            if(to_user == 0){
-                                continue;
-                            }
-                            // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
+//                             mutex_lock(&srmc->pending_lock);
+//                             // 减去发送中的字节数
+//                             srmc->pending_bytes -= pending_bytes;
+//                             mutex_unlock(&srmc->pending_lock);
+//                             if(to_user == 0){
+//                                 continue;
+//                             }
+//                             // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
                             
-                            DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[j].status, pending_bytes);
-                            DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, wqe_counter);
+//                             DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[j].status, pending_bytes);
+//                             DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, wqe_counter);
                             
-                            if (sqb == NULL || sqb->cqb == NULL)
-                            {
-                                pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
-                            }
-                            cqb = sqb->cqb;
-                            // distribute
-                            // TODO:change the owner bit
-                            DEBUG_LOG("cqn:%d\n", cqb->cqn);
-                            ucqe = cqb->buf + (cqb->cur_put << 6);
-                            ucqe64 = (cqb->cqe_sz == 64) ? ucqe : ucqe + 64;
-                            memcpy(ucqe, cqe[j], cqb->cqe_sz-1);
-                            DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
-                            ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
-                            ucqe64->wqe_counter = htons(wqe_counter & 0xffff);
-                            // 根据cqe v1，保存uidx
-                            ucqe64->srqn = htonl(sqb->uidx);
+//                             if (sqb == NULL || sqb->cqb == NULL)
+//                             {
+//                                 pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
+//                             }
+//                             cqb = sqb->cqb;
+//                             // distribute
+//                             // TODO:change the owner bit
+//                             DEBUG_LOG("cqn:%d\n", cqb->cqn);
+//                             ucqe = cqb->buf + (cqb->cur_put << 6);
+//                             ucqe64 = (cqb->cqe_sz == 64) ? ucqe : ucqe + 64;
+//                             memcpy(ucqe, cqe[j], cqb->cqe_sz-1);
+//                             DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
+//                             ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
+//                             ucqe64->wqe_counter = htons(wqe_counter & 0xffff);
+//                             // 根据cqe v1，保存uidx
+//                             ucqe64->srqn = htonl(sqb->uidx);
 
-                            // 反转用户态cqe的owner_bit
-                            smp_store_release(&ucqe64->op_own,(cqe64->op_own>>4<<4)|cqb->op_own);
-                            DEBUG_LOG("ucqe64->op_own:%x,op_own:%d,cur_put:%d\n", ucqe64->op_own, cqb->op_own,cqb->cur_put);
-                            cqb->cur_put++;
-                            if (cqb->cur_put <<6 >= cqb->cq_size)
-                            {
-                                cqb->cur_put = 0;
-                                cqb->op_own ^= MLX5_CQE_OWNER_MASK;
-                            }
-                            DEBUG_LOG("distribute cqe finished\n");
-                        }
-                    }else{
-                        mutex_unlock(&srmc->sig_cnt_lock);
-                    }
-                }else{
-                    mutex_unlock(&srmc->sig_cnt_lock);
-                }
+//                             // 反转用户态cqe的owner_bit
+//                             smp_store_release(&ucqe64->op_own,(cqe64->op_own & (~0xf))|cqb->op_own);
+//                             DEBUG_LOG("ucqe64->op_own:%x,op_own:%d,cur_put:%d\n", ucqe64->op_own, cqb->op_own,cqb->cur_put);
+//                             cqb->cur_put++;
+//                             if (cqb->cur_put <<6 >= cqb->cq_size)
+//                             {
+//                                 cqb->cur_put = 0;
+//                                 cqb->op_own ^= MLX5_CQE_OWNER_MASK;
+//                             }
+//                             DEBUG_LOG("distribute cqe finished\n");
+//                         }
+//                     }else{
+//                         mutex_unlock(&srmc->sig_cnt_lock);
+//                     }
+//                 }else{
+//                     mutex_unlock(&srmc->sig_cnt_lock);
+//                 }
                 
-            }
-        }
-        cnt++;
-        if(cnt>10000000){
-            cnt = 0;
-            msleep(0);
-        }
-    }
-    kfree(cqe);
-    kfree(wc);
+//             }
+//         }
+//         cnt++;
+//         if(cnt>10000000){
+//             cnt = 0;
+//             msleep(0);
+//         }
+//     }
+//     kfree(cqe);
+//     kfree(wc);
     
-}
+// }
 int scheduler_polling(void *sched_data)
 {
     extern struct mlx5_ib_sched_group sched_group;
@@ -468,15 +468,16 @@ int scheduler_polling(void *sched_data)
     struct mlx5_ib_sqbuf *sqb;
     struct mlx5_ib_cqbuf *cqb;
     struct mlx5_ib_srmc *srmc;
-    struct ib_wc wc;
-    void *cqe, *ucqe;
+    struct ib_wc *wc;
+    void **cqe, *ucqe;
     int qpn;
     int cqn = -1;
     int nreq;
-    struct mlx5_cqe64 *ucqe64;
+    struct mlx5_cqe64 *ucqe64, *cqe64;
     int op_own;
     int uidx,idx;
     int cqe_num;
+    int i;
 
     
     void *seg, *useg;
@@ -503,6 +504,9 @@ int scheduler_polling(void *sched_data)
     uint64_t elapsed_ns;
     const uint64_t cpu_frequency_hz = 2900000000; // 2.9 GHz
 
+    cqe = kmalloc_array(256, sizeof(void *), GFP_KERNEL);
+    wc = kmalloc_array(256, sizeof(struct ib_wc), GFP_KERNEL);
+
     memset(gid.raw,0,sizeof(gid.raw));
     memset(gid.raw+10,0xff,2);//高80位为0，中16位全1，低32位为ip地址，此为gid格式
 
@@ -511,9 +515,6 @@ int scheduler_polling(void *sched_data)
     kfree(sched_id);
     while (!kthread_should_stop())
     {
-        //cnt_tot++;
-        // pr_info("polling hhhhh\n");
-        //mutex_lock(&sched_group.sq_lock);
         for (sqb = sched_group.sq_head; sqb; sqb = sqb->next)
         {
             uidx = sqb->cur_post & (sqb->wqe_cnt - 1);
@@ -597,41 +598,11 @@ int scheduler_polling(void *sched_data)
                     break;
                 }
                 
-                //DEBUG_LOG("posting wr,sizeof wr is %u\n", sizeof(struct ibv_send_wr));
-                //DEBUG_LOG("qpn:%d,cur_post:%d,wr_id:%llu,sq buffer size:%d\n", sqb->qpn, sqb->cur_post, ibv_wr->wr_id, sqb->sq_size);
-                // rdma_wr.wr.wr_id = (((uint64_t)sqb->qpn) << 32) | sqb->cur_post;
-                
-                // idx = srmc->ini_cb.qp->sq.head - srmc->ini_cb.qp->sq.tail;
-                
-                // memcpy(&sgl, &ibv_wr->sge, sizeof(struct ib_sge));
-                // DEBUG_LOG("opcode:%u,send_flags:%u,imm_data:%u,srqn:%u,", ibv_wr->opcode, ibv_wr->send_flags, ibv_wr->imm_data, ibv_wr->qp_type.srm.remote_srqn);
-                // rdma_wr.wr.sg_list = &sgl;
-                // rdma_wr.wr.num_sge = 1;
-                // rdma_wr.wr.opcode = ibv_wr->opcode;
-                // rdma_wr.wr.send_flags = ibv_wr->send_flags;
-                // rdma_wr.wr.ex.imm_data = ibv_wr->imm_data;
-                // rdma_wr.wr.qp_type.xrc.remote_srqn = ibv_wr->qp_type.srm.remote_srqn;
-                // rdma_wr.remote_addr = ibv_wr->wr.rdma.remote_addr;
-                // rdma_wr.rkey = ibv_wr->wr.rdma.rkey;
-                // ibv_wr->wr_id = 0;//放在哪很重要?
-                // sqb->cur_post++;
-                // DEBUG_LOG("发送端的数据缓存区地址: %px\n", sgl.addr);
-                // DEBUG_LOG("发送端要写入的缓存区地址: %px\n", rdma_wr.remote_addr);
-                // DEBUG_LOG("服务端lkey：%d，收到的rkey：%d\n", sgl.lkey, rdma_wr.rkey);
-                // DEBUG_LOG("max_gs:%d\n,max_post:%d,fbc:%u\n", srmc->ini_cb.qp->sq.max_gs, srmc->ini_cb.qp->sq.max_post, srmc->ini_cb.qp->sq.fbc);
-                // if (ret = ib_post_send(&srmc->ini_cb.qp->ibqp, &rdma_wr.wr, &bad_wr))
-                // {
-                //     pr_err("post send error:%d\n", ret);
-                //     goto err;
-                // }
-                // start_cycles = rdtsc();
                 smp_store_release(&uctrl->imm, 0);
                 
                 srmc->cul_pending_bytes += length;
                 sched_size += length;
-                mutex_lock(&srmc->pending_lock);
                 srmc->pending_bytes += length;
-                mutex_unlock(&srmc->pending_lock);
                 tfree = 1;
 
                 qp = srmc->ini_cb.qp;
@@ -681,7 +652,7 @@ int scheduler_polling(void *sched_data)
                                         (qp->trans_qp.base.mqp.qpn << 8));
                 ctrl->fm_ce_se |= fence;
                 ctrl->fm_ce_se |= qp->sq_signal_bits;
-                sig = ctrl->fm_ce_se & MLX5_WQE_CTRL_CQ_UPDATE;
+                
                 DEBUG_LOG("ctrl->fe_ce_se:%d,sq's signaled bits:%d\n", ctrl->fm_ce_se,qp->sq_signal_bits);
                 DEBUG_LOG("qp's fence:%d\n",qp->next_fence);
                 if((ctrl->fm_ce_se & MLX5_WQE_CTRL_CQ_UPDATE)){
@@ -695,6 +666,7 @@ int scheduler_polling(void *sched_data)
                         pr_info("insert kernel cqe\n");
                     }
                 }
+                sig = ctrl->fm_ce_se & MLX5_WQE_CTRL_CQ_UPDATE;
                                         
 
                 qp->sq.wrid[idx] = srmc->cur_cqe;
@@ -730,18 +702,12 @@ int scheduler_polling(void *sched_data)
                 {
                     DEBUG_LOG("send signaled\n");
                     uidx = srmc->cur_cqe & (SQ_DEPTH - 1);
-                    while(smp_load_acquire(&srmc->wqe_infos[uidx].valid) == 1){
-                        pr_err("Unexpected:wqe_info is valid for idx %d\n", uidx);
-                    }
                     srmc->wqe_infos[uidx].qpn = sqb->qpn;
                     srmc->wqe_infos[uidx].wqe_counter = sqb->cur_post;
                     srmc->wqe_infos[uidx].pending_bytes = srmc->cul_pending_bytes;
                     srmc->wqe_infos[uidx].sqb = sqb;
                     srmc->wqe_infos[uidx].to_user = to_user;
-                    smp_store_release(&srmc->wqe_infos[uidx].valid,1);
-                    mutex_lock(&srmc->sig_cnt_lock);
                     srmc->sig_cnt++;
-                    mutex_unlock(&srmc->sig_cnt_lock);
                     srmc->cur_cqe++;
                     srmc->cul_pending_bytes = 0;
                 }
@@ -749,66 +715,67 @@ int scheduler_polling(void *sched_data)
                 
             }
         }
-        //mutex_unlock(&sched_group.sq_lock);
-       //small cqes
-        // for(srmc = sched->srmc_head_small;srmc;srmc=srmc->next){
-        //     if(srmc->sig_cnt)
-        //     {
-        //         DEBUG_LOG("distributing cqe\n");
-        //         // memset(&wc, 1, sizeof wc);
-        //         cqe_num = 0;
-        //         while((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq,1,&wc,&cqe))){
-        //             //减去sig_cnt
-        //             srmc->sig_cnt--;
-        //             //cnt2++;
-                    
-        //             // cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
-        //             //  Two attr to change
-        //             idx = wc.wr_id & (SQ_DEPTH - 1);//cq大小为SQ_DEPTH
-        //             // 减去发送中的字节数
-        //             srmc->pending_bytes -= srmc->wqe_infos[idx].pending_bytes;
-        //             if(srmc->wqe_infos[idx].to_user == 0){
-        //                 continue;
-        //             }
-        //             // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
-        //             qpn = srmc->wqe_infos[idx].qpn;
-        //             DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc.status, srmc->wqe_infos[idx].pending_bytes);
-        //             DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, srmc->wqe_infos[idx].wqe_counter);
-        //             sqb = srmc->wqe_infos[idx].sqb;
-        //             if (sqb == NULL || sqb->cqb == NULL)
-        //             {
-        //                 pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
-        //             }
-        //             cqb = sqb->cqb;
-        //             mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
-        //             // distribute
-        //             // TODO:change the owner bit
-        //             DEBUG_LOG("cqn:%d\n", cqb->cqn);
-        //             ucqe = cqb->buf + cqb->cur_put * cqb->cqe_sz;
-        //             ucqe64 = (cqb->cqe_sz == 64) ? ucqe : ucqe + 64;
-        //             memcpy(ucqe, cqe, cqb->cqe_sz-1);
-        //             DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
-        //             ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
-        //             ucqe64->wqe_counter = htons(srmc->wqe_infos[idx].wqe_counter & 0xffff);
-        //             // 根据cqe v1，保存uidx
-        //             ucqe64->srqn = htonl(sqb->uidx);
+        //small cqes
+        for(srmc = sched->srmc_head_small;srmc;srmc=srmc->next){
+            if(srmc->sig_cnt)
+            {
+                DEBUG_LOG("distributing cqe\n");
+                // memset(&wc, 1, sizeof wc);
+                cqe_num = 0;
+                if((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq,srmc->sig_cnt,wc,cqe))){
+                    //减去sig_cnt
+                    srmc->sig_cnt-= cqe_num;
+                    //cnt2++;
+                    for(i =0 ;i<cqe_num;i++){
+                        // cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
+                        //  Two attr to change
+                        idx = wc[i].wr_id & (SQ_DEPTH - 1);//cq大小为SQ_DEPTH
+                        // 减去发送中的字节数
+                        srmc->pending_bytes -= srmc->wqe_infos[idx].pending_bytes;
+                        if(srmc->wqe_infos[idx].to_user == 0){
+                            continue;
+                        }
+                        // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
+                        qpn = srmc->wqe_infos[idx].qpn;
+                        DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[i].status, srmc->wqe_infos[idx].pending_bytes);
+                        DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, srmc->wqe_infos[idx].wqe_counter);
+                        sqb = srmc->wqe_infos[idx].sqb;
+                        if (sqb == NULL || sqb->cqb == NULL)
+                        {
+                            pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
+                        }
+                        cqb = sqb->cqb;
+                        mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
+                        // distribute
+                        // TODO:change the owner bit
+                        DEBUG_LOG("cqn:%d\n", cqb->cqn);
+                        ucqe = cqb->buf + cqb->cur_put * cqb->cqe_sz;
+                        ucqe64 = (cqb->cqe_sz == 64) ? ucqe : ucqe + 64;
+                        cqe64 = cqe[i];
+                        memcpy(ucqe, cqe[i], cqb->cqe_sz-1);
+                        DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
+                        ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
+                        ucqe64->wqe_counter = htons(srmc->wqe_infos[idx].wqe_counter & 0xffff);
+                        // 根据cqe v1，保存uidx
+                        ucqe64->srqn = htonl(sqb->uidx);
 
-        //             // 反转用户态cqe的owner_bit
-        //             smp_store_release(&ucqe64->op_own,cqb->op_own);
-        //             DEBUG_LOG("ucqe64->op_own:%x,op_own:%d,cur_put:%d\n", ucqe64->op_own, cqb->op_own,cqb->cur_put);
-        //             cqb->cur_put++;
-        //             if (cqb->cur_put * cqb->cqe_sz >= cqb->cq_size)
-        //             {
-        //                 cqb->cur_put = 0;
-        //                 cqb->op_own ^= MLX5_CQE_OWNER_MASK;
-        //             }
+                        // 反转用户态cqe的owner_bit
+                        smp_store_release(&ucqe64->op_own,(cqe64->op_own&(~0xf))|cqb->op_own);
+                        DEBUG_LOG("ucqe64->op_own:%x,op_own:%d,cur_put:%d\n", ucqe64->op_own, cqb->op_own,cqb->cur_put);
+                        cqb->cur_put++;
+                        if ((cqb->cur_put << 6) >= cqb->cq_size)
+                        {
+                            cqb->cur_put = 0;
+                            cqb->op_own ^= MLX5_CQE_OWNER_MASK;
+                        }
 
-        //             mutex_unlock(&cqb->lock);
-        //             DEBUG_LOG("distribute cqe finished\n");
-        //         }
-        //     }   
+                        mutex_unlock(&cqb->lock);
+                        DEBUG_LOG("distribute cqe finished\n");
+                    }
+                }
+            }   
             
-        // }
+        }
         // //large cqes
         // for(srmc = sched->srmc_head_large;srmc;srmc=srmc->next){
         //     if(srmc->sig_cnt)
@@ -870,9 +837,13 @@ int scheduler_polling(void *sched_data)
         }
     }
     DEBUG_LOG("scheduler thread %d exit\n", id);
+    kfree(cqe);
+    kfree(wc);
     return 0;
 err:
     pr_err("scheduler thread %d exit in error state\n", id);
+    kfree(cqe);
+    kfree(wc);
     sched->task = NULL;
     return -1;
 }
@@ -927,16 +898,16 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
         wake_up_process(sched_group->scheds[i].task);
         pr_info("Polling thread %d started and bound to CPU %d\n", i, i + 8);
     }
-    sched_group->cq_task =  kthread_create(polling_cqe,NULL,"polling_cqe");
-    if (IS_ERR(sched_group->cq_task))
-    {
-        pr_err("Failed to create cqe polling thread\n");
-        ret = PTR_ERR(sched_group->cq_task);
-        goto err;
-    }
-    kthread_bind(sched_group->cq_task, 10);
-    wake_up_process(sched_group->cq_task);
-    pr_info("CQ polling thread started and bound to CPU %d\n", 10);
+    // sched_group->cq_task =  kthread_create(polling_cqe,NULL,"polling_cqe");
+    // if (IS_ERR(sched_group->cq_task))
+    // {
+    //     pr_err("Failed to create cqe polling thread\n");
+    //     ret = PTR_ERR(sched_group->cq_task);
+    //     goto err;
+    // }
+    // kthread_bind(sched_group->cq_task, 10);
+    // wake_up_process(sched_group->cq_task);
+    // pr_info("CQ polling thread started and bound to CPU %d\n", 10);
     return 0;
 err:
     for (j = 0; j < i; j++)
@@ -959,10 +930,6 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
     struct mlx5_ib_sched *sched;
     int npages;
     int i;
-    kthread_stop(sched_group->cq_task);
-    sched_group->cq_task = NULL;
-    DEBUG_LOG("CQ polling thread stopped\n");
-
     for (i = 0; i < sched_group->num_sched; i++)
     {
         DEBUG_LOG("Ready to stop sched->task %d\n", i);
@@ -1147,10 +1114,6 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
         // srmc no exists
         srmc_small = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
         srmc_large = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
-        mutex_init(&srmc_small->sig_cnt_lock);
-        mutex_init(&srmc_large->sig_cnt_lock);
-        mutex_init(&srmc_small->pending_lock);
-        mutex_init(&srmc_large->pending_lock);
         memcpy(srmc_small->dgid.raw, dgid->raw, sizeof(srmc_small->dgid.raw));
         memcpy(srmc_large->dgid.raw, dgid->raw, sizeof(srmc_large->dgid.raw));
         if (flags == SRMC_CREATE_FLAG_INIT_QP)

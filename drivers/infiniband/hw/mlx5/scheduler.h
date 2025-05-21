@@ -93,11 +93,9 @@ struct mlx5_ib_srmc{
    struct srm_cb ini_cb;
    struct srm_cb tgt_cb;
    union ib_gid dgid;
-   struct mutex sig_cnt_lock;
    int sig_cnt;
    uint32_t cur_cqe;
    struct mlx5_wqe_info wqe_infos[SQ_DEPTH];
-   struct mutex pending_lock;
    size_t pending_bytes;//total pending bytes
    size_t cul_pending_bytes;//next cqe's pending bytes
    struct mlx5_ib_srmc* next;//not loop
@@ -120,7 +118,6 @@ struct mlx5_ib_sched_group{
     
     int num_sched;
     struct mlx5_ib_sched *scheds;
-    struct task_struct *cq_task;
 };
 struct mlx5_ib_server{
     int cm_id;
