@@ -460,6 +460,7 @@ static void print_wqe_info(void *seg, size_t size)
 //     kfree(wc);
     
 // }
+
 int scheduler_polling(void *sched_data)
 {
     extern struct mlx5_ib_sched_group sched_group;
@@ -479,7 +480,7 @@ int scheduler_polling(void *sched_data)
     int op_own;
     int uidx,idx;
     int cqe_num;
-    int i;
+    int i,j;
 
     
     void *seg, *useg;
@@ -495,11 +496,14 @@ int scheduler_polling(void *sched_data)
     u32 opmod;      
     u32 imm;
     void *cur_edge;
+    int hash_id ;
     u8 next_fence;
 	u8 fence;
     u8 sig;
 
     u8 to_user;
+
+    int found;
 
 
     uint64_t start_cycles, end_cycles, elapsed_cycles;
@@ -574,9 +578,17 @@ int scheduler_polling(void *sched_data)
                 
 
 
-
-                for (srmc = length > MESSAGE_SIZE_THRESHOLD ? sched->srmc_head_large : sched->srmc_head_small; srmc; srmc = srmc->next)
+                hash_id = sched_hash_ip((char*)&imm, NUM_SRMC);
+                found = 0;
+                for (i = 0;i< NUM_SRMC;i++)
                 {
+                    j = (i + hash_id)%NUM_SRMC;
+                    srmc = (length > MESSAGE_SIZE_THRESHOLD ? sched->srmc_head_large[j] : sched->srmc_head_small[j]);
+                    if (srmc == NULL)
+                    {
+                        pr_err("Unexpected:No srmc found for this wr\n");
+                        goto err;
+                    }
                     if (memcmp(srmc->dgid.raw, gid.raw, sizeof(srmc->dgid.raw)) == 0)
                     {
                         DEBUG_LOG("found srmc,gid.interface_id:%llx,subnet_prefix:%llx\n", srmc->dgid.global.interface_id, srmc->dgid.global.subnet_prefix);
@@ -585,15 +597,16 @@ int scheduler_polling(void *sched_data)
                             pr_err("Unexpected:ini qp for this srmc is NULL\n");
                             goto err;
                         }
+                        found = 1;
                         break;
                     }
                 }
-                // mutex_unlock(&sched->srmc_lock);
-                if (srmc == NULL)
+                if (!found)
                 {
                     pr_err("Unexpected:No srmc found for this wr\n");
                     goto err;
                 }
+                // mutex_unlock(&sched->srmc_lock);
                 if (srmc->pending_bytes > QUEUE_LIMIT)
                 {
                     DEBUG_LOG("Pending bytes is too large or too much wqes, pending_bytes for this srmc is%zu\n",srmc->pending_bytes);
@@ -719,7 +732,12 @@ int scheduler_polling(void *sched_data)
         }
     poll:
         //small cqes
-        for(srmc = sched->srmc_head_small;srmc;srmc=srmc->next){
+        for(j = 0 ;j< NUM_SRMC;j++){
+            srmc = sched->srmc_head_small[j];
+            if(srmc == NULL)
+            {
+                continue;
+            }
             if(srmc->sig_cnt)
             {
                 DEBUG_LOG("distributing cqe\n");
@@ -781,7 +799,12 @@ int scheduler_polling(void *sched_data)
         }
 
         //large cqes
-        for(srmc = sched->srmc_head_large;srmc;srmc=srmc->next){
+        for(j = 0 ;j< NUM_SRMC;j++){
+            srmc = sched->srmc_head_large[j];
+            if(srmc == NULL)
+            {
+                continue;
+            }
             if(srmc->sig_cnt)
             {
                 DEBUG_LOG("distributing cqe\n");
@@ -994,7 +1017,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
     struct mlx5_ib_srmc *srmc;
     struct mlx5_ib_sched *sched;
     int npages;
-    int i;
+    int i,j;
     for (i = 0; i < sched_group->num_sched; i++)
     {
         DEBUG_LOG("Ready to stop sched->task %d\n", i);
@@ -1005,8 +1028,13 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
             sched->task = NULL;
         }
         mutex_lock(&sched->srmc_lock);
-        for (srmc = sched->srmc_head_small; srmc;)
+        for (j = 0;j<NUM_SRMC;j++)
         {
+            srmc = sched->srmc_head_small[j];
+            if (srmc == NULL)
+            {
+                continue;
+            }
             DEBUG_LOG("srmc ini_cb state:%d\n", srmc->ini_cb.state);
             // if (srmc->ini_cb.state == CONNECTED)//可能在event处理过程中发现state是CONNECTED，造成重复释放。如何解决？
             // {
@@ -1020,27 +1048,28 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
                 rdma_destroy_id(srmc->ini_cb.cm_id);
             }
 
-            srmc = srmc->next;
-            kfree(sched->srmc_head_small);
-            sched->srmc_head_small = srmc;
+            kfree(srmc);
         }
 
-        for (srmc = sched->srmc_head_large; srmc;)
+        for (j = 0;j<NUM_SRMC;j++)
         {
-            if (srmc->ini_cb.state == CONNECTED)
+            srmc = sched->srmc_head_large[j];
+            if (srmc == NULL)
             {
-                rdma_disconnect(srmc->ini_cb.cm_id);
-                // ib_sched_free_buf(&srmc->ini_cb);
-                ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
-                ib_destroy_cq(srmc->ini_cb.cq);
+                continue;
             }
+            // if (srmc->ini_cb.state == CONNECTED)
+            // {
+            //     rdma_disconnect(srmc->ini_cb.cm_id);
+            //     // ib_sched_free_buf(&srmc->ini_cb);
+            //     ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
+            //     ib_destroy_cq(srmc->ini_cb.cq);
+            // }
             if (srmc->ini_cb.cm_id)
             {
                 rdma_destroy_id(srmc->ini_cb.cm_id);
             }
-            srmc = srmc->next;
-            kfree(sched->srmc_head_large);
-            sched->srmc_head_large = srmc;
+            kfree(srmc);
         }
         mutex_unlock(&sched->srmc_lock);
         DEBUG_LOG("clean thread %d srmc success\n", i);
@@ -1092,7 +1121,7 @@ int mlx5_ib_server_init(struct mlx5_ib_server *server)
 }
 void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_group *sched_group)
 {
-    int i;
+    int i,j;
     struct mlx5_ib_sched *sched;
     struct mlx5_ib_srmc *srmc;
 
@@ -1103,9 +1132,13 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
         {
             sched = &sched_group->scheds[i];
             mutex_lock(&sched->srmc_lock);
-            for (srmc = sched->srmc_head_small; srmc; srmc = srmc->next)
+            for (j = 0;j<NUM_SRMC;j++)
             {
-
+                srmc = sched->srmc_head_small[j];
+                if (srmc == NULL)
+                {
+                    continue;
+                }
                 if (srmc->tgt_cb.state == CONNECTED)
                 {
                     DEBUG_LOG("Freeing tgt cb's cm connection resources.\n");
@@ -1118,8 +1151,13 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
                     rdma_destroy_id(srmc->tgt_cb.cm_id);
                 }
             }
-            for (srmc = sched->srmc_head_large; srmc; srmc = srmc->next)
+            for (j =0 ;j<NUM_SRMC;j++)
             {
+                srmc = sched->srmc_head_large[j];
+                if (srmc == NULL)
+                {
+                    continue;
+                }
                 if (srmc->tgt_cb.state == CONNECTED)
                 {
                     rdma_disconnect(srmc->tgt_cb.cm_id);
@@ -1150,10 +1188,18 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
     DEBUG_LOG("in is_xrc_exists,gid.in_id = %llx, gid.subnet = %llx\n", dgid->global.interface_id, dgid->global.subnet_prefix);
     struct mlx5_ib_srmc *srmc_small, *srmc_large;
     int ret = 1;
+    int i,j;
+    int hash_id;
+    int has_srmc = 0;
+    hash_id = sched_hash_ip((char*)dgid->raw + 12,NUM_SRMC);
     mutex_lock(&sched->srmc_lock);
-    for (srmc_small = sched->srmc_head_small, srmc_large = sched->srmc_head_large; srmc_small;
-         srmc_small = srmc_small->next, srmc_large = srmc_large->next)
+    for (i = 0 ;i<NUM_SRMC;i++)
     {
+        j = (hash_id + i) % NUM_SRMC;
+        srmc_small = sched->srmc_head_small[j], srmc_large = sched->srmc_head_large[j];
+        if(srmc_small == NULL){
+            break;
+        }
         if (memcmp(srmc_small->dgid.raw, dgid->raw, sizeof(srmc_small->dgid.raw)) == 0)
         {
             if (flags == SRMC_CREATE_FLAG_INIT_QP)
@@ -1171,11 +1217,18 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
                     ret = 0;
                 }
             }
+            has_srmc = 1;
+            break;
         }
-        break;
+        
     }
-    if (srmc_small == NULL)
+    if (!has_srmc)
     {
+        if(sched->srmc_head_small[j] != NULL || sched->srmc_head_large[j] != NULL){
+            pr_err("srmc queue is full\n");
+            mutex_unlock(&sched->srmc_lock);
+            return -1;
+        }
         // srmc no exists
         srmc_small = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
         srmc_large = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
@@ -1188,19 +1241,8 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
         }
 
 
-        if (sched->srmc_head_small == NULL)
-        {
-            sched->srmc_head_small = srmc_small;
-            sched->srmc_head_large = srmc_large;
-        }
-        else
-        {
-            srmc_small->next = sched->srmc_head_small->next;
-            sched->srmc_head_small->next = srmc_small;
-
-            srmc_large->next = sched->srmc_head_large->next;
-            sched->srmc_head_large->next = srmc_large;
-        }
+        sched->srmc_head_small[j] = srmc_small;
+        sched->srmc_head_large[j] = srmc_large;
     }
     mutex_unlock(&sched->srmc_lock);
 
@@ -1628,6 +1670,9 @@ int srm_create_connection(struct server_conn_info *conn_info)
     struct srm_cb *cb, *server_cb;
     int ret;
 
+    int i, hash_id,j;
+    int found;
+
     server_cb = (struct srm_cb *)cm_id->context;
 
     rdma_read_gids(cm_id, NULL, &dgid);
@@ -1637,42 +1682,47 @@ int srm_create_connection(struct server_conn_info *conn_info)
     DEBUG_LOG("idx=%d\n", idx);
     sched = &sched_group.scheds[idx];
 
+    hash_id = sched_hash_ip(dgid.raw + 12, NUM_SRMC);
+    found = 0;
     mutex_lock(&sched->srmc_lock);
-    for (srmc = (flags == MESSAGE_SIZE_LARGE ? sched->srmc_head_large : sched->srmc_head_small); srmc; srmc = srmc->next)
+    for (i = 0 ;i<NUM_SRMC;i++)
     {
+        j = (hash_id + i) % NUM_SRMC;
+        srmc = (flags == MESSAGE_SIZE_LARGE ? sched->srmc_head_large[j] : sched->srmc_head_small[j]);
+        if(srmc == NULL){
+            break;
+        }
         if (memcmp(srmc->dgid.raw, dgid.raw, sizeof(srmc->dgid.raw)) == 0)
         {
+            found = 1;
             break;
         }
     }
-    if (srmc && srmc->tgt_cb.refcnt)
+    if (found && srmc->tgt_cb.refcnt)
     {
         // 已经存在TGT QP
         srmc->tgt_cb.refcnt++;
+        mutex_unlock(&sched->srmc_lock);
         rdma_destroy_id(cm_id);
         return 0;
     }
-    if (srmc == NULL)
+    if (!found)
     {
+        if(sched->srmc_head_small[j] != NULL || sched->srmc_head_large[j] != NULL)
+        {
+            pr_err("srmc queue is full\n");
+            mutex_unlock(&sched->srmc_lock);
+            rdma_destroy_id(cm_id);
+            return -1;
+        }
         srmc = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
         memcpy(srmc->dgid.raw, dgid.raw, sizeof(srmc->dgid.raw));
 
         // 将srmc 加入到srmc_head中
-        if (flags == MESSAGE_SIZE_SMALL && sched->srmc_head_small == NULL || flags == MESSAGE_SIZE_LARGE && sched->srmc_head_large == NULL)
-        {
-            if (flags == MESSAGE_SIZE_LARGE)
-                sched->srmc_head_large = srmc;
-            else
-                sched->srmc_head_small = srmc;
-        }
+        if (flags == MESSAGE_SIZE_LARGE)
+            sched->srmc_head_large[j] = srmc;
         else
-        {
-            srmc->next = (flags == MESSAGE_SIZE_LARGE ? sched->srmc_head_large->next : sched->srmc_head_small->next);
-            if (flags == MESSAGE_SIZE_LARGE)
-                sched->srmc_head_large->next = srmc;
-            else
-                sched->srmc_head_small->next = srmc;
-        }
+            sched->srmc_head_small[j] = srmc;
     }
     // srmc->tgt_cb.refcnt == 0
     srmc->tgt_cb.refcnt = 1;
