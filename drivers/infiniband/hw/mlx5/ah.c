@@ -106,7 +106,7 @@ int mlx5_ib_create_ah(struct ib_ah *ibah, struct rdma_ah_init_attr *init_attr,
 		      struct ib_udata *udata)
 
 {
-	pr_info("in mlx5_ib_create_ah\n");
+	DEBUG_LOG("in mlx5_ib_create_ah\n");
 	struct rdma_ah_attr *ah_attr = init_attr->ah_attr;
 	struct mlx5_ib_ah *ah = to_mah(ibah);
 	struct mlx5_ib_dev *dev = to_mdev(ibah->device);
@@ -150,7 +150,7 @@ int mlx5_ib_create_ah(struct ib_ah *ibah, struct rdma_ah_init_attr *init_attr,
 		DEBUG_LOG("内核srmc_flags: %u\n", ibah->srmc_flags);
 	}
 	create_ib_ah(dev, ah, init_attr);
-	pr_info("out mlx5_ib_create_ah\n");
+	DEBUG_LOG("out mlx5_ib_create_ah\n");
 	return 0;
 }
 

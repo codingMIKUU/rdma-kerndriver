@@ -5,7 +5,7 @@
 #include <linux/mutex.h>
 #include <linux/types.h>
 #include <rdma/rdma_cm.h>
-#define SQ_DEPTH 4096
+#define SQ_DEPTH 8192
 static int debug = 0; 
 
 

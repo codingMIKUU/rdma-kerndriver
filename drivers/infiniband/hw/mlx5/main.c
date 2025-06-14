@@ -5333,19 +5333,19 @@ static int __init mlx5_ib_init(void)
 	if (ret)
 		goto drv_err;
 
-	pr_info("mlx5_ib init\n");
-	//init scheduler
-	ret = mlx5_ib_sched_init(&sched_group,num_sched);
-	if (ret){
-		pr_err("mlx5_ib_sched_init failed\n");
-	}
+	// pr_info("mlx5_ib init\n");
+	// //init scheduler
+	// ret = mlx5_ib_sched_init(&sched_group,num_sched);
+	// if (ret){
+	// 	pr_err("mlx5_ib_sched_init failed\n");
+	// }
 	
-	//init server
-	ret = mlx5_ib_server_init(&server);
-	if (ret){
-		pr_err("mlx5_ib_server_init failed\n");
-		mlx5_ib_sched_exit(&sched_group);
-	}
+	// //init server
+	// ret = mlx5_ib_server_init(&server);
+	// if (ret){
+	// 	pr_err("mlx5_ib_server_init failed\n");
+	// 	mlx5_ib_sched_exit(&sched_group);
+	// }
 	return 0;
 drv_err:
 	auxiliary_driver_unregister(&mlx5r_mp_driver);
@@ -5370,9 +5370,9 @@ static void __exit mlx5_ib_cleanup(void)
 
 
 	//exit server.server exit must be called before scheduler exit
-	mlx5_ib_server_exit(&server,&sched_group);
+	// mlx5_ib_server_exit(&server,&sched_group);
 
-	mlx5_ib_sched_exit(&sched_group);
+	// mlx5_ib_sched_exit(&sched_group);
 
 
 	
