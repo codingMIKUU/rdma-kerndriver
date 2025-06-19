@@ -82,7 +82,7 @@ static void set_caps(struct ib_qp_init_attr *attr,
 static int UVERBS_HANDLER(UVERBS_METHOD_QP_CREATE)(
 	struct uverbs_attr_bundle *attrs)
 {
-	pr_info("in UVERBS_METHOD_QP_CREATE\n");
+	//pr_info("in UVERBS_METHOD_QP_CREATE\n");
 	struct ib_uqp_object *obj = container_of(
 		uverbs_attr_get_uobject(attrs, UVERBS_ATTR_CREATE_QP_HANDLE),
 		typeof(*obj), uevent.uobject);

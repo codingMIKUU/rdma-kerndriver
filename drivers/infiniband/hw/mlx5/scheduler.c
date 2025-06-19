@@ -23,6 +23,7 @@
 #include <rdma/ib_cm.h>
 #include <linux/delay.h>
 #include <linux/compiler.h>
+#include <linux/random.h>
 
 #define IP_ADDR "192.168.1.5"
 #define PORT_NUM 12345
@@ -460,7 +461,7 @@ static void print_wqe_info(void *seg, size_t size)
 //     kfree(wc);
     
 // }
-
+const int num_kqps = 256;
 int scheduler_polling(void *sched_data)
 {
     extern struct mlx5_ib_sched_group sched_group;
@@ -504,6 +505,7 @@ int scheduler_polling(void *sched_data)
     u8 to_user;
 
     int found;
+    u8 rd;
 
 
     uint64_t start_cycles, end_cycles, elapsed_cycles;
@@ -580,6 +582,7 @@ int scheduler_polling(void *sched_data)
 
                 hash_id = sched_hash_ip((char*)&imm, NUM_SRMC);
                 found = 0;
+                rd = prandom_u32_max(num_kqps);
                 for (i = 0;i< NUM_SRMC;i++)
                 {
                     j = (i + hash_id)%NUM_SRMC;
@@ -598,6 +601,8 @@ int scheduler_polling(void *sched_data)
                             goto err;
                         }
                         found = 1;
+                        j = (j+rd)% NUM_SRMC; //随机选择一个srmc
+                        srmc = (length > MESSAGE_SIZE_THRESHOLD ? sched->srmc_head_large[j] : sched->srmc_head_small[j]);
                         break;
                     }
                 }
@@ -1222,6 +1227,7 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
         }
         
     }
+    
     if (!has_srmc)
     {
         if(sched->srmc_head_small[j] != NULL || sched->srmc_head_large[j] != NULL){
@@ -1229,37 +1235,43 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
             mutex_unlock(&sched->srmc_lock);
             return -1;
         }
-        // srmc no exists
-        srmc_small = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
-        srmc_large = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
-        memcpy(srmc_small->dgid.raw, dgid->raw, sizeof(srmc_small->dgid.raw));
-        memcpy(srmc_large->dgid.raw, dgid->raw, sizeof(srmc_large->dgid.raw));
-        if (flags == SRMC_CREATE_FLAG_INIT_QP)
-        {
-            srmc_small->ini_cb.refcnt = 1;
-            srmc_large->ini_cb.refcnt = 1;
+        for(i = 0 ;i<num_kqps;i++){
+            // srmc no exists
+            srmc_small = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
+            srmc_large = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
+            memcpy(srmc_small->dgid.raw, dgid->raw, sizeof(srmc_small->dgid.raw));
+            memcpy(srmc_large->dgid.raw, dgid->raw, sizeof(srmc_large->dgid.raw));
+            if (flags == SRMC_CREATE_FLAG_INIT_QP)
+            {
+                srmc_small->ini_cb.refcnt = 1;
+                srmc_large->ini_cb.refcnt = 1;
+            }
+
+
+            sched->srmc_head_small[j] = srmc_small;
+            sched->srmc_head_large[j] = srmc_large;
+
+            mutex_unlock(&sched->srmc_lock);
+            if(1){
+                ret = create_srmc_qp_cm(srmc_small, pd, dgid, MESSAGE_SIZE_SMALL);
+                pr_info("create_srmc_qp_cm small ret:%d\n", ret);
+                if (ret)
+                {
+                    ret = create_srmc_qp_cm(srmc_large, pd, dgid, MESSAGE_SIZE_LARGE);
+                    pr_info("create_srmc_qp_cm large ret:%d\n", ret);
+                }
+            }else{
+                
+                while(!(srmc_large->ini_cb.state == CONNECTED)){
+                    msleep(0);
+                }
+            }
+            j = (j+1)%NUM_SRMC;
+            mutex_lock(&sched->srmc_lock);
         }
-
-
-        sched->srmc_head_small[j] = srmc_small;
-        sched->srmc_head_large[j] = srmc_large;
+        mutex_unlock(&sched->srmc_lock);
     }
-    mutex_unlock(&sched->srmc_lock);
 
-    if(ret){
-        ret = create_srmc_qp_cm(srmc_small, pd, dgid, MESSAGE_SIZE_SMALL);
-        pr_info("create_srmc_qp_cm small ret:%d\n", ret);
-        if (ret)
-        {
-            ret = create_srmc_qp_cm(srmc_large, pd, dgid, MESSAGE_SIZE_LARGE);
-            pr_info("create_srmc_qp_cm large ret:%d\n", ret);
-        }
-    }else{
-        
-        while(!(srmc_large->ini_cb.state == CONNECTED)){
-            msleep(0);
-        }
-    }
     
 
     
@@ -1698,15 +1710,12 @@ int srm_create_connection(struct server_conn_info *conn_info)
             break;
         }
     }
-    if (found && srmc->tgt_cb.refcnt)
+    while(srmc && srmc->tgt_cb.refcnt)
     {
-        // 已经存在TGT QP
-        srmc->tgt_cb.refcnt++;
-        mutex_unlock(&sched->srmc_lock);
-        rdma_destroy_id(cm_id);
-        return 0;
+        j = (j+1)%NUM_SRMC;
+        srmc = (flags == MESSAGE_SIZE_LARGE ? sched->srmc_head_large[j] : sched->srmc_head_small[j]);
     }
-    if (!found)
+    if (1)
     {
         if(sched->srmc_head_small[j] != NULL || sched->srmc_head_large[j] != NULL)
         {
