@@ -1684,6 +1684,7 @@ int srm_create_connection(struct server_conn_info *conn_info)
 
     int i, hash_id,j;
     int found;
+    int cnt;
 
     server_cb = (struct srm_cb *)cm_id->context;
 
@@ -1710,29 +1711,31 @@ int srm_create_connection(struct server_conn_info *conn_info)
             break;
         }
     }
+    cnt = 0;
     while(srmc && srmc->tgt_cb.refcnt)
     {
         j = (j+1)%NUM_SRMC;
         srmc = (flags == MESSAGE_SIZE_LARGE ? sched->srmc_head_large[j] : sched->srmc_head_small[j]);
-    }
-    if (1)
-    {
-        if(sched->srmc_head_small[j] != NULL || sched->srmc_head_large[j] != NULL)
+        cnt++;
+        if(cnt> NUM_SRMC)
         {
             pr_err("srmc queue is full\n");
             mutex_unlock(&sched->srmc_lock);
             rdma_destroy_id(cm_id);
             return -1;
         }
+    }
+
+    if(!srmc){
         srmc = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
         memcpy(srmc->dgid.raw, dgid.raw, sizeof(srmc->dgid.raw));
-
         // 将srmc 加入到srmc_head中
         if (flags == MESSAGE_SIZE_LARGE)
             sched->srmc_head_large[j] = srmc;
         else
             sched->srmc_head_small[j] = srmc;
     }
+
     // srmc->tgt_cb.refcnt == 0
     srmc->tgt_cb.refcnt = 1;
     srmc->tgt_cb.cm_id = cm_id;

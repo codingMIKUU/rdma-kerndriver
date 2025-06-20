@@ -6,7 +6,7 @@
 #include <linux/types.h>
 #include <rdma/rdma_cm.h>
 #define SQ_DEPTH 8192
-static int debug = 1; 
+static int debug = 0; 
 #define NUM_SRMC 1024
 
 
