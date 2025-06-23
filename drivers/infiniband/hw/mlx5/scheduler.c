@@ -461,7 +461,7 @@ static void print_wqe_info(void *seg, size_t size)
 //     kfree(wc);
     
 // }
-const int num_kqps = 256;
+const int num_kqps = 1024;
 int scheduler_polling(void *sched_data)
 {
     extern struct mlx5_ib_sched_group sched_group;
@@ -586,7 +586,7 @@ int scheduler_polling(void *sched_data)
                 for (i = 0;i< NUM_SRMC;i++)
                 {
                     j = (i + hash_id)%NUM_SRMC;
-                    srmc = (length > MESSAGE_SIZE_THRESHOLD ? sched->srmc_head_large[j] : sched->srmc_head_small[j]);
+                    srmc = (length > MESSAGE_SIZE_THRESHOLD ? sched->srmc_large_tb[j] : sched->srmc_small_tb[j]);
                     if (srmc == NULL)
                     {
                         pr_err("Unexpected:No srmc found for this wr\n");
@@ -602,7 +602,7 @@ int scheduler_polling(void *sched_data)
                         }
                         found = 1;
                         j = (j+rd)% NUM_SRMC; //随机选择一个srmc
-                        srmc = (length > MESSAGE_SIZE_THRESHOLD ? sched->srmc_head_large[j] : sched->srmc_head_small[j]);
+                        srmc = (length > MESSAGE_SIZE_THRESHOLD ? sched->srmc_large_tb[j] : sched->srmc_small_tb[j]);
                         break;
                     }
                 }
@@ -737,12 +737,7 @@ int scheduler_polling(void *sched_data)
         }
     poll:
         //small cqes
-        for(j = 0 ;j< NUM_SRMC;j++){
-            srmc = sched->srmc_head_small[j];
-            if(srmc == NULL)
-            {
-                continue;
-            }
+        for(srmc = sched->srmc_small_hd;srmc;srmc = srmc->next){
             if(srmc->sig_cnt)
             {
                 DEBUG_LOG("distributing cqe\n");
@@ -803,13 +798,9 @@ int scheduler_polling(void *sched_data)
             
         }
 
+
         //large cqes
-        for(j = 0 ;j< NUM_SRMC;j++){
-            srmc = sched->srmc_head_large[j];
-            if(srmc == NULL)
-            {
-                continue;
-            }
+        for(srmc = sched->srmc_large_hd;srmc;srmc = srmc->next){
             if(srmc->sig_cnt)
             {
                 DEBUG_LOG("distributing cqe\n");
@@ -1035,7 +1026,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
         mutex_lock(&sched->srmc_lock);
         for (j = 0;j<NUM_SRMC;j++)
         {
-            srmc = sched->srmc_head_small[j];
+            srmc = sched->srmc_small_tb[j];
             if (srmc == NULL)
             {
                 continue;
@@ -1058,7 +1049,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
 
         for (j = 0;j<NUM_SRMC;j++)
         {
-            srmc = sched->srmc_head_large[j];
+            srmc = sched->srmc_large_tb[j];
             if (srmc == NULL)
             {
                 continue;
@@ -1139,7 +1130,7 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
             mutex_lock(&sched->srmc_lock);
             for (j = 0;j<NUM_SRMC;j++)
             {
-                srmc = sched->srmc_head_small[j];
+                srmc = sched->srmc_small_tb[j];
                 if (srmc == NULL)
                 {
                     continue;
@@ -1150,6 +1141,7 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
                     rdma_disconnect(srmc->tgt_cb.cm_id);
                     ib_destroy_qp(&srmc->tgt_cb.qp->ibqp);
                     ib_destroy_cq(srmc->tgt_cb.cq);
+                    ib_dealloc_pd(srmc->tgt_cb.pd);
                 }
                 if (srmc->tgt_cb.cm_id)
                 {
@@ -1158,7 +1150,7 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
             }
             for (j =0 ;j<NUM_SRMC;j++)
             {
-                srmc = sched->srmc_head_large[j];
+                srmc = sched->srmc_large_tb[j];
                 if (srmc == NULL)
                 {
                     continue;
@@ -1168,6 +1160,7 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
                     rdma_disconnect(srmc->tgt_cb.cm_id);
                     ib_destroy_qp(&srmc->tgt_cb.qp->ibqp);
                     ib_destroy_cq(srmc->tgt_cb.cq);
+                    ib_dealloc_pd(srmc->tgt_cb.pd);
                 }
                 if (srmc->tgt_cb.cm_id)
                 {
@@ -1201,7 +1194,7 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
     for (i = 0 ;i<NUM_SRMC;i++)
     {
         j = (hash_id + i) % NUM_SRMC;
-        srmc_small = sched->srmc_head_small[j], srmc_large = sched->srmc_head_large[j];
+        srmc_small = sched->srmc_small_tb[j], srmc_large = sched->srmc_large_tb[j];
         if(srmc_small == NULL){
             break;
         }
@@ -1230,7 +1223,7 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
     
     if (!has_srmc)
     {
-        if(sched->srmc_head_small[j] != NULL || sched->srmc_head_large[j] != NULL){
+        if(sched->srmc_small_tb[j] != NULL || sched->srmc_large_tb[j] != NULL){
             pr_err("srmc queue is full\n");
             mutex_unlock(&sched->srmc_lock);
             return -1;
@@ -1248,8 +1241,24 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
             }
 
 
-            sched->srmc_head_small[j] = srmc_small;
-            sched->srmc_head_large[j] = srmc_large;
+            sched->srmc_small_tb[j] = srmc_small;
+            sched->srmc_large_tb[j] = srmc_large;
+            if(sched->srmc_small_hd == NULL){
+                sched->srmc_small_hd = srmc_small;
+            }
+            else{
+                srmc_small->next = sched->srmc_small_hd;
+                sched->srmc_small_hd = srmc_small;
+            }
+
+            if(sched->srmc_large_hd == NULL){
+                sched->srmc_large_hd = srmc_large;
+            }
+            else{
+                srmc_large->next = sched->srmc_large_hd;
+                sched->srmc_large_hd = srmc_large;
+            }
+            sched->srmc_cnt++;
 
             mutex_unlock(&sched->srmc_lock);
             if(1){
@@ -1269,10 +1278,10 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
             j = (j+1)%NUM_SRMC;
             mutex_lock(&sched->srmc_lock);
         }
-        mutex_unlock(&sched->srmc_lock);
+        
     }
 
-    
+    mutex_unlock(&sched->srmc_lock);
 
     
     DEBUG_LOG("out is_xrc_exists,ret:%d\n", ret);
@@ -1701,7 +1710,7 @@ int srm_create_connection(struct server_conn_info *conn_info)
     for (i = 0 ;i<NUM_SRMC;i++)
     {
         j = (hash_id + i) % NUM_SRMC;
-        srmc = (flags == MESSAGE_SIZE_LARGE ? sched->srmc_head_large[j] : sched->srmc_head_small[j]);
+        srmc = (flags == MESSAGE_SIZE_LARGE ? sched->srmc_large_tb[j] : sched->srmc_small_tb[j]);
         if(srmc == NULL){
             break;
         }
@@ -1715,7 +1724,7 @@ int srm_create_connection(struct server_conn_info *conn_info)
     while(srmc && srmc->tgt_cb.refcnt)
     {
         j = (j+1)%NUM_SRMC;
-        srmc = (flags == MESSAGE_SIZE_LARGE ? sched->srmc_head_large[j] : sched->srmc_head_small[j]);
+        srmc = (flags == MESSAGE_SIZE_LARGE ? sched->srmc_large_tb[j] : sched->srmc_small_tb[j]);
         cnt++;
         if(cnt> NUM_SRMC)
         {
@@ -1728,12 +1737,19 @@ int srm_create_connection(struct server_conn_info *conn_info)
 
     if(!srmc){
         srmc = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
+        sched->srmc_cnt++;
         memcpy(srmc->dgid.raw, dgid.raw, sizeof(srmc->dgid.raw));
         // 将srmc 加入到srmc_head中
-        if (flags == MESSAGE_SIZE_LARGE)
-            sched->srmc_head_large[j] = srmc;
-        else
-            sched->srmc_head_small[j] = srmc;
+        if (flags == MESSAGE_SIZE_LARGE){
+            sched->srmc_large_tb[j] = srmc;
+            srmc->next = sched->srmc_large_hd;
+            sched->srmc_large_hd = srmc;
+        }
+        else{
+            sched->srmc_small_tb[j] = srmc;
+            srmc->next = sched->srmc_small_hd;
+            sched->srmc_small_hd = srmc;
+        }
     }
 
     // srmc->tgt_cb.refcnt == 0
