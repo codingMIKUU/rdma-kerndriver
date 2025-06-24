@@ -7,7 +7,7 @@
 #include <rdma/rdma_cm.h>
 #define SQ_DEPTH 8192
 static int debug = 0; 
-#define NUM_SRMC 1024
+#define NUM_SRMC 8192
 
 
 #define DEBUG_LOG \
@@ -99,15 +99,12 @@ struct mlx5_ib_srmc{
    struct mlx5_wqe_info wqe_infos[SQ_DEPTH];
    size_t pending_bytes;//total pending bytes
    size_t cul_pending_bytes;//next cqe's pending bytes
-   struct mlx5_ib_srmc* next;//not loop
 };
 struct mlx5_ib_sched{
     struct task_struct* task;
     struct mutex srmc_lock;
     struct mlx5_ib_srmc* srmc_small_tb[NUM_SRMC];//for small flows
     struct mlx5_ib_srmc* srmc_large_tb[NUM_SRMC];//for large flows
-    struct mlx5_ib_srmc* srmc_small_hd;
-    struct mlx5_ib_srmc* srmc_large_hd;
     size_t srmc_cnt;
 };
 struct mlx5_ib_sched_id{
