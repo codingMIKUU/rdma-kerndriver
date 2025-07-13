@@ -255,7 +255,6 @@ __used __section(__versions) = {
 	{ 0xa85a3e6d, "xa_load" },
 	{ 0xc38c83b8, "mod_timer" },
 	{ 0xb3f548ad, "kmemdup_nul" },
-	{ 0xfda9581f, "prandom_u32" },
 	{ 0x96eb2c99, "mlx5_fc_id" },
 	{ 0x2276db98, "kstrtoint" },
 	{ 0x8df92f66, "memchr_inv" },
@@ -318,6 +317,7 @@ __used __section(__versions) = {
 	{ 0xb2fcb56d, "queue_delayed_work_on" },
 	{ 0x481f66b6, "__rdma_create_kernel_id" },
 	{ 0xdecd0b29, "__stack_chk_fail" },
+	{ 0x465ee3c5, "get_user_pages" },
 	{ 0x9cb986f2, "vmalloc_base" },
 	{ 0x696547f1, "memtrack_inject_error" },
 	{ 0x27353696, "ib_register_device" },
@@ -464,7 +464,6 @@ __used __section(__versions) = {
 	{ 0xed07b4ba, "dma_ops" },
 	{ 0x88db9f48, "__check_object_size" },
 	{ 0x17c34c10, "__put_page" },
-	{ 0xf0575707, "get_user_pages_fast" },
 	{ 0x93eb6339, "mlx5_eswitch_add_send_to_vport_rule" },
 	{ 0xe914e41e, "strcpy" },
 	{ 0x587f22d7, "devmap_managed_key" },
@@ -474,4 +473,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "DBD60011C691321D4E281FC");
+MODULE_INFO(srcversion, "C0B05236DBCD901FDA46A70");
