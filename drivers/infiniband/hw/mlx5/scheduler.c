@@ -633,7 +633,7 @@ static inline uint32_t srm_fastrand(uint64_t* seed) {
   }
 
 
-const int num_kqps = 512;
+const int num_kqps = 4096;
 int scheduler_polling(void *sched_data)
 {
     extern struct mlx5_ib_sched_group sched_group;
@@ -676,6 +676,7 @@ int scheduler_polling(void *sched_data)
 
     uint64_t start_cycles, end_cycles, elapsed_cycles;
     uint64_t elapsed_ns;
+    uint64_t start_time0, end_time0, elapsed_time0;
     const uint64_t cpu_frequency_hz = 2900000000; // 2.9 GHz
 
     cqe = kmalloc_array(SQ_DEPTH, sizeof(void *), GFP_KERNEL);
@@ -688,7 +689,7 @@ int scheduler_polling(void *sched_data)
     // int cnt3 = 0;
     kfree(sched_id);
 
-//     // 文件统计
+// //     // 文件统计
 //     char pt[200] = {0};
 //     snprintf(pt, 200, "/root/zxm/rdma-kerndriver/%ddata%d.txt", num_kqps, id);
 
@@ -729,18 +730,27 @@ int scheduler_polling(void *sched_data)
     //随机数序列固定种子
     uint64_t srm_seed; 
     srm_seed = 0xdeadbeef;
+    start_cycles =0;
+    start_time0 = 0;
 
     while (!kthread_should_stop())
     {
+        // for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++){
+        //     end_time0 = rdtsc();
+        //     elapsed_time0 = (end_time0 - start_time0)*1000000000 / cpu_frequency_hz;
+        //     start_time0 = rdtsc();
+        //     printk(KERN_INFO "用户态sq切换开销elapsed_time0 = %llu ns\n", elapsed_time0);
+        // }
 
         for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++)
         {
-            uidx = sqb->cur_post & (sqb->wqe_cnt - 1);
-            uctrl = useg = (sqb->buf + (uidx << 6)); // 64B的wqe
+
             size_t sched_size = 0;
             while (!kthread_should_stop())
             {
-                imm = smp_load_acquire(&uctrl->imm); // 内存屏障
+                uidx = sqb->cur_post & (sqb->wqe_cnt - 1);
+                uctrl = useg = (sqb->buf + (uidx << 6)); // 64B的wqe
+                imm = smp_load_acquire(&uctrl->imm); // 内存屏障，为1表示有wr
                 if (!imm)
                 {
                     // DEBUG_LOG("imm is 0\n");
@@ -753,8 +763,25 @@ int scheduler_polling(void *sched_data)
                     //     }
                     // }
 
-                    break;
-                }
+
+//                     /* 3. 写数据 */
+//                 len = scnprintf(buf, 64, "%d %d %d %llu\n", 0, 0, sqb->qpn, 0);
+// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+//                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+//                 ret = kernel_write(filp, buf, len, &pos);
+// #else
+//                 ret = vfs_write(filp, buf, len, &pos);
+// #endif
+//                 if (ret < 0)
+//                     pr_err("write_int_to_file: write error %d\n", ret);
+
+//                     break;
+//                 }
+
+//                 end_time0 = rdtsc();
+//                 elapsed_time0 = (end_time0 - start_time0)*1000000000 / cpu_frequency_hz;
+//                 start_time0 = rdtsc();
+
                 // if(sched_hash_ip((char*)&imm, sched_group.num_sched) != id){
                 //     //DEBUG_LOG("id is not equal, id is %d\n",id);
                 //     // if(id == 0){
@@ -764,12 +791,24 @@ int scheduler_polling(void *sched_data)
                 //     //         cnt2 = 0;
                 //     //     }
                 //     // }
-                //     break;
-                // }
+
+
+                    break;
+                }
 
                 // 192.168.1.x
-                if (id != ((imm >> 24) & 0xFF))
+                if (id != ((imm >> 24) & 0xFF))//判断WR是否属于当前调度器
                 {
+//                      len = scnprintf(buf, 64, "%d %d %d %llu\n", 2, 2, sqb->qpn, 2);
+// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+//                     /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+//                     ret = kernel_write(filp, buf, len, &pos);
+// #else
+//                     ret = vfs_write(filp, buf, len, &pos);
+// #endif
+//                     if (ret < 0)
+//                         pr_err("write_int_to_file: write error %d\n", ret);
+
                     break;
                 }
 
@@ -798,7 +837,7 @@ int scheduler_polling(void *sched_data)
                 length = ntohl(udata->byte_count);
                 DEBUG_LOG("length:%d\n", length);
 
-                hash_id = sched_hash_ip((char *)&imm, NUM_SRMC);
+                hash_id = sched_hash_ip((char *)&imm, NUM_SRMC);//查找目标SRMC
                 found = 0;
 
                 // 时延线程在第二个
@@ -850,13 +889,26 @@ int scheduler_polling(void *sched_data)
                     srm_poll_once(sched, wc, cqe);
                     if(srmc->pending_bytes > QUEUE_LIMIT){
                         DEBUG_LOG("Pending bytes is too large or too much wqes, pending_bytes for this srmc is%zu\n", srmc->pending_bytes);
+//                         len = scnprintf(buf, 64, "%d %d %d %llu\n", 1, 1, sqb->qpn, 1);
+// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+//                         /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+//                         ret = kernel_write(filp, buf, len, &pos);
+// #else
+//                         ret = vfs_write(filp, buf, len, &pos);
+// #endif
+//                         if (ret < 0)
+//                             pr_err("write_int_to_file: write error %d\n", ret);
+
                         break;
                     }
                 }
-
+//                 end_cycles = rdtsc();
+//                 elapsed_cycles = end_cycles - start_cycles;
+//                 elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
+//                 start_cycles = rdtsc();
 //                 // 文件
 //                 /* 3. 写数据 */
-//                 len = scnprintf(buf, 64, "%d %d\n", rd, length);
+//                 len = scnprintf(buf, 64, "%d %d %d %llu %llu\n", rd, length, sqb->qpn, elapsed_ns, elapsed_time0);
 // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 //                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
 //                 ret = kernel_write(filp, buf, len, &pos);
