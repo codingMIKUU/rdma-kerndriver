@@ -80,8 +80,9 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
     }
 
     mutex_lock(&sched_group->cq_lock);
-    for (cqb = sched_group->cq_head; cqb; cqb = cqb->next)
+    for (i = 0 ;i<sched_group->cqb_cnt;i++)
     {
+        cqb = sched_group->cqb_arr[i];
         if (cqb->cqn == cqn)
         {
             uq->cqb = cqb;
@@ -94,15 +95,9 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
     }
     mutex_unlock(&sched_group->cq_lock);
 
-    if (sched_group->sq_head == NULL)//头插法
-    {
-        sched_group->sq_head = uq;
-    }
-    else
-    {
-        uq->next = sched_group->sq_head->next;
-        sched_group->sq_head->next = uq;
-    }
+    sched_group->sqb_arr[sched_group->sqb_cnt] = uq;
+    sched_group->sqb_cnt++;
+
     DEBUG_LOG("map sq buf success\n");
     mutex_unlock(&sched_group->sq_lock);
 
@@ -147,15 +142,9 @@ int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long v
         mutex_unlock(&sched_group->cq_lock);
         return -ENOMEM;
     }
-    if (sched_group->cq_head == NULL)
-    {
-        sched_group->cq_head = uq;
-    }
-    else
-    {
-        uq->next = sched_group->cq_head->next;
-        sched_group->cq_head->next = uq;
-    }
+    sched_group->cqb_arr[sched_group->cqb_cnt] = uq;
+    sched_group->cqb_cnt++;
+
     mutex_unlock(&sched_group->cq_lock);
 
     return 0;
@@ -163,85 +152,57 @@ int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long v
 
 int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
 {
+    struct mlx5_ib_sqbuf *sqb;
+    struct mlx5_ib_cqbuf *cqb;
     int cqn;
-    struct mlx5_ib_sqbuf *sqb, *tmp;
-    struct mlx5_ib_cqbuf *cqb, *tmp2;
     int npages;
     int i;
     mutex_lock(&sched_group->sq_lock);
     pr_info("mlx5_ib_unmap_ubuf清除映射资源\n");
-    if (sched_group->sq_head == NULL)
+
+    //Free sq buffer
+    for (i = 0 ;i<sched_group->sqb_cnt;i++)
     {
-        mutex_unlock(&sched_group->sq_lock);
-        return 0;
-    }
-    if (sched_group->sq_head->qpn == qpn)
-    {
-        cqn = sched_group->sq_head->cqb->cqn;
-        sqb = sched_group->sq_head;
-        sched_group->sq_head = sqb->next;
-        vunmap(sqb->buf);
-        npages = (sqb->sq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        for (i = 0; i < npages; i++)
-            put_page(sqb->pages[i]);
-        kfree(sqb->pages);
-        kfree(sqb);
-    }
-    else
-    {
-        for (sqb = sched_group->sq_head->next; sqb->next; sqb = sqb->next)
+        sqb = sched_group->sqb_arr[i];
+        if(sqb == NULL)
+            continue;
+        if (sqb->qpn == qpn)
         {
-            if (sqb->next->qpn == qpn)
-            {
-                cqn = sqb->next->cqb->cqn;
-                tmp = sqb->next;
-                sqb->next = sqb->next->next;
-                vunmap(tmp->buf);
-                npages = (tmp->sq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-                for (i = 0; i < npages; i++)
-                    put_page(tmp->pages[i]);
-                kfree(tmp->pages);
-                kfree(tmp);
-                break;
-            }
+            sched_group->sqb_arr[i] = NULL;
+            cqn = sqb->cqb->cqn;
+            vunmap(sqb->buf);
+            npages = (sqb->sq_size + PAGE_SIZE - 1) / PAGE_SIZE;
+            for (i = 0; i < npages; i++)
+                put_page(sqb->pages[i]);
+            kfree(sqb->pages);
+            kfree(sqb);
+            
+            break;
         }
     }
+    
     mutex_unlock(&sched_group->sq_lock);
 
     // Free cq
     mutex_lock(&sched_group->cq_lock);
-    if (sched_group->cq_head == NULL)
+
+    for (i = 0;i<sched_group->cqb_cnt;i++)
     {
-        mutex_unlock(&sched_group->cq_lock);
-        return 0;
-    }
-    if (sched_group->cq_head->cqn == cqn)
-    {
-        cqb = sched_group->cq_head;
-        sched_group->cq_head = cqb->next;
-        vunmap(cqb->buf);
-        npages = (cqb->cq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        for (i = 0; i < npages; i++)
-            put_page(cqb->pages[i]);
-        kfree(cqb->pages);
-        kfree(cqb);
-    }
-    else
-    {
-        for (cqb = sched_group->cq_head->next; cqb->next; cqb = cqb->next)
+        cqb = sched_group->cqb_arr[i];
+
+        if(cqb == NULL)
+            continue;
+        if (cqb->cqn == cqn)
         {
-            if (cqb->next->cqn == cqn)
-            {
-                tmp2 = cqb->next;
-                cqb->next = cqb->next->next;
-                vunmap(tmp2->buf);
-                npages = (tmp2->cq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-                for (i = 0; i < npages; i++)
-                    put_page(tmp2->pages[i]);
-                kfree(tmp2->pages);
-                kfree(tmp2);
-                break;
-            }
+            sched_group->cqb_arr[i] = NULL;
+            vunmap(cqb->buf);
+            npages = (cqb->cq_size + PAGE_SIZE - 1) / PAGE_SIZE;
+            for (i = 0; i < npages; i++)
+                put_page(cqb->pages[i]);
+            kfree(cqb->pages);
+            kfree(cqb);
+            
+            break;
         }
     }
     mutex_unlock(&sched_group->cq_lock);
@@ -633,7 +594,7 @@ static inline uint32_t srm_fastrand(uint64_t* seed) {
   }
 
 
-const int num_kqps = 4096;
+const int num_kqps = 16;
 int scheduler_polling(void *sched_data)
 {
     extern struct mlx5_ib_sched_group sched_group;
@@ -649,7 +610,7 @@ int scheduler_polling(void *sched_data)
     int qpn;
     int op_own;
     int uidx, idx;
-    int i, j;
+    int i, j, k;
 
     void *seg, *useg;
     struct mlx5_wqe_ctrl_seg *ctrl, *uctrl;
@@ -724,8 +685,6 @@ int scheduler_polling(void *sched_data)
 //         pr_info("Error open file\n");
 //     }
 
-    // 时延线程单独占用QP
-    int qp_cnt;
 
     //随机数序列固定种子
     uint64_t srm_seed; 
@@ -742,9 +701,13 @@ int scheduler_polling(void *sched_data)
         //     printk(KERN_INFO "用户态sq切换开销elapsed_time0 = %llu ns\n", elapsed_time0);
         // }
 
-        for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++)
+        for (k = 0;k<sched_group.sqb_cnt;k++)
         {
-
+            sqb = sched_group.sqb_arr[k];
+            if(sqb == NULL){
+                pr_err("sqb %d is NULL\n",k);
+                continue;
+            }
             size_t sched_size = 0;
             while (!kthread_should_stop())
             {
@@ -840,8 +803,8 @@ int scheduler_polling(void *sched_data)
                 hash_id = sched_hash_ip((char *)&imm, NUM_SRMC);//查找目标SRMC
                 found = 0;
 
-                // 时延线程在第二个
-                if (qp_cnt != 1){
+                // 时延线程在第17个
+                if (k != 16){
                     //rd = prandom_u32_max(num_kqps - 1);
                     rd = srm_fastrand(&srm_seed)%(num_kqps-1);
                 }
@@ -1074,8 +1037,6 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
 
     i = j = 0;
 
-    sched_group->sq_head = NULL;
-    sched_group->cq_head = NULL;
     mutex_init(&sched_group->sq_lock);
     mutex_init(&sched_group->cq_lock);
 
@@ -1141,8 +1102,8 @@ err:
 
 void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
 {
-    struct mlx5_ib_sqbuf *sqb, *sqb_next;
-    struct mlx5_ib_cqbuf *cqb, *cqb_next;
+    struct mlx5_ib_sqbuf *sqb;
+    struct mlx5_ib_cqbuf *cqb;
     struct mlx5_ib_srmc *srmc;
     struct mlx5_ib_sched *sched;
     int npages;
@@ -1213,36 +1174,36 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
     }
     // cleanup scheduler
     mutex_lock(&sched_group->sq_lock);
-    sqb = sched_group->sq_head;
-    while (sqb)
-    {
-        sqb_next = sqb->next;
+    for(i = 0;i<sched_group->sqb_cnt;i++){
+        sqb = sched_group->sqb_arr[i];
+        sched_group->sqb_arr[i] = NULL;
+        if(sqb == NULL)
+            continue;
         vunmap(sqb->buf);
         npages = (sqb->sq_size + PAGE_SIZE - 1) / PAGE_SIZE;
         for (i = 0; i < npages; i++)
             put_page(sqb->pages[i]);
         kfree(sqb->pages);
         kfree(sqb);
-        sqb = sqb_next;
+
     }
-    sched_group->sq_head = NULL;
     mutex_unlock(&sched_group->sq_lock);
     DEBUG_LOG("clean sqb success\n");
 
     mutex_lock(&sched_group->cq_lock);
-    cqb = sched_group->cq_head;
-    while (cqb)
+    for(i = 0;i<sched_group->cqb_cnt;i++)
     {
-        cqb_next = cqb->next;
+        cqb = sched_group->cqb_arr[i];
+        sched_group->cqb_arr[i] = NULL;
+        if(cqb == NULL)
+            continue;
         vunmap(cqb->buf);
         npages = (cqb->cq_size + PAGE_SIZE - 1) / PAGE_SIZE;
         for (i = 0; i < npages; i++)
             put_page(cqb->pages[i]);
         kfree(cqb->pages);
         kfree(cqb);
-        cqb = cqb_next;
     }
-    sched_group->cq_head = NULL;
     mutex_unlock(&sched_group->cq_lock);
     DEBUG_LOG("clean cqb success\n");
 

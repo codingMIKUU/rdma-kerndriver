@@ -1255,9 +1255,9 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 
 	if (udata) {
 		/* User QP */
-		if(qp->type == IB_QPT_SRM){
-			mlx5_ib_unmap_ubuf(&sched_group,base->mqp.qpn);
-		}
+		// if(qp->type == IB_QPT_SRM){
+		// 	mlx5_ib_unmap_ubuf(&sched_group,base->mqp.qpn);
+		// }
 		mlx5_ib_db_unmap_user(context, &qp->db);
 		ib_umem_release(base->ubuffer.umem);
 		/*

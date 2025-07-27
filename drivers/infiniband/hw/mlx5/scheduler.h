@@ -9,6 +9,8 @@
 static int debug = 0; 
 #define NUM_SRMC 8192
 
+#define NUM_SQB 1024
+
 
 #define DEBUG_LOG \
     if (debug) \
@@ -113,9 +115,12 @@ struct mlx5_ib_sched_id{
 };
 struct mlx5_ib_sched_group{
     struct mutex sq_lock;
-    struct mlx5_ib_sqbuf* sq_head;
+
+    uint32_t sqb_cnt;
+    uint32_t cqb_cnt;
+    struct mlx5_ib_sqbuf* sqb_arr[NUM_SQB];
     struct mutex cq_lock;
-    struct mlx5_ib_cqbuf* cq_head;
+    struct mlx5_ib_cqbuf* cqb_arr[NUM_SQB];
     
     int num_sched;
     struct mlx5_ib_sched *scheds;
