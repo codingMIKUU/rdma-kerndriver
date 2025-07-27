@@ -26,7 +26,7 @@ struct mlx5_ib_cqbuf{
     int op_own;
     struct mutex lock;
     struct mlx5_ib_cqbuf* next;//not loop
-};
+}__attribute__((aligned(64)));
 struct mlx5_ib_sqbuf {
     void* buf;
     struct page** pages;
@@ -37,7 +37,7 @@ struct mlx5_ib_sqbuf {
     uint32_t cur_post;
     struct mlx5_ib_cqbuf* cqb;
     struct mlx5_ib_sqbuf* next;//not loop
-};
+}__attribute__((aligned(64)));
 enum test_state
 {
 	IDLE = 1,
@@ -101,7 +101,7 @@ struct mlx5_ib_srmc{
    struct mlx5_wqe_info wqe_infos[SQ_DEPTH];
    size_t pending_bytes;//total pending bytes
    size_t cul_pending_bytes;//next cqe's pending bytes
-};
+}__attribute__((aligned(64)));
 struct mlx5_ib_sched{
     struct task_struct* task;
     struct mutex srmc_lock;

@@ -650,7 +650,7 @@ int scheduler_polling(void *sched_data)
     // int cnt3 = 0;
     kfree(sched_id);
 
-// //     // 文件统计
+//     // 文件统计
 //     char pt[200] = {0};
 //     snprintf(pt, 200, "/root/zxm/rdma-kerndriver/%ddata%d.txt", num_kqps, id);
 
@@ -727,7 +727,7 @@ int scheduler_polling(void *sched_data)
                     // }
 
 
-//                     /* 3. 写数据 */
+//                 /* 3. 写数据 */
 //                 len = scnprintf(buf, 64, "%d %d %d %llu\n", 0, 0, sqb->qpn, 0);
 // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 //                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
@@ -738,12 +738,15 @@ int scheduler_polling(void *sched_data)
 //                 if (ret < 0)
 //                     pr_err("write_int_to_file: write error %d\n", ret);
 
-//                     break;
-//                 }
+                    break;
+                }
+
+
 
 //                 end_time0 = rdtsc();
 //                 elapsed_time0 = (end_time0 - start_time0)*1000000000 / cpu_frequency_hz;
 //                 start_time0 = rdtsc();
+
 
                 // if(sched_hash_ip((char*)&imm, sched_group.num_sched) != id){
                 //     //DEBUG_LOG("id is not equal, id is %d\n",id);
@@ -754,11 +757,8 @@ int scheduler_polling(void *sched_data)
                 //     //         cnt2 = 0;
                 //     //     }
                 //     // }
-
-
-                    break;
-                }
-
+                //     break;
+                // }
                 // 192.168.1.x
                 if (id != ((imm >> 24) & 0xFF))//判断WR是否属于当前调度器
                 {
@@ -865,10 +865,10 @@ int scheduler_polling(void *sched_data)
                         break;
                     }
                 }
-//                 end_cycles = rdtsc();
-//                 elapsed_cycles = end_cycles - start_cycles;
-//                 elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
-//                 start_cycles = rdtsc();
+                // end_cycles = rdtsc();
+                // elapsed_cycles = end_cycles - start_cycles;
+                // elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
+                // start_cycles = rdtsc();
 //                 // 文件
 //                 /* 3. 写数据 */
 //                 len = scnprintf(buf, 64, "%d %d %d %llu %llu\n", rd, length, sqb->qpn, elapsed_ns, elapsed_time0);
