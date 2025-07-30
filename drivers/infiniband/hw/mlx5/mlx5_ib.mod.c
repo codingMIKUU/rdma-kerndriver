@@ -255,6 +255,7 @@ __used __section(__versions) = {
 	{ 0xa85a3e6d, "xa_load" },
 	{ 0xc38c83b8, "mod_timer" },
 	{ 0xb3f548ad, "kmemdup_nul" },
+	{ 0xfda9581f, "prandom_u32" },
 	{ 0x96eb2c99, "mlx5_fc_id" },
 	{ 0x2276db98, "kstrtoint" },
 	{ 0x8df92f66, "memchr_inv" },
@@ -473,4 +474,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "F9914F88E3BB0E50D4D84FA");
+MODULE_INFO(srcversion, "56A3683126E8E3BCC13BA8A");

@@ -80,7 +80,7 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
     }
 
     mutex_lock(&sched_group->cq_lock);
-    for (i = 0 ;i<sched_group->cqb_cnt;i++)
+    for (i = 0; i < sched_group->cqb_cnt; i++)
     {
         cqb = sched_group->cqb_arr[i];
         if (cqb->cqn == cqn)
@@ -160,11 +160,11 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
     mutex_lock(&sched_group->sq_lock);
     pr_info("mlx5_ib_unmap_ubuf清除映射资源\n");
 
-    //Free sq buffer
-    for (i = 0 ;i<sched_group->sqb_cnt;i++)
+    // Free sq buffer
+    for (i = 0; i < sched_group->sqb_cnt; i++)
     {
         sqb = sched_group->sqb_arr[i];
-        if(sqb == NULL)
+        if (sqb == NULL)
             continue;
         if (sqb->qpn == qpn)
         {
@@ -176,21 +176,21 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
                 put_page(sqb->pages[i]);
             kfree(sqb->pages);
             kfree(sqb);
-            
+
             break;
         }
     }
-    
+
     mutex_unlock(&sched_group->sq_lock);
 
     // Free cq
     mutex_lock(&sched_group->cq_lock);
 
-    for (i = 0;i<sched_group->cqb_cnt;i++)
+    for (i = 0; i < sched_group->cqb_cnt; i++)
     {
         cqb = sched_group->cqb_arr[i];
 
-        if(cqb == NULL)
+        if (cqb == NULL)
             continue;
         if (cqb->cqn == cqn)
         {
@@ -201,7 +201,7 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
                 put_page(cqb->pages[i]);
             kfree(cqb->pages);
             kfree(cqb);
-            
+
             break;
         }
     }
@@ -311,117 +311,8 @@ static void print_wqe_info(void *seg, size_t size)
 //     asm volatile ("rdtsc" : "=a"(lo), "=d"(hi));
 //     return ((uint64_t)hi << 32) | lo;
 // }
+
 // 仅支持64B的标准wqe
-// int polling_cqe(void *data){
-//     extern struct mlx5_ib_sched_group sched_group;
-//     struct mlx5_ib_sched *sched;
-//     struct mlx5_ib_srmc *srmc;
-//     int cqe_num;
-//     void **cqe, *ucqe;
-//     uint32_t idx;
-//     struct ib_wc *wc;
-//     cqe = kmalloc_array(256, sizeof(void *), GFP_KERNEL);
-//     wc = kmalloc_array(256, sizeof(struct ib_wc), GFP_KERNEL);
-//     u32 qpn;
-//     u16 wqe_counter;
-//     size_t pending_bytes;
-//     u8 to_user;
-//     struct mlx5_ib_sqbuf *sqb;
-//     struct mlx5_ib_cqbuf *cqb;
-//     struct mlx5_cqe64 *ucqe64, *cqe64;
-//     int i,j;
-//     int cnt;
-
-//     while(!kthread_should_stop()){
-//         for(i=0;i<sched_group.num_sched;i++){
-//             sched = &sched_group.scheds[i];
-//             for(srmc = sched->srmc_head_small;srmc;srmc=srmc->next){
-//                 mutex_lock(&srmc->sig_cnt_lock);
-//                 if(srmc->sig_cnt)
-//                 {
-//                     DEBUG_LOG("distributing cqe\n");
-//                     // memset(&wc, 1, sizeof wc);
-//                     if((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq,srmc->sig_cnt,wc,cqe))){
-//                         //减去sig_cnt
-//                         srmc->sig_cnt-=cqe_num;
-//                         mutex_unlock(&srmc->sig_cnt_lock);
-//                         //cnt2++;
-//                         for(j=0;j<cqe_num;j++){
-//                             // cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
-//                             //  Two attr to change
-//                             idx = wc[j].wr_id & (SQ_DEPTH - 1);//cq大小为SQ_DEPTH
-//                             if(smp_load_acquire(&srmc->wqe_infos[idx].valid) == 0){
-//                                 pr_err("Unexpected:No valid wqe_info for idx %d\n", idx);
-//                                 continue;
-//                             }
-//                             qpn = srmc->wqe_infos[idx].qpn;
-//                             wqe_counter = srmc->wqe_infos[idx].wqe_counter;
-//                             pending_bytes = srmc->wqe_infos[idx].pending_bytes;
-//                             to_user = srmc->wqe_infos[idx].to_user;
-//                             sqb = srmc->wqe_infos[idx].sqb;
-//                             smp_store_release(&srmc->wqe_infos[idx].valid,0);
-
-//                             cqe64 = cqe[j];
-
-//                             mutex_lock(&srmc->pending_lock);
-//                             // 减去发送中的字节数
-//                             srmc->pending_bytes -= pending_bytes;
-//                             mutex_unlock(&srmc->pending_lock);
-//                             if(to_user == 0){
-//                                 continue;
-//                             }
-//                             // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
-
-//                             DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[j].status, pending_bytes);
-//                             DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, wqe_counter);
-
-//                             if (sqb == NULL || sqb->cqb == NULL)
-//                             {
-//                                 pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
-//                             }
-//                             cqb = sqb->cqb;
-//                             // distribute
-//                             // TODO:change the owner bit
-//                             DEBUG_LOG("cqn:%d\n", cqb->cqn);
-//                             ucqe = cqb->buf + (cqb->cur_put << 6);
-//                             ucqe64 = (cqb->cqe_sz == 64) ? ucqe : ucqe + 64;
-//                             memcpy(ucqe, cqe[j], cqb->cqe_sz-1);
-//                             DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
-//                             ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
-//                             ucqe64->wqe_counter = htons(wqe_counter & 0xffff);
-//                             // 根据cqe v1，保存uidx
-//                             ucqe64->srqn = htonl(sqb->uidx);
-
-//                             // 反转用户态cqe的owner_bit
-//                             smp_store_release(&ucqe64->op_own,(cqe64->op_own & (~0xf))|cqb->op_own);
-//                             DEBUG_LOG("ucqe64->op_own:%x,op_own:%d,cur_put:%d\n", ucqe64->op_own, cqb->op_own,cqb->cur_put);
-//                             cqb->cur_put++;
-//                             if (cqb->cur_put <<6 >= cqb->cq_size)
-//                             {
-//                                 cqb->cur_put = 0;
-//                                 cqb->op_own ^= MLX5_CQE_OWNER_MASK;
-//                             }
-//                             DEBUG_LOG("distribute cqe finished\n");
-//                         }
-//                     }else{
-//                         mutex_unlock(&srmc->sig_cnt_lock);
-//                     }
-//                 }else{
-//                     mutex_unlock(&srmc->sig_cnt_lock);
-//                 }
-
-//             }
-//         }
-//         cnt++;
-//         if(cnt>10000000){
-//             cnt = 0;
-//             msleep(0);
-//         }
-//     }
-//     kfree(cqe);
-//     kfree(wc);
-
-// }
 static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, void **cqe)
 {
     struct mlx5_ib_srmc *srmc;
@@ -458,11 +349,11 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                 // 减去sig_cnt
                 srmc->sig_cnt -= cqe_num;
                 // cnt2++;
-                for (i = 0; i < cqe_num; i++)
+                for (j = 0; j < cqe_num; j++)
                 {
                     // cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
                     //  Two attr to change
-                    idx = wc[i].wr_id & (SQ_DEPTH - 1); // cq大小为SQ_DEPTH
+                    idx = wc[j].wr_id & (SQ_DEPTH - 1); // cq大小为SQ_DEPTH
                     // 减去发送中的字节数
                     srmc->pending_bytes -= srmc->wqe_infos[idx].pending_bytes;
                     if (srmc->wqe_infos[idx].to_user == 0)
@@ -471,7 +362,7 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                     }
                     // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
                     qpn = srmc->wqe_infos[idx].qpn;
-                    DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[i].status, srmc->wqe_infos[idx].pending_bytes);
+                    DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[j].status, srmc->wqe_infos[idx].pending_bytes);
                     DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, srmc->wqe_infos[idx].wqe_counter);
                     sqb = srmc->wqe_infos[idx].sqb;
                     if (sqb == NULL || sqb->cqb == NULL)
@@ -479,14 +370,14 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                         pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
                     }
                     cqb = sqb->cqb;
-                    // mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
+                    mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
                     //  distribute
                     //  TODO:change the owner bit
                     DEBUG_LOG("cqn:%d\n", cqb->cqn);
                     ucqe = cqb->buf + cqb->cur_put * cqb->cqe_sz;
                     ucqe64 = (cqb->cqe_sz == 64) ? ucqe : ucqe + 64;
-                    cqe64 = cqe[i];
-                    memcpy(ucqe, cqe[i], cqb->cqe_sz - 1);
+                    cqe64 = cqe[j];
+                    memcpy(ucqe, cqe[j], cqb->cqe_sz - 1);
                     DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
                     ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
                     ucqe64->wqe_counter = htons(srmc->wqe_infos[idx].wqe_counter & 0xffff);
@@ -503,7 +394,7 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                         cqb->op_own ^= MLX5_CQE_OWNER_MASK;
                     }
 
-                    // mutex_unlock(&cqb->lock);
+                    mutex_unlock(&cqb->lock);
                     DEBUG_LOG("distribute cqe finished\n");
                 }
             }
@@ -534,11 +425,11 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                 // 减去sig_cnt
                 srmc->sig_cnt -= cqe_num;
                 // cnt2++;
-                for (i = 0; i < cqe_num; i++)
+                for (j = 0; j < cqe_num; j++)
                 {
                     // cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
                     //  Two attr to change
-                    idx = wc[i].wr_id & (SQ_DEPTH - 1); // cq大小为SQ_DEPTH
+                    idx = wc[j].wr_id & (SQ_DEPTH - 1); // cq大小为SQ_DEPTH
                     // 减去发送中的字节数
                     srmc->pending_bytes -= srmc->wqe_infos[idx].pending_bytes;
                     if (srmc->wqe_infos[idx].to_user == 0)
@@ -547,7 +438,7 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                     }
                     // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
                     qpn = srmc->wqe_infos[idx].qpn;
-                    DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[i].status, srmc->wqe_infos[idx].pending_bytes);
+                    DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[j].status, srmc->wqe_infos[idx].pending_bytes);
                     DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, srmc->wqe_infos[idx].wqe_counter);
                     sqb = srmc->wqe_infos[idx].sqb;
                     if (sqb == NULL || sqb->cqb == NULL)
@@ -555,14 +446,14 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                         pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
                     }
                     cqb = sqb->cqb;
-                    // mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
+                    mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
                     //  distribute
                     //  TODO:change the owner bit
                     DEBUG_LOG("cqn:%d\n", cqb->cqn);
                     ucqe = cqb->buf + cqb->cur_put * cqb->cqe_sz;
                     ucqe64 = (cqb->cqe_sz == 64) ? ucqe : ucqe + 64;
-                    cqe64 = cqe[i];
-                    memcpy(ucqe, cqe[i], cqb->cqe_sz - 1);
+                    cqe64 = cqe[j];
+                    memcpy(ucqe, cqe[j], cqb->cqe_sz - 1);
                     DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
                     ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
                     ucqe64->wqe_counter = htons(srmc->wqe_infos[idx].wqe_counter & 0xffff);
@@ -579,22 +470,96 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                         cqb->op_own ^= MLX5_CQE_OWNER_MASK;
                     }
 
-                    // mutex_unlock(&cqb->lock);
+                    mutex_unlock(&cqb->lock);
                     DEBUG_LOG("distribute cqe finished\n");
                 }
             }
         }
     }
 }
+static inline void srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc, void **cqe)
+{
+    DEBUG_LOG("in srm_poll_srmc_once,sig_cnt:%d\n", srmc->sig_cnt);
+    struct mlx5_ib_sqbuf *sqb;
+    struct mlx5_ib_cqbuf *cqb;
+    void *ucqe;
+    int qpn;
+    int cqn = -1;
+    struct mlx5_cqe64 *ucqe64, *cqe64;
+    int op_own;
+    int uidx, idx;
+    int cqe_num;
+    int i, j;
+    if (srmc->sig_cnt)
+    {
+        DEBUG_LOG("distributing cqe\n");
+        
+        // memset(&wc, 1, sizeof wc);
+        cqe_num = 0;
+        if ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe)))
+        {
+            // 减去sig_cnt
+            srmc->sig_cnt -= cqe_num;
+            // cnt2++;
+            for (i = 0; i < cqe_num; i++)
+            {
+                // cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
+                //  Two attr to change
+                idx = wc[i].wr_id & (SQ_DEPTH - 1); // cq大小为SQ_DEPTH
+                // 减去发送中的字节数
+                srmc->pending_bytes -= srmc->wqe_infos[idx].pending_bytes;
+                if (srmc->wqe_infos[idx].to_user == 0)
+                {
+                    continue;
+                }
+                // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
+                qpn = srmc->wqe_infos[idx].qpn;
+                DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[i].status, srmc->wqe_infos[idx].pending_bytes);
+                DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, srmc->wqe_infos[idx].wqe_counter);
+                sqb = srmc->wqe_infos[idx].sqb;
+                if (sqb == NULL || sqb->cqb == NULL)
+                {
+                    pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
+                }
+                cqb = sqb->cqb;
+                mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
+                //  distribute
+                //  TODO:change the owner bit
+                DEBUG_LOG("cqn:%d\n", cqb->cqn);
+                ucqe = cqb->buf + cqb->cur_put * cqb->cqe_sz;
+                ucqe64 = (cqb->cqe_sz == 64) ? ucqe : ucqe + 64;
+                cqe64 = cqe[i];
+                memcpy(ucqe, cqe[i], cqb->cqe_sz - 1);
+                DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
+                ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
+                ucqe64->wqe_counter = htons(srmc->wqe_infos[idx].wqe_counter & 0xffff);
+                // 根据cqe v1，保存uidx
+                ucqe64->srqn = htonl(sqb->uidx);
 
+                // 反转用户态cqe的owner_bit
+                smp_store_release(&ucqe64->op_own, (cqe64->op_own & (~0xf)) | cqb->op_own);
+                DEBUG_LOG("ucqe64->op_own:%x,op_own:%d,cur_put:%d\n", ucqe64->op_own, cqb->op_own, cqb->cur_put);
+                cqb->cur_put++;
+                if ((cqb->cur_put << 6) >= cqb->cq_size)
+                {
+                    cqb->cur_put = 0;
+                    cqb->op_own ^= MLX5_CQE_OWNER_MASK;
+                }
 
-static inline uint32_t srm_fastrand(uint64_t* seed) {
+                mutex_unlock(&cqb->lock);
+                DEBUG_LOG("distribute cqe finished\n");
+            }
+        }
+    }
+}
+
+static inline uint32_t srm_fastrand(uint64_t *seed)
+{
     *seed = *seed * 1103515245 + 12345;
     return (uint32_t)((*seed) >> 32);
-  }
+}
 
-
-const int num_kqps = 16;
+const int num_kqps = 256;
 int scheduler_polling(void *sched_data)
 {
     extern struct mlx5_ib_sched_group sched_group;
@@ -650,48 +615,49 @@ int scheduler_polling(void *sched_data)
     // int cnt3 = 0;
     kfree(sched_id);
 
-//     // 文件统计
-//     char pt[200] = {0};
-//     snprintf(pt, 200, "/root/zxm/rdma-kerndriver/%ddata%d.txt", num_kqps, id);
+    //     // 文件统计
+    //     char pt[200] = {0};
+    //     snprintf(pt, 200, "/root/zxm/rdma-kerndriver/%ddata%d.txt", num_kqps, id);
 
-//     struct file *filp;
-//     loff_t pos = 0;
-//     char *buf;
-//     int len;
-// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-//     mm_segment_t oldfs;
-// #endif
+    //     struct file *filp;
+    //     loff_t pos = 0;
+    //     char *buf;
+    //     int len;
+    // #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+    //     mm_segment_t oldfs;
+    // #endif
 
-//     /* 1. 准备字符串缓冲区 */
-//     buf = kmalloc(32, GFP_KERNEL);
-//     if (!buf)
-//         return -ENOMEM;
+    //     /* 1. 准备字符串缓冲区 */
+    //     buf = kmalloc(32, GFP_KERNEL);
+    //     if (!buf)
+    //         return -ENOMEM;
 
-//     /* 2. 打开（或创建）目标文件 */
-// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-//     /* 小于 5.11 的内核需要 set_fs 才能访问文件系统 */
-//     oldfs = get_fs();
-//     set_fs(KERNEL_DS);
-// #endif
-//     filp = filp_open(pt,
-//                         O_WRONLY | O_CREAT | O_TRUNC,
-//                         0644);
-// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-//     set_fs(oldfs);
-// #endif
-//     if (IS_ERR(filp))
-//     {
-//         ret = PTR_ERR(filp);
-//         pr_info("Error open file\n");
-//     }
+    //     /* 2. 打开（或创建）目标文件 */
+    // #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+    //     /* 小于 5.11 的内核需要 set_fs 才能访问文件系统 */
+    //     oldfs = get_fs();
+    //     set_fs(KERNEL_DS);
+    // #endif
+    //     filp = filp_open(pt,
+    //                         O_WRONLY | O_CREAT | O_TRUNC,
+    //                         0644);
+    // #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+    //     set_fs(oldfs);
+    // #endif
+    //     if (IS_ERR(filp))
+    //     {
+    //         ret = PTR_ERR(filp);
+    //         pr_info("Error open file\n");
+    //     }
 
-
-    //随机数序列固定种子
-    uint64_t srm_seed; 
+    // 随机数序列固定种子
+    uint64_t srm_seed;
     srm_seed = 0xdeadbeef;
-    start_cycles =0;
+    start_cycles = 0;
     start_time0 = 0;
 
+    uint32_t poll_round = 0;
+    const int POLL_ALL_INTERVAL = 10000;//全体遍历的时间
     while (!kthread_should_stop())
     {
         // for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++){
@@ -701,11 +667,12 @@ int scheduler_polling(void *sched_data)
         //     printk(KERN_INFO "用户态sq切换开销elapsed_time0 = %llu ns\n", elapsed_time0);
         // }
 
-        for (k = 0;k<sched_group.sqb_cnt;k++)
+        for (k = 0; k < sched_group.sqb_cnt; k++)
         {
             sqb = sched_group.sqb_arr[k];
-            if(sqb == NULL){
-                pr_err("sqb %d is NULL\n",k);
+            if (sqb == NULL)
+            {
+                pr_err("sqb %d is NULL\n", k);
                 continue;
             }
             size_t sched_size = 0;
@@ -713,7 +680,7 @@ int scheduler_polling(void *sched_data)
             {
                 uidx = sqb->cur_post & (sqb->wqe_cnt - 1);
                 uctrl = useg = (sqb->buf + (uidx << 6)); // 64B的wqe
-                imm = smp_load_acquire(&uctrl->imm); // 内存屏障，为1表示有wr
+                imm = smp_load_acquire(&uctrl->imm);     // 内存屏障，为1表示有wr
                 if (!imm)
                 {
                     // DEBUG_LOG("imm is 0\n");
@@ -726,27 +693,23 @@ int scheduler_polling(void *sched_data)
                     //     }
                     // }
 
-
-//                 /* 3. 写数据 */
-//                 len = scnprintf(buf, 64, "%d %d %d %llu\n", 0, 0, sqb->qpn, 0);
-// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-//                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-//                 ret = kernel_write(filp, buf, len, &pos);
-// #else
-//                 ret = vfs_write(filp, buf, len, &pos);
-// #endif
-//                 if (ret < 0)
-//                     pr_err("write_int_to_file: write error %d\n", ret);
+                    //                 /* 3. 写数据 */
+                    //                 len = scnprintf(buf, 64, "%d %d %d %llu\n", 0, 0, sqb->qpn, 0);
+                    // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+                    //                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+                    //                 ret = kernel_write(filp, buf, len, &pos);
+                    // #else
+                    //                 ret = vfs_write(filp, buf, len, &pos);
+                    // #endif
+                    //                 if (ret < 0)
+                    //                     pr_err("write_int_to_file: write error %d\n", ret);
 
                     break;
                 }
 
-
-
-//                 end_time0 = rdtsc();
-//                 elapsed_time0 = (end_time0 - start_time0)*1000000000 / cpu_frequency_hz;
-//                 start_time0 = rdtsc();
-
+                //                 end_time0 = rdtsc();
+                //                 elapsed_time0 = (end_time0 - start_time0)*1000000000 / cpu_frequency_hz;
+                //                 start_time0 = rdtsc();
 
                 // if(sched_hash_ip((char*)&imm, sched_group.num_sched) != id){
                 //     //DEBUG_LOG("id is not equal, id is %d\n",id);
@@ -760,17 +723,17 @@ int scheduler_polling(void *sched_data)
                 //     break;
                 // }
                 // 192.168.1.x
-                if (id != ((imm >> 24) & 0xFF))//判断WR是否属于当前调度器
+                if (id != ((imm >> 24) & 0xFF)) // 判断WR是否属于当前调度器
                 {
-//                      len = scnprintf(buf, 64, "%d %d %d %llu\n", 2, 2, sqb->qpn, 2);
-// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-//                     /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-//                     ret = kernel_write(filp, buf, len, &pos);
-// #else
-//                     ret = vfs_write(filp, buf, len, &pos);
-// #endif
-//                     if (ret < 0)
-//                         pr_err("write_int_to_file: write error %d\n", ret);
+                    //                      len = scnprintf(buf, 64, "%d %d %d %llu\n", 2, 2, sqb->qpn, 2);
+                    // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+                    //                     /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+                    //                     ret = kernel_write(filp, buf, len, &pos);
+                    // #else
+                    //                     ret = vfs_write(filp, buf, len, &pos);
+                    // #endif
+                    //                     if (ret < 0)
+                    //                         pr_err("write_int_to_file: write error %d\n", ret);
 
                     break;
                 }
@@ -786,7 +749,7 @@ int scheduler_polling(void *sched_data)
                 // imm = (imm & 0x00FFFFFF) | (1 << 24); //将1放在imm的高8位
                 ((char *)(&imm))[3] = 1;
                 memcpy(gid.raw + 12, &imm, 4);
-                //gid.raw[15] = 1;
+                // gid.raw[15] = 1;
 
                 DEBUG_LOG("found wr's gid.interface_id:%llx,subnet_prefix:%llx\n", gid.global.interface_id, gid.global.subnet_prefix);
 
@@ -800,21 +763,19 @@ int scheduler_polling(void *sched_data)
                 length = ntohl(udata->byte_count);
                 DEBUG_LOG("length:%d\n", length);
 
-                hash_id = sched_hash_ip((char *)&imm, NUM_SRMC);//查找目标SRMC
+                hash_id = sched_hash_ip((char *)&imm, NUM_SRMC); // 查找目标SRMC
                 found = 0;
 
-                // 时延线程在第17个
-                if (k != 16){
-                    //rd = prandom_u32_max(num_kqps - 1);
-                    rd = srm_fastrand(&srm_seed)%(num_kqps-1);
-                }
-                else{
-                    rd = num_kqps - 1;
-                    // pr_info("lat thread length:%d\n",length);
-                }
-                // rd = prandom_u32_max(num_kqps);
-
-
+                // // 时延线程在第17个
+                // if (k != 16){
+                //     //rd = prandom_u32_max(num_kqps - 1);
+                //     rd = srm_fastrand(&srm_seed)%(num_kqps-1);
+                // }
+                // else{
+                //     rd = num_kqps - 1;
+                //     //pr_info("lat thread length:%d\n",length);
+                // }
+                rd = prandom_u32_max(num_kqps);
 
                 for (i = 0; i < NUM_SRMC; i++)
                 {
@@ -844,23 +805,27 @@ int scheduler_polling(void *sched_data)
                     pr_err("Unexpected:No srmc found for this wr\n");
                     goto err;
                 }
+
+                srm_poll_srmc_once(srmc, wc, cqe);
                 // mutex_unlock(&sched->srmc_lock);
-                if(srmc->pending_bytes > QUEUE_LIMIT)
+                if (srmc->pending_bytes > QUEUE_LIMIT)
                 {
                     // if (kthread_should_stop())
                     //     goto out;
-                    srm_poll_once(sched, wc, cqe);
-                    if(srmc->pending_bytes > QUEUE_LIMIT){
+                    // srm_poll_once(sched, wc, cqe);
+
+                    if (srmc->pending_bytes > QUEUE_LIMIT)
+                    {
                         DEBUG_LOG("Pending bytes is too large or too much wqes, pending_bytes for this srmc is%zu\n", srmc->pending_bytes);
-//                         len = scnprintf(buf, 64, "%d %d %d %llu\n", 1, 1, sqb->qpn, 1);
-// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-//                         /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-//                         ret = kernel_write(filp, buf, len, &pos);
-// #else
-//                         ret = vfs_write(filp, buf, len, &pos);
-// #endif
-//                         if (ret < 0)
-//                             pr_err("write_int_to_file: write error %d\n", ret);
+                        //                         len = scnprintf(buf, 64, "%d %d %d %llu\n", 1, 1, sqb->qpn, 1);
+                        // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+                        //                         /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+                        //                         ret = kernel_write(filp, buf, len, &pos);
+                        // #else
+                        //                         ret = vfs_write(filp, buf, len, &pos);
+                        // #endif
+                        //                         if (ret < 0)
+                        //                             pr_err("write_int_to_file: write error %d\n", ret);
 
                         break;
                     }
@@ -869,18 +834,17 @@ int scheduler_polling(void *sched_data)
                 // elapsed_cycles = end_cycles - start_cycles;
                 // elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
                 // start_cycles = rdtsc();
-//                 // 文件
-//                 /* 3. 写数据 */
-//                 len = scnprintf(buf, 64, "%d %d %d %llu %llu\n", rd, length, sqb->qpn, elapsed_ns, elapsed_time0);
-// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-//                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-//                 ret = kernel_write(filp, buf, len, &pos);
-// #else
-//                 ret = vfs_write(filp, buf, len, &pos);
-// #endif
-//                 if (ret < 0)
-//                     pr_err("write_int_to_file: write error %d\n", ret);
-
+                //                 // 文件
+                //                 /* 3. 写数据 */
+                //                 len = scnprintf(buf, 64, "%d %d %d %llu %llu\n", rd, length, sqb->qpn, elapsed_ns, elapsed_time0);
+                // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+                //                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+                //                 ret = kernel_write(filp, buf, len, &pos);
+                // #else
+                //                 ret = vfs_write(filp, buf, len, &pos);
+                // #endif
+                //                 if (ret < 0)
+                //                     pr_err("write_int_to_file: write error %d\n", ret);
 
                 smp_store_release(&uctrl->imm, 0);
 
@@ -998,8 +962,13 @@ int scheduler_polling(void *sched_data)
                 sqb->cur_post++;
             }
         }
-        
-        srm_poll_once(sched, wc, cqe);
+
+        poll_round++;
+        if(poll_round%POLL_ALL_INTERVAL == 0)
+        {
+            srm_poll_once(sched, wc, cqe);
+        }
+       
 
         cnt += tfree;
         if (cnt % 10000000 == 0)
@@ -1174,10 +1143,11 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
     }
     // cleanup scheduler
     mutex_lock(&sched_group->sq_lock);
-    for(i = 0;i<sched_group->sqb_cnt;i++){
+    for (i = 0; i < sched_group->sqb_cnt; i++)
+    {
         sqb = sched_group->sqb_arr[i];
         sched_group->sqb_arr[i] = NULL;
-        if(sqb == NULL)
+        if (sqb == NULL)
             continue;
         vunmap(sqb->buf);
         npages = (sqb->sq_size + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -1185,17 +1155,16 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
             put_page(sqb->pages[i]);
         kfree(sqb->pages);
         kfree(sqb);
-
     }
     mutex_unlock(&sched_group->sq_lock);
     DEBUG_LOG("clean sqb success\n");
 
     mutex_lock(&sched_group->cq_lock);
-    for(i = 0;i<sched_group->cqb_cnt;i++)
+    for (i = 0; i < sched_group->cqb_cnt; i++)
     {
         cqb = sched_group->cqb_arr[i];
         sched_group->cqb_arr[i] = NULL;
-        if(cqb == NULL)
+        if (cqb == NULL)
             continue;
         vunmap(cqb->buf);
         npages = (cqb->cq_size + PAGE_SIZE - 1) / PAGE_SIZE;
