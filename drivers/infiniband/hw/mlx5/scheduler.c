@@ -29,9 +29,12 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 
+#include "mlx5_avl_tree.h"
+
 #define IP_ADDR "192.168.1.5"
 #define PORT_NUM 12345
 #define SRMC_POLLING_CNT 10000
+#define WQES_ARR_SZ 31
 const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 8;
 // const size_t MESSAGE_SIZE_THRESHOLD = 1e9;
 const size_t QUEUE_LIMIT = 256 * 1024;
@@ -494,7 +497,7 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
     if (srmc->sig_cnt)
     {
         DEBUG_LOG("distributing cqe\n");
-        
+
         // memset(&wc, 1, sizeof wc);
         cqe_num = 0;
         if ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe)))
@@ -553,9 +556,9 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
         }
 
         return cqe_num;
-
     }
-    else{
+    else
+    {
         return -1;
     }
 }
@@ -566,7 +569,23 @@ static inline uint32_t srm_fastrand(uint64_t *seed)
     return (uint32_t)((*seed) >> 32);
 }
 
-const int num_kqps = 512;
+static int has_wqes(struct mlx5_ib_sqbuf *sqb, int id)
+{
+
+    int uidx;
+    struct mlx5_wqe_ctrl_seg *uctrl;
+    u32 imm;
+    uidx = sqb->cur_post & (sqb->wqe_cnt - 1);
+    uctrl = (sqb->buf + (uidx << 6));    // 64B的wqe
+    imm = smp_load_acquire(&uctrl->imm); // 内存屏障，为1表示有wr
+    return imm && id == ((imm >> 24) & 0xFF);
+}
+static int mod_add(int a, int b, int mod)
+{
+    return (a + b + mod) % mod;
+}
+
+const int num_kqps = 128;
 // const int polling_itv = 10;//间隔多少个srmc进行一次polling
 int scheduler_polling(void *sched_data)
 {
@@ -665,16 +684,25 @@ int scheduler_polling(void *sched_data)
     start_time0 = 0;
 
     uint32_t poll_round = 0;
-    const int POLL_ALL_INTERVAL = 10000;//全体遍历的时间
+    const int POLL_ALL_INTERVAL = 10000; // 全体遍历的时间
     struct mlx5_ib_srmc *pre_srmc;
     struct mlx5_ib_srmc **pre_srmcs = kmalloc_array(SRMC_POLLING_CNT, sizeof(struct mlx5_ib_srmc *), GFP_KERNEL);
-    memset(pre_srmcs,0, SRMC_POLLING_CNT * sizeof(struct mlx5_ib_srmc *));
-    int polling_tail,polling_head;
+    memset(pre_srmcs, 0, SRMC_POLLING_CNT * sizeof(struct mlx5_ib_srmc *));
+    int polling_tail, polling_head;
     polling_tail = polling_head = 0;
 
     u8 *in_queue;
     in_queue = kmalloc_array(NUM_SRMC, sizeof(u8), GFP_KERNEL);
     memset(in_queue, 0, NUM_SRMC * sizeof(u8));
+
+    const int wqes_limit_sz = 124 * 1024; // 124KB
+
+    int wqe_cur_idx = 0;
+    int wqe_tot_sz = 0;
+    int cur_wqes[WQES_ARR_SZ] = {0};
+    u8 is_bk = 0;//是否回跳
+    int nxt_k ;
+
     while (!kthread_should_stop())
     {
         // for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++){
@@ -684,8 +712,9 @@ int scheduler_polling(void *sched_data)
         //     printk(KERN_INFO "用户态sq切换开销elapsed_time0 = %llu ns\n", elapsed_time0);
         // }
 
-        for (k = 0; k < sched_group.sqb_cnt; k++)
+        for (k = 0; k < sched_group.sqb_cnt; k = nxt_k)
         {
+            nxt_k = k + 1;//默认的nxt_k是下一个，否则会卡住
             sqb = sched_group.sqb_arr[k];
             if (sqb == NULL)
             {
@@ -695,35 +724,39 @@ int scheduler_polling(void *sched_data)
             size_t sched_size = 0;
             while (!kthread_should_stop())
             {
- 
-                //每次轮询先poll cqe
+
+                // 每次轮询先poll cqe
                 pre_srmc = pre_srmcs[polling_tail];
                 pre_srmcs[polling_tail] = NULL;
-                if(pre_srmc){
+                if (pre_srmc)
+                {
                     polling_tail = (polling_tail + 1) % SRMC_POLLING_CNT;
                     ret = srm_poll_srmc_once(pre_srmc, wc, cqe);
-                    if(pre_srmc->sig_cnt){
-                        //这次没poll完
-                        if(pre_srmcs[polling_head]!=NULL){
+                    if (pre_srmc->sig_cnt)
+                    {
+                        // 这次没poll完
+                        if (pre_srmcs[polling_head] != NULL)
+                        {
                             pr_info("err:exceed queue length\n");
-                            //此时队列满，必须poll到,此时head = (tail-1+polling_cnt)%polling_cnt
-                            while(!(ret = srm_poll_srmc_once(pre_srmc, wc, cqe))){
+                            // 此时队列满，必须poll到,此时head = (tail-1+polling_cnt)%polling_cnt
+                            while (!(ret = srm_poll_srmc_once(pre_srmc, wc, cqe)))
+                            {
                                 ;
                             }
                             in_queue[pre_srmc->idx] = 0;
                         }
-                        else{
-                            //重新加入队列
+                        else
+                        {
+                            // 重新加入队列
                             pre_srmcs[polling_head] = pre_srmc;
                             polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
                         }
                     }
-                    else{
-                        //poll完了，出队
-                        in_queue[pre_srmc->idx] = 0 ;
-        
+                    else
+                    {
+                        // poll完了，出队
+                        in_queue[pre_srmc->idx] = 0;
                     }
-        
                 }
 
                 uidx = sqb->cur_post & (sqb->wqe_cnt - 1);
@@ -752,6 +785,9 @@ int scheduler_polling(void *sched_data)
                     //                 if (ret < 0)
                     //                     pr_err("write_int_to_file: write error %d\n", ret);
 
+
+
+                    
                     break;
                 }
 
@@ -786,6 +822,7 @@ int scheduler_polling(void *sched_data)
                     break;
                 }
 
+                // 我觉得还是要开这个，调度更公平
                 // if (sched_size > SCHED_SIZE_LIMIT)
                 // {
                 //     DEBUG_LOG("sched once\n");
@@ -811,19 +848,99 @@ int scheduler_polling(void *sched_data)
                 length = ntohl(udata->byte_count);
                 DEBUG_LOG("length:%d\n", length);
 
+                if (k % 3 == 0)
+                {
+                    if (wqe_tot_sz  < wqes_limit_sz && !is_bk)
+                    {
+                        // 当前填充不完
+                        if (has_wqes(sched_group.sqb_arr[k + 1], id))
+                        {
+                            // 跳转到小
+                            nxt_k = k+1;
+                            break;
+                        }
+                        else if (has_wqes(sched_group.sqb_arr[k + 2], id))
+                        {
+                            // 跳转到大
+                            nxt_k = k+2;
+                            break;
+                        }
+                        else{
+                            // 如果都没有，则直接发，发完跳到下一组srm qp。
+                            nxt_k = k + 3;
+                        }
+                    }
+                    else{
+                        //要么当前tot_sz>= wqe_limit_sz，此时一直发极小直到排空。排空后，会在前面判断跳转到该组的小和大。存在一直排不空而饿死大的情况？
+                        //要么当前is_back = true，代表回退，不能再往小和极大跳，否则会饿死其他组。
+
+                        
+                        nxt_k = k+3;
+                        //如果是is_back =true的情况，当前tot_sz仍小于wqe_limit_sz，应该跳过当前的还是直接发？
+                    }
+                }
+                else if (k % 3 == 1)
+                {
+                    if(wqe_tot_sz < wqes_limit_sz && ! is_bk){
+                        //填充不完，直接发当前的，如果一直发都无法填充满，排空小之后将轮到大。
+                        //如果是大的回跳，代表已经填满，按理来说不应该有wqe_tot_sz<wqe_limit_sz。但是保险起见，判断is_bk
+                        nxt_k = k + 1;
+                    }
+                    else{
+                        
+                        if(has_wqes(sched_group.sqb_arr[k-1],id)){
+
+                            //回跳，保证极小时延
+                            nxt_k = k - 1;
+                            if(wqe_tot_sz>=wqes_limit_sz)
+                                //如果sz<limit，继续用小填充先；否则直接跳到极小。
+                                break;
+                        }
+                        else{
+                            //否则轮到下组。大可以跳过，因为保证了吞吐
+                            nxt_k = k + 2;
+                        }
+                    }
+                }
+                else
+                {
+                    if(wqe_tot_sz < wqes_limit_sz){
+                        //直接发，如果无法填充满，则将直接轮到下一组
+                        nxt_k = k+1;
+                    }
+                    else{
+                        if(has_wqes(sched_group.sqb_arr[k-2],id)){
+                            //极小有，回跳回极小
+                            nxt_k = k -2; 
+                            break;
+                        }
+                        else if(has_wqes(sched_group.sqb_arr[k-2],id)){
+                            //小有，回跳回小
+                            is_bk = 1;
+                            nxt_k = k - 1;
+                            break;
+                        }
+                        else{
+                            //都没有，发完本轮轮到下组。如果有一组专发大的，直接跳过可能会被饿死？
+                            nxt_k = k + 1;
+                        }
+                    }
+                }
+                pr_info("k:%d,tot:%d,length:%d\n",k,sched_group.sqb_cnt,length);
+
                 hash_id = sched_hash_ip((char *)&imm, NUM_SRMC); // 查找目标SRMC
                 found = 0;
 
-                // 时延线程在第17个
-                if (k != 16){
-                    //rd = prandom_u32_max(num_kqps - 1);
-                    rd = srm_fastrand(&srm_seed)%(num_kqps-1);
-                }
-                else{
-                    rd = num_kqps - 1;
-                    //pr_info("lat thread length:%d\n",length);
-                }
-               // rd = prandom_u32_max(num_kqps);
+                // // 时延线程在第17个
+                // if (k != 16){
+                //     //rd = prandom_u32_max(num_kqps - 1);
+                //     rd = srm_fastrand(&srm_seed)%(num_kqps-1);
+                // }
+                // else{
+                //     rd = num_kqps - 1;
+                //     //pr_info("lat thread length:%d\n",length);
+                // }
+                rd = prandom_u32_max(num_kqps);
 
                 for (i = 0; i < NUM_SRMC; i++)
                 {
@@ -853,15 +970,8 @@ int scheduler_polling(void *sched_data)
                     pr_err("Unexpected:No srmc found for this wr\n");
                     goto err;
                 }
-                
-    
 
-               
-        
-                
-
-                
-
+                //这个还要吗？
                 // mutex_unlock(&sched->srmc_lock);
                 if (srmc->pending_bytes > QUEUE_LIMIT)
                 {
@@ -886,20 +996,27 @@ int scheduler_polling(void *sched_data)
                     }
                 }
 
-
-                if(pre_srmcs[polling_head]!=NULL){
+                if (pre_srmcs[polling_head] != NULL)
+                {
                     pr_info("err:exceed queue length\n");
-                    //此时队列满，必须poll到,此时head = (tail-1+polling_cnt)%polling_cnt
-                    while(!(ret = srm_poll_srmc_once(pre_srmc, wc, cqe))){
+                    // 此时队列满，必须poll到,此时head = (tail-1+polling_cnt)%polling_cnt
+                    while (!(ret = srm_poll_srmc_once(pre_srmc, wc, cqe)))
+                    {
                         ;
                     }
                 }
-                        
-                if(!in_queue[srmc->idx]){
+
+                if (!in_queue[srmc->idx])
+                {
                     pre_srmcs[polling_head] = srmc;
-                    polling_head = (polling_head + 1)%SRMC_POLLING_CNT;
-                    in_queue[srmc->idx]= 1;
+                    polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
+                    in_queue[srmc->idx] = 1;
                 }
+
+                wqe_tot_sz -= cur_wqes[wqe_cur_idx];
+                wqe_tot_sz += length;
+                cur_wqes[wqe_cur_idx] = length;
+                wqe_cur_idx = (wqe_cur_idx + 1) % WQES_ARR_SZ;
                 // end_cycles = rdtsc();
                 // elapsed_cycles = end_cycles - start_cycles;
                 // elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
@@ -1029,19 +1146,21 @@ int scheduler_polling(void *sched_data)
                     srmc->cur_cqe++;
                     srmc->cul_pending_bytes = 0;
                 }
-                sqb->cur_post++;
-
-
+                sqb->cur_post++;//可以提前，更加快
+            }
+            if(nxt_k < k){
+                is_bk = 1;
+            }
+            else{
+                is_bk = 0;
             }
         }
 
-        poll_round++;
+        // poll_round++;
         // if(poll_round%POLL_ALL_INTERVAL == 0)
         // {
         //     srm_poll_once(sched, wc, cqe);
         // }
-
-
 
         cnt += tfree;
         if (cnt % 10000000 == 0)
@@ -1927,7 +2046,7 @@ int srm_create_connection(struct server_conn_info *conn_info)
         ret = PTR_ERR(cb->cq);
         goto err1;
     }
-    DEBUG_LOG("created cq %p\n", cb->cq);
+    DEBUG_LOG("created cq %p,cqe:%d\n", cb->cq,cb->cq->cqe);
 
     // create qp
     memset(&init_attr, 0, sizeof(init_attr));

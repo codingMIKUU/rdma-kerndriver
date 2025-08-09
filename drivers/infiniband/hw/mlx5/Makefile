@@ -27,7 +27,8 @@ mlx5_ib-y := ah.o \
 	     umr.o \
 	     wr.o \
 		 scheduler.o \
-		 conn.o
+		 conn.o \
+		 mlx5_avl_tree.o
 
 mlx5_ib-$(CONFIG_INFINIBAND_ON_DEMAND_PAGING) += odp.o
 mlx5_ib-$(CONFIG_MLX5_ESWITCH) += ib_rep.o
