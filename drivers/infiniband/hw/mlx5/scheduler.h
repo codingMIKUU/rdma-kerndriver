@@ -157,6 +157,7 @@ int srm_accept(struct srm_cb *cb);
 void mlx5_ib_sched_exit(struct mlx5_ib_sched_group* sched_group);
 int mlx5_ib_server_init(struct mlx5_ib_server* server);
 int polling_cqe(void *data);
+int mlx5_ib_register_external_table(void *table, size_t size,struct page** pages);
 
 
 #endif /* _MLX5_IB_SCHEDULER_H */

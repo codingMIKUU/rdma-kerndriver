@@ -121,6 +121,7 @@ __used __section(__versions) = {
 	{ 0x9034a696, "mempool_destroy" },
 	{ 0xa6e487c, "netdev_master_upper_dev_get_rcu" },
 	{ 0xc29957c3, "__x86_indirect_thunk_rcx" },
+	{ 0x3316f112, "put_user_pages" },
 	{ 0x6954b75d, "mlx5_frag_buf_alloc_node" },
 	{ 0x87b8798d, "sg_next" },
 	{ 0xa757c5f8, "rdma_read_gids" },
@@ -474,4 +475,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "CC2AD6EAD04AE347ECC3A81");
+MODULE_INFO(srcversion, "116842D79017EF5DD2FE0EA");

@@ -1505,6 +1505,7 @@ static int create_qp(struct uverbs_attr_bundle *attrs,
 	resp.base.max_send_wr     = attr.cap.max_send_wr;
 	resp.base.max_inline_data = attr.cap.max_inline_data;
 	resp.response_length = uverbs_response_length(attrs, sizeof(resp));
+	//TODO
 	return uverbs_response(attrs, &resp, sizeof(resp));
 
 err_put:

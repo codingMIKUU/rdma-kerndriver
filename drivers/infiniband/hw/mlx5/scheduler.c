@@ -39,6 +39,12 @@ const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 8;
 // const size_t MESSAGE_SIZE_THRESHOLD = 1e9;
 const size_t QUEUE_LIMIT = 256 * 1024;
 const size_t SCHED_SIZE_LIMIT = 8 * 1024;
+
+static uint32_t *user_wqe_table; // 用户态mmap表，表示当前多少个wqe已经下发
+static struct page **user_wqe_pages;
+uint32_t kernel_wqe_table[NUM_SQB]; // 内核态表，表示当前srm qp中内核已发送多少个wqe
+int num_table_qp;
+
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx)
 {
     DEBUG_LOG("in mlx5_ib_map_ubuf\n");
@@ -102,7 +108,7 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
     sched_group->sqb_arr[sched_group->sqb_cnt] = uq;
     sched_group->sqb_cnt++;
 
-    DEBUG_LOG("map sq buf success\n");
+    //pr_info("map sq buf %d success\n", sched_group->sqb_cnt - 1);
     mutex_unlock(&sched_group->sq_lock);
 
     return 0;
@@ -642,40 +648,41 @@ int scheduler_polling(void *sched_data)
     // int cnt3 = 0;
     kfree(sched_id);
 
-    //     // 文件统计
-    //     char pt[200] = {0};
-    //     snprintf(pt, 200, "/root/zxm/rdma-kerndriver/%ddata%d.txt", num_kqps, id);
+//     // 文件统计
+//     char pt[200] = {0};
+//     //snprintf(pt, 200, "/root/zxm/rdma-kerndriver/%ddata%d.txt", num_kqps, id);
+//     snprintf(pt, 200, "/root/zxm/rdma-kerndriver/kern_log%d.txt",id);
 
-    //     struct file *filp;
-    //     loff_t pos = 0;
-    //     char *buf;
-    //     int len;
-    // #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-    //     mm_segment_t oldfs;
-    // #endif
+//     struct file *filp;
+//     loff_t pos = 0;
+//     char *buf;
+//     int len;
+// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+//     mm_segment_t oldfs;
+// #endif
 
-    //     /* 1. 准备字符串缓冲区 */
-    //     buf = kmalloc(32, GFP_KERNEL);
-    //     if (!buf)
-    //         return -ENOMEM;
+//     /* 1. 准备字符串缓冲区 */
+//     buf = kmalloc(128, GFP_KERNEL);
+//     if (!buf)
+//         return -ENOMEM;
 
-    //     /* 2. 打开（或创建）目标文件 */
-    // #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-    //     /* 小于 5.11 的内核需要 set_fs 才能访问文件系统 */
-    //     oldfs = get_fs();
-    //     set_fs(KERNEL_DS);
-    // #endif
-    //     filp = filp_open(pt,
-    //                         O_WRONLY | O_CREAT | O_TRUNC,
-    //                         0644);
-    // #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-    //     set_fs(oldfs);
-    // #endif
-    //     if (IS_ERR(filp))
-    //     {
-    //         ret = PTR_ERR(filp);
-    //         pr_info("Error open file\n");
-    //     }
+//     /* 2. 打开（或创建）目标文件 */
+// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+//     /* 小于 5.11 的内核需要 set_fs 才能访问文件系统 */
+//     oldfs = get_fs();
+//     set_fs(KERNEL_DS);
+// #endif
+//     filp = filp_open(pt,
+//                         O_WRONLY | O_CREAT | O_TRUNC,
+//                         0644);
+// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+//     set_fs(oldfs);
+// #endif
+//     if (IS_ERR(filp))
+//     {
+//         ret = PTR_ERR(filp);
+//         pr_info("Error open file\n");
+//     }
 
     // 随机数序列固定种子
     uint64_t srm_seed;
@@ -698,10 +705,33 @@ int scheduler_polling(void *sched_data)
     const int wqes_limit_sz = 124 * 1024; // 124KB
 
     int wqe_cur_idx = 0;
-    int wqe_tot_sz = 0;
-    int cur_wqes[WQES_ARR_SZ] = {0};
-    u8 is_bk = 0;//是否回跳
-    int nxt_k ;
+    uint64_t wqe_tot_sz = 0;
+    uint cur_wqes[WQES_ARR_SZ] = {0};
+    uint64_t target_sz, send_ok;
+    int polling_order[][6] =
+        {
+            {0, 1, 2, 3, 4, 5},
+            {1, 2, 3, 0, 4, 5},
+            {2, 3, 1, 4, 5, 0},
+            {3, 2, 4, 5, 1, 0},
+            {4, 5, 3, 2, 1, 0},
+            {5, 4, 3, 2, 1, 0}};
+    int order_idx, l, m, n;
+    uint64_t polling_seed;
+    polling_seed = 0xdeadbeef;
+    uint32_t user_table_val,kernel_table_val;
+    int num_user_threads = 0;
+    while (!kthread_should_stop())
+    {
+        if (num_table_qp != sched_group.sqb_cnt || !num_table_qp){
+            msleep(0);
+            continue;
+        }
+            
+        num_user_threads = num_table_qp / 6;
+        //pr_info("num_user_threads:%d\n", num_user_threads);
+        break;
+    }
 
     while (!kthread_should_stop())
     {
@@ -712,19 +742,44 @@ int scheduler_polling(void *sched_data)
         //     printk(KERN_INFO "用户态sq切换开销elapsed_time0 = %llu ns\n", elapsed_time0);
         // }
 
-        for (k = 0; k < sched_group.sqb_cnt; k = nxt_k)
+        target_sz = wqes_limit_sz - (wqe_tot_sz - cur_wqes[wqe_cur_idx]);
+        if (target_sz <= 0)
         {
-            nxt_k = k + 1;//默认的nxt_k是下一个，否则会卡住
-            sqb = sched_group.sqb_arr[k];
-            if (sqb == NULL)
+            order_idx = 0;
+        }
+        if (target_sz <= 2048)
+        {
+            order_idx = 1;
+        }
+        else if (target_sz <= 4096)
+        {
+            order_idx = 2;
+        }
+        else if (target_sz <= 7168)
+        {
+            order_idx = 3;
+        }
+        else if (target_sz <= 10240)
+        {
+            order_idx = 4;
+        }
+        else if (target_sz <= 102400)
+        {
+            //>100KB
+            order_idx = 5;
+        }
+        else
+        {
+            order_idx = 5;
+        }
+        send_ok = 0;
+        tfree = 1;
+        for (l = 0; l < 6; l++)
+        {
+            // 每个等级的遍历，取随机的起始点
+            k = polling_order[order_idx][l] + srm_fastrand(&polling_seed) % num_user_threads * 6;
+            for (m = 0; m < num_user_threads; m++, k = (k + 6) % sched_group.sqb_cnt)
             {
-                pr_err("sqb %d is NULL\n", k);
-                continue;
-            }
-            size_t sched_size = 0;
-            while (!kthread_should_stop())
-            {
-
                 // 每次轮询先poll cqe
                 pre_srmc = pre_srmcs[polling_tail];
                 pre_srmcs[polling_tail] = NULL;
@@ -759,13 +814,29 @@ int scheduler_polling(void *sched_data)
                     }
                 }
 
+                n = polling_order[order_idx][l] * num_user_threads + k / 6;
+                user_table_val = smp_load_acquire(&user_wqe_table[n]);
+                kernel_table_val = smp_load_acquire(&kernel_wqe_table[n]);
+                if ( user_table_val == kernel_table_val)
+                {
+                    // 此时该qp中没有wqe
+                    continue;
+                }
+
+                sqb = sched_group.sqb_arr[k];
+                if (sqb == NULL)
+                {
+                    pr_err("sqb %d is NULL\n", k);
+                    continue;
+                }
+
                 uidx = sqb->cur_post & (sqb->wqe_cnt - 1);
                 uctrl = useg = (sqb->buf + (uidx << 6)); // 64B的wqe
                 imm = smp_load_acquire(&uctrl->imm);     // 内存屏障，为1表示有wr
                 if (!imm)
                 {
                     // DEBUG_LOG("imm is 0\n");
-                    tfree = 1;
+                    // tfree = 1;
                     // if(id == 0){
                     //     cnt++;
                     //     if(cnt>10){
@@ -785,10 +856,7 @@ int scheduler_polling(void *sched_data)
                     //                 if (ret < 0)
                     //                     pr_err("write_int_to_file: write error %d\n", ret);
 
-
-
-                    
-                    break;
+                    continue;
                 }
 
                 //                 end_time0 = rdtsc();
@@ -819,7 +887,7 @@ int scheduler_polling(void *sched_data)
                     //                     if (ret < 0)
                     //                         pr_err("write_int_to_file: write error %d\n", ret);
 
-                    break;
+                    continue;
                 }
 
                 // 我觉得还是要开这个，调度更公平
@@ -828,6 +896,10 @@ int scheduler_polling(void *sched_data)
                 //     DEBUG_LOG("sched once\n");
                 //     break;
                 // }
+
+
+                smp_store_release(&kernel_wqe_table[n],kernel_table_val+1); // 同样提前，在cur_post++之前，以防线程认为还有wqe但找不到的情况
+                sqb->cur_post++;       // 可以提前，更加快
 
                 DEBUG_LOG("uidx:%d\n", uidx);
 
@@ -848,86 +920,25 @@ int scheduler_polling(void *sched_data)
                 length = ntohl(udata->byte_count);
                 DEBUG_LOG("length:%d\n", length);
 
-                if (k % 3 == 0)
-                {
-                    if (wqe_tot_sz  < wqes_limit_sz && !is_bk)
-                    {
-                        // 当前填充不完
-                        if (has_wqes(sched_group.sqb_arr[k + 1], id))
-                        {
-                            // 跳转到小
-                            nxt_k = k+1;
-                            break;
-                        }
-                        else if (has_wqes(sched_group.sqb_arr[k + 2], id))
-                        {
-                            // 跳转到大
-                            nxt_k = k+2;
-                            break;
-                        }
-                        else{
-                            // 如果都没有，则直接发，发完跳到下一组srm qp。
-                            nxt_k = k + 3;
-                        }
-                    }
-                    else{
-                        //要么当前tot_sz>= wqe_limit_sz，此时一直发极小直到排空。排空后，会在前面判断跳转到该组的小和大。存在一直排不空而饿死大的情况？
-                        //要么当前is_back = true，代表回退，不能再往小和极大跳，否则会饿死其他组。
+                //pr_info("sending wqes,k:%d,length:%d,total srm qp:%d,target_sz:%d\n", k, length, sched_group.sqb_cnt, target_sz);
+                //pr_info("user_wqe_table for n %d:%d,kern_wqe_table:%d\n", n, user_wqe_table[n], kernel_wqe_table[n]);
 
-                        
-                        nxt_k = k+3;
-                        //如果是is_back =true的情况，当前tot_sz仍小于wqe_limit_sz，应该跳过当前的还是直接发？
-                    }
-                }
-                else if (k % 3 == 1)
-                {
-                    if(wqe_tot_sz < wqes_limit_sz && ! is_bk){
-                        //填充不完，直接发当前的，如果一直发都无法填充满，排空小之后将轮到大。
-                        //如果是大的回跳，代表已经填满，按理来说不应该有wqe_tot_sz<wqe_limit_sz。但是保险起见，判断is_bk
-                        nxt_k = k + 1;
-                    }
-                    else{
-                        
-                        if(has_wqes(sched_group.sqb_arr[k-1],id)){
 
-                            //回跳，保证极小时延
-                            nxt_k = k - 1;
-                            if(wqe_tot_sz>=wqes_limit_sz)
-                                //如果sz<limit，继续用小填充先；否则直接跳到极小。
-                                break;
-                        }
-                        else{
-                            //否则轮到下组。大可以跳过，因为保证了吞吐
-                            nxt_k = k + 2;
-                        }
-                    }
-                }
-                else
-                {
-                    if(wqe_tot_sz < wqes_limit_sz){
-                        //直接发，如果无法填充满，则将直接轮到下一组
-                        nxt_k = k+1;
-                    }
-                    else{
-                        if(has_wqes(sched_group.sqb_arr[k-2],id)){
-                            //极小有，回跳回极小
-                            nxt_k = k -2; 
-                            break;
-                        }
-                        else if(has_wqes(sched_group.sqb_arr[k-2],id)){
-                            //小有，回跳回小
-                            is_bk = 1;
-                            nxt_k = k - 1;
-                            break;
-                        }
-                        else{
-                            //都没有，发完本轮轮到下组。如果有一组专发大的，直接跳过可能会被饿死？
-                            nxt_k = k + 1;
-                        }
-                    }
-                }
-                pr_info("k:%d,tot:%d,length:%d\n",k,sched_group.sqb_cnt,length);
+//                 // 文件
+//                 /* 3. 写数据 */
+//                 len = scnprintf(buf, 128, "sending wqes,k:%d,"
+//                     "length:%d,total srm qp:%d,target_sz:%d\tuser_wqe_table for n %d:%d,kern_wqe_table:%d\n", k, length, 
+//                     sched_group.sqb_cnt, target_sz,n, user_wqe_table[n], kernel_wqe_table[n]);
+// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+//                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+//                 ret = kernel_write(filp, buf, len, &pos);
+// #else
+//                 ret = vfs_write(filp, buf, len, &pos);
+// #endif
+//                 if (ret < 0)
+//                     pr_err("write_int_to_file: write error %d\n", ret);
 
+                
                 hash_id = sched_hash_ip((char *)&imm, NUM_SRMC); // 查找目标SRMC
                 found = 0;
 
@@ -971,31 +982,6 @@ int scheduler_polling(void *sched_data)
                     goto err;
                 }
 
-                //这个还要吗？
-                // mutex_unlock(&sched->srmc_lock);
-                if (srmc->pending_bytes > QUEUE_LIMIT)
-                {
-                    // if (kthread_should_stop())
-                    //     goto out;
-                    // srm_poll_once(sched, wc, cqe);
-
-                    if (srmc->pending_bytes > QUEUE_LIMIT)
-                    {
-                        DEBUG_LOG("Pending bytes is too large or too much wqes, pending_bytes for this srmc is%zu\n", srmc->pending_bytes);
-                        //                         len = scnprintf(buf, 64, "%d %d %d %llu\n", 1, 1, sqb->qpn, 1);
-                        // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-                        //                         /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-                        //                         ret = kernel_write(filp, buf, len, &pos);
-                        // #else
-                        //                         ret = vfs_write(filp, buf, len, &pos);
-                        // #endif
-                        //                         if (ret < 0)
-                        //                             pr_err("write_int_to_file: write error %d\n", ret);
-
-                        break;
-                    }
-                }
-
                 if (pre_srmcs[polling_head] != NULL)
                 {
                     pr_info("err:exceed queue length\n");
@@ -1036,9 +1022,9 @@ int scheduler_polling(void *sched_data)
                 smp_store_release(&uctrl->imm, 0);
 
                 srmc->cul_pending_bytes += length;
-                sched_size += length;
+                // sched_size += length;
                 srmc->pending_bytes += length;
-                tfree = 1;
+                tfree = 0;
 
                 qp = srmc->ini_cb.qp;
                 spin_lock_irqsave(&qp->sq.lock, flags);
@@ -1097,8 +1083,9 @@ int scheduler_polling(void *sched_data)
                 else
                 {
                     to_user = 0;
-                    if (srmc->pending_bytes > QUEUE_LIMIT)
+                    if (qp->sq.head-qp->sq.tail +1 >= qp->sq.max_post)
                     {
+                        //当前wqe发完之后该内核qp就满了
                         ctrl->fm_ce_se |= MLX5_WQE_CTRL_CQ_UPDATE;
                         // pr_info("insert kernel cqe\n");
                     }
@@ -1138,7 +1125,7 @@ int scheduler_polling(void *sched_data)
                     DEBUG_LOG("send signaled\n");
                     uidx = srmc->cur_cqe & (SQ_DEPTH - 1);
                     srmc->wqe_infos[uidx].qpn = sqb->qpn;
-                    srmc->wqe_infos[uidx].wqe_counter = sqb->cur_post;
+                    srmc->wqe_infos[uidx].wqe_counter = sqb->cur_post-1;//当前cur_post提前++了，所以减1
                     srmc->wqe_infos[uidx].pending_bytes = srmc->cul_pending_bytes;
                     srmc->wqe_infos[uidx].sqb = sqb;
                     srmc->wqe_infos[uidx].to_user = to_user;
@@ -1146,25 +1133,19 @@ int scheduler_polling(void *sched_data)
                     srmc->cur_cqe++;
                     srmc->cul_pending_bytes = 0;
                 }
-                sqb->cur_post++;//可以提前，更加快
+
+                // atomic_inc(&kernel_wqe_table[n]); // 同样提前，在cur_post++之前，以防线程认为还有wqe但找不到的情况
+                // sqb->cur_post++;       // 可以提前，更加快
+                send_ok = 1;
+                break;
             }
-            if(nxt_k < k){
-                is_bk = 1;
-            }
-            else{
-                is_bk = 0;
-            }
+            if (send_ok)
+                break;
         }
-
-        // poll_round++;
-        // if(poll_round%POLL_ALL_INTERVAL == 0)
-        // {
-        //     srm_poll_once(sched, wc, cqe);
-        // }
-
         cnt += tfree;
-        if (cnt % 10000000 == 0)
+        if (cnt % 1000000 == 0)
         {
+            cnt++;
             msleep(0);
         }
     }
@@ -1275,6 +1256,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
     struct mlx5_ib_sched *sched;
     int npages;
     int i, j;
+
     for (i = 0; i < sched_group->num_sched; i++)
     {
         DEBUG_LOG("Ready to stop sched->task %d\n", i);
@@ -1339,7 +1321,16 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
         mutex_unlock(&sched->srmc_lock);
         DEBUG_LOG("clean thread %d srmc success\n", i);
     }
-    // cleanup scheduler
+
+    // clean up srm qp table
+    if (user_wqe_table)
+    {
+        npages = ((num_table_qp * sizeof(uint32_t)) + PAGE_SIZE - 1) / PAGE_SIZE;
+        vunmap(user_wqe_table);
+        put_user_pages(user_wqe_pages, npages);
+        kfree(user_wqe_pages);
+    }
+    // cleanup srm qp
     mutex_lock(&sched_group->sq_lock);
     for (i = 0; i < sched_group->sqb_cnt; i++)
     {
@@ -2046,7 +2037,7 @@ int srm_create_connection(struct server_conn_info *conn_info)
         ret = PTR_ERR(cb->cq);
         goto err1;
     }
-    DEBUG_LOG("created cq %p,cqe:%d\n", cb->cq,cb->cq->cqe);
+    DEBUG_LOG("created cq %p,cqe:%d\n", cb->cq, cb->cq->cqe);
 
     // create qp
     memset(&init_attr, 0, sizeof(init_attr));
@@ -2560,3 +2551,17 @@ int sched_hash_ip(char addr[4], int n)
     u32 hash = jhash(addr, 4, 0);
     return hash % n;
 }
+
+int mlx5_ib_register_external_table(void *table, size_t size, struct page **pages)
+{
+    user_wqe_table = (uint32_t *)table;
+    user_wqe_pages = pages;
+    if (size % sizeof(uint32_t) != 0)
+    {
+        pr_err("error:size can't be divided,size:%d\n", size);
+    }
+    num_table_qp = size / sizeof(uint32_t);
+    pr_info("qp数量：%d\n", num_table_qp);
+    return 0;
+}
+EXPORT_SYMBOL_GPL(mlx5_ib_register_external_table);
