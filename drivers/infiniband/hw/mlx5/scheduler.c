@@ -566,7 +566,7 @@ static inline uint32_t srm_fastrand(uint64_t *seed)
     return (uint32_t)((*seed) >> 32);
 }
 
-const int num_kqps = 512;
+const int num_kqps = 128;
 // const int polling_itv = 10;//间隔多少个srmc进行一次polling
 int scheduler_polling(void *sched_data)
 {
@@ -786,11 +786,11 @@ int scheduler_polling(void *sched_data)
                     break;
                 }
 
-                // if (sched_size > SCHED_SIZE_LIMIT)
-                // {
-                //     DEBUG_LOG("sched once\n");
-                //     break;
-                // }
+                if (sched_size > SCHED_SIZE_LIMIT)
+                {
+                    DEBUG_LOG("sched once\n");
+                    break;
+                }
 
                 DEBUG_LOG("uidx:%d\n", uidx);
 
@@ -814,16 +814,16 @@ int scheduler_polling(void *sched_data)
                 hash_id = sched_hash_ip((char *)&imm, NUM_SRMC); // 查找目标SRMC
                 found = 0;
 
-                // 时延线程在第17个
-                if (k != 16){
-                    //rd = prandom_u32_max(num_kqps - 1);
-                    rd = srm_fastrand(&srm_seed)%(num_kqps-1);
-                }
-                else{
-                    rd = num_kqps - 1;
-                    //pr_info("lat thread length:%d\n",length);
-                }
-               // rd = prandom_u32_max(num_kqps);
+                // // 时延线程在第17个
+                // if (k != 16){
+                //     //rd = prandom_u32_max(num_kqps - 1);
+                //     rd = srm_fastrand(&srm_seed)%(num_kqps-1);
+                // }
+                // else{
+                //     rd = num_kqps - 1;
+                //     //pr_info("lat thread length:%d\n",length);
+                // }
+               rd = prandom_u32_max(num_kqps);
 
                 for (i = 0; i < NUM_SRMC; i++)
                 {
@@ -1047,7 +1047,7 @@ int scheduler_polling(void *sched_data)
         if (cnt % 10000000 == 0)
         {
             msleep(0);
-            cnt++;
+            //cnt++;
         }
     }
 out:
