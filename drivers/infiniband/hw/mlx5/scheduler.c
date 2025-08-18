@@ -1047,6 +1047,7 @@ int scheduler_polling(void *sched_data)
         if (cnt % 10000000 == 0)
         {
             msleep(0);
+            cnt++;
         }
     }
 out:
