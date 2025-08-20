@@ -88,7 +88,7 @@ struct mlx5_wqe_info{
     u32 qpn;
     struct mlx5_ib_sqbuf* sqb;
     u16 wqe_counter;
-    size_t pending_bytes;
+    uint64_t pending_bytes;
     u8 to_user;
     u8 valid;
 };
@@ -99,8 +99,8 @@ struct mlx5_ib_srmc{
    int sig_cnt;
    uint32_t cur_cqe;
    struct mlx5_wqe_info wqe_infos[SQ_DEPTH];
-   size_t pending_bytes;//total pending bytes
-   size_t cul_pending_bytes;//next cqe's pending bytes
+   uint64_t pending_bytes;//total pending bytes
+   uint64_t cul_pending_bytes;//next cqe's pending bytes
    int idx;// 该srmc在表中的索引
 }__attribute__((aligned(64)));
 struct mlx5_ib_sched{
