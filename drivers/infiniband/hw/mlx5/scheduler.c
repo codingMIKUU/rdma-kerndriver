@@ -591,7 +591,7 @@ static int mod_add(int a, int b, int mod)
     return (a + b + mod) % mod;
 }
 
-const int num_kqps = 128;
+const int num_kqps = 4096;
 // const int polling_itv = 10;//间隔多少个srmc进行一次polling
 int scheduler_polling(void *sched_data)
 {
@@ -699,8 +699,8 @@ int scheduler_polling(void *sched_data)
     polling_tail = polling_head = 0;
 
     u8 *in_queue;
-    in_queue = kmalloc_array(NUM_SRMC, sizeof(u8), GFP_KERNEL);
-    memset(in_queue, 0, NUM_SRMC * sizeof(u8));
+    in_queue = kmalloc_array(NUM_SRMC*2, sizeof(u8), GFP_KERNEL);//大小要是num_kqps的4倍
+    memset(in_queue, 0, NUM_SRMC * 2 * sizeof(u8));
 
     const int wqes_limit_sz = 124 * 1024; // 124KB
 
@@ -789,20 +789,33 @@ int scheduler_polling(void *sched_data)
                     ret = srm_poll_srmc_once(pre_srmc, wc, cqe);
                     if (pre_srmc->sig_cnt)
                     {
-                        // 这次没poll完
-                        if (pre_srmcs[polling_head] != NULL)
-                        {
-                            pr_info("err:exceed queue length\n");
-                            // 此时队列满，必须poll到,此时head = (tail-1+polling_cnt)%polling_cnt
-                            while (!(ret = srm_poll_srmc_once(pre_srmc, wc, cqe)))
-                            {
-                                ;
+                        //这次没poll完
+                        if(pre_srmcs[polling_head]!=NULL){
+                            pr_info("cq polling queue exceed queue length\n");
+                            //此时polling队列满，必须poll完
+                            while(pre_srmc->sig_cnt){
+                                srm_poll_srmc_once(pre_srmc, wc, cqe);
                             }
                             in_queue[pre_srmc->idx] = 0;
                         }
-                        else
-                        {
-                            // 重新加入队列
+                        else if(pre_srmc->sig_cnt>= SQ_DEPTH){
+                            pr_info("cq queue exceed SQ_DEPTH\n");
+                            //cqe队列满，必须poll到一个以上,让sig_cnt小于SQ_DEPTH
+                            while(pre_srmc->sig_cnt>= SQ_DEPTH){
+                                srm_poll_srmc_once(pre_srmc, wc, cqe);
+                            }
+                            if(!pre_srmc->sig_cnt){
+                                //poll完
+                                in_queue[pre_srmc->idx] = 0;
+                            }
+                            else{
+                                //没poll完，重新加入队列
+                                pre_srmcs[polling_head] = pre_srmc;
+                                polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
+                            }
+                        }
+                        else{
+                            //重新加入队列
                             pre_srmcs[polling_head] = pre_srmc;
                             polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
                         }
@@ -899,7 +912,6 @@ int scheduler_polling(void *sched_data)
 
 
                 smp_store_release(&kernel_wqe_table[n],kernel_table_val+1); // 同样提前，在cur_post++之前，以防线程认为还有wqe但找不到的情况
-                sqb->cur_post++;       // 可以提前，更加快
 
                 DEBUG_LOG("uidx:%d\n", uidx);
 
@@ -982,22 +994,7 @@ int scheduler_polling(void *sched_data)
                     goto err;
                 }
 
-                if (pre_srmcs[polling_head] != NULL)
-                {
-                    pr_info("err:exceed queue length\n");
-                    // 此时队列满，必须poll到,此时head = (tail-1+polling_cnt)%polling_cnt
-                    while (!(ret = srm_poll_srmc_once(pre_srmc, wc, cqe)))
-                    {
-                        ;
-                    }
-                }
-
-                if (!in_queue[srmc->idx])
-                {
-                    pre_srmcs[polling_head] = srmc;
-                    polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
-                    in_queue[srmc->idx] = 1;
-                }
+               
 
                 wqe_tot_sz -= cur_wqes[wqe_cur_idx];
                 wqe_tot_sz += length;
@@ -1120,6 +1117,7 @@ int scheduler_polling(void *sched_data)
                 //     elapsed_cycles, elapsed_ns);
 
                 DEBUG_LOG("send finished\n");
+                sqb->cur_post++;      
                 if (sig)
                 {
                     DEBUG_LOG("send signaled\n");
@@ -1132,6 +1130,30 @@ int scheduler_polling(void *sched_data)
                     srmc->sig_cnt++;
                     srmc->cur_cqe++;
                     srmc->cul_pending_bytes = 0;
+
+
+    
+                    if (!in_queue[srmc->idx])
+                    {
+                        if (pre_srmcs[polling_head] != NULL)
+                        {
+                            pre_srmc = pre_srmcs[polling_tail];
+                            pre_srmcs[polling_tail] = NULL;
+                            polling_tail = (polling_tail + 1) % SRMC_POLLING_CNT;
+                            pr_info("err:exceed queue length\n");
+                            // 此时队列满，必须poll到,此时head = (tail-1+polling_cnt)%polling_cnt
+                            while ((ret = srm_poll_srmc_once(pre_srmc, wc, cqe))!=-1)
+                            {
+                                ;
+                            }
+                            in_queue[pre_srmc->idx] = 0;
+                        }
+
+
+                        pre_srmcs[polling_head] = srmc;
+                        polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
+                        in_queue[srmc->idx] = 1;
+                    }
                 }
 
                 // atomic_inc(&kernel_wqe_table[n]); // 同样提前，在cur_post++之前，以防线程认为还有wqe但找不到的情况
@@ -1502,8 +1524,8 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
                 srmc_small->ini_cb.refcnt = 1;
                 srmc_large->ini_cb.refcnt = 1;
             }
-            srmc_small->idx = j;
-            srmc_large->idx = j;
+            srmc_small->idx = 2*j-1;
+            srmc_large->idx = 2*j;
 
             sched->srmc_small_tb[j] = srmc_small;
             sched->srmc_large_tb[j] = srmc_large;
