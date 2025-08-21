@@ -566,7 +566,7 @@ static inline uint32_t srm_fastrand(uint64_t *seed)
     return (uint32_t)((*seed) >> 32);
 }
 
-const int num_kqps = 16;
+const int num_kqps = 4096;
 // const int polling_itv = 10;//间隔多少个srmc进行一次polling
 int scheduler_polling(void *sched_data)
 {
@@ -623,40 +623,40 @@ int scheduler_polling(void *sched_data)
     // int cnt3 = 0;
     kfree(sched_id);
 
-    //     // 文件统计
-    //     char pt[200] = {0};
-    //     snprintf(pt, 200, "/root/zxm/rdma-kerndriver/%ddata%d.txt", num_kqps, id);
+//     // 文件统计
+//     char pt[200] = {0};
+//     snprintf(pt, 200, "/root/zxm/rdma-kerndriver/srm_%ddata_%d.txt", num_kqps, id);
 
-    //     struct file *filp;
-    //     loff_t pos = 0;
-    //     char *buf;
-    //     int len;
-    // #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-    //     mm_segment_t oldfs;
-    // #endif
+//     struct file *filp;
+//     loff_t pos = 0;
+//     char *buf;
+//     int len;
+// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+//     mm_segment_t oldfs;
+// #endif
 
-    //     /* 1. 准备字符串缓冲区 */
-    //     buf = kmalloc(32, GFP_KERNEL);
-    //     if (!buf)
-    //         return -ENOMEM;
+//     /* 1. 准备字符串缓冲区 */
+//     buf = kmalloc(128, GFP_KERNEL);
+//     if (!buf)
+//         return -ENOMEM;
 
-    //     /* 2. 打开（或创建）目标文件 */
-    // #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-    //     /* 小于 5.11 的内核需要 set_fs 才能访问文件系统 */
-    //     oldfs = get_fs();
-    //     set_fs(KERNEL_DS);
-    // #endif
-    //     filp = filp_open(pt,
-    //                         O_WRONLY | O_CREAT | O_TRUNC,
-    //                         0644);
-    // #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-    //     set_fs(oldfs);
-    // #endif
-    //     if (IS_ERR(filp))
-    //     {
-    //         ret = PTR_ERR(filp);
-    //         pr_info("Error open file\n");
-    //     }
+//     /* 2. 打开（或创建）目标文件 */
+// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+//     /* 小于 5.11 的内核需要 set_fs 才能访问文件系统 */
+//     oldfs = get_fs();
+//     set_fs(KERNEL_DS);
+// #endif
+//     filp = filp_open(pt,
+//                         O_WRONLY | O_CREAT | O_TRUNC,
+//                         0644);
+// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+//     set_fs(oldfs);
+// #endif
+//     if (IS_ERR(filp))
+//     {
+//         ret = PTR_ERR(filp);
+//         pr_info("Error open file\n");
+//     }
 
     // 随机数序列固定种子
     uint64_t srm_seed;
@@ -673,8 +673,8 @@ int scheduler_polling(void *sched_data)
     polling_tail = polling_head = 0;
 
     u8 *in_queue;
-    in_queue = kmalloc_array(NUM_SRMC, sizeof(u8), GFP_KERNEL);
-    memset(in_queue, 0, NUM_SRMC * sizeof(u8));
+    in_queue = kmalloc_array(NUM_SRMC*2, sizeof(u8), GFP_KERNEL);
+    memset(in_queue, 0, NUM_SRMC * 2 * sizeof(u8));
     while (!kthread_should_stop())
     {
         // for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++){
@@ -699,10 +699,12 @@ int scheduler_polling(void *sched_data)
                 //每次轮询先poll cqe
                 pre_srmc = pre_srmcs[polling_tail];
                 pre_srmcs[polling_tail] = NULL;
-                if(pre_srmc){
+                if (pre_srmc)
+                {
                     polling_tail = (polling_tail + 1) % SRMC_POLLING_CNT;
                     ret = srm_poll_srmc_once(pre_srmc, wc, cqe);
-                    if(pre_srmc->sig_cnt){
+                    if (pre_srmc->sig_cnt)
+                    {
                         //这次没poll完
                         if(pre_srmcs[polling_head]!=NULL){
                             pr_info("cq polling queue exceed queue length\n");
@@ -712,15 +714,20 @@ int scheduler_polling(void *sched_data)
                             }
                             in_queue[pre_srmc->idx] = 0;
                         }
-                        else if(pre_srmc->sig_cnt>= SQ_DEPTH){
+                        else if(pre_srmc->sig_cnt>= SQ_DEPTH || pre_srmc->ini_cb.qp->sq.head - pre_srmc->ini_cb.qp->sq.tail >= SQ_DEPTH){
                             pr_info("cq queue exceed SQ_DEPTH\n");
-                            //cqe队列满，必须poll到一个以上,让sig_cnt小于SQ_DEPTH
-                            while(pre_srmc->sig_cnt>= SQ_DEPTH){
+                            //cqe队列满或者sq队列满，必须poll到一个以上,让sig_cnt小于SQ_DEPTH
+                            while(pre_srmc->sig_cnt>= SQ_DEPTH || pre_srmc->ini_cb.qp->sq.head - pre_srmc->ini_cb.qp->sq.tail >= SQ_DEPTH){
                                 srm_poll_srmc_once(pre_srmc, wc, cqe);
                             }
                             if(!pre_srmc->sig_cnt){
                                 //poll完
                                 in_queue[pre_srmc->idx] = 0;
+                            }
+                            else{
+                                //没poll完，重新加入队列
+                                pre_srmcs[polling_head] = pre_srmc;
+                                polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
                             }
                         }
                         else{
@@ -729,12 +736,11 @@ int scheduler_polling(void *sched_data)
                             polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
                         }
                     }
-                    else{
-                        //poll完了，出队
-                        in_queue[pre_srmc->idx] = 0 ;
-        
+                    else
+                    {
+                        // poll完了，出队
+                        in_queue[pre_srmc->idx] = 0;
                     }
-        
                 }
 
                 uidx = sqb->cur_post & (sqb->wqe_cnt - 1);
@@ -874,28 +880,28 @@ int scheduler_polling(void *sched_data)
                 
 
                 // // mutex_unlock(&sched->srmc_lock);
-                // if (srmc->pending_bytes > QUEUE_LIMIT)
-                // {
-                //     // if (kthread_should_stop())
-                //     //     goto out;
-                //     // srm_poll_once(sched, wc, cqe);
+                if (srmc->pending_bytes > QUEUE_LIMIT)
+                {
+                    // if (kthread_should_stop())
+                    //     goto out;
+                    // srm_poll_once(sched, wc, cqe);
 
-                //     if (srmc->pending_bytes > QUEUE_LIMIT)
-                //     {
-                //         DEBUG_LOG("Pending bytes is too large or too much wqes, pending_bytes for this srmc is%zu\n", srmc->pending_bytes);
-                //         //                         len = scnprintf(buf, 64, "%d %d %d %llu\n", 1, 1, sqb->qpn, 1);
-                //         // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-                //         //                         /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-                //         //                         ret = kernel_write(filp, buf, len, &pos);
-                //         // #else
-                //         //                         ret = vfs_write(filp, buf, len, &pos);
-                //         // #endif
-                //         //                         if (ret < 0)
-                //         //                             pr_err("write_int_to_file: write error %d\n", ret);
+                    if (srmc->pending_bytes > QUEUE_LIMIT)
+                    {
+                        DEBUG_LOG("Pending bytes is too large or too much wqes, pending_bytes for this srmc is%zu\n", srmc->pending_bytes);
+                        //                         len = scnprintf(buf, 64, "%d %d %d %llu\n", 1, 1, sqb->qpn, 1);
+                        // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+                        //                         /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+                        //                         ret = kernel_write(filp, buf, len, &pos);
+                        // #else
+                        //                         ret = vfs_write(filp, buf, len, &pos);
+                        // #endif
+                        //                         if (ret < 0)
+                        //                             pr_err("write_int_to_file: write error %d\n", ret);
 
-                //         break;
-                //     }
-                // }
+                        break;
+                    }
+                }
 
 
 
@@ -914,6 +920,26 @@ int scheduler_polling(void *sched_data)
                 // #endif
                 //                 if (ret < 0)
                 //                     pr_err("write_int_to_file: write error %d\n", ret);
+
+
+
+
+
+//                 // 文件
+//                 /* 3. 写数据 */
+//                 len = scnprintf(buf, 128, "sending wqes,k:%d,"
+//                     "length:%d,total srm qp:%d\n", k, length, 
+//                     sched_group.sqb_cnt);
+// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+//                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+//                 ret = kernel_write(filp, buf, len, &pos);
+// #else
+//                 ret = vfs_write(filp, buf, len, &pos);
+// #endif
+//                 if (ret < 0)
+//                     pr_err("write_int_to_file: write error %d\n", ret);
+
+
 
                 smp_store_release(&uctrl->imm, 0);
 
@@ -979,7 +1005,7 @@ int scheduler_polling(void *sched_data)
                 else
                 {
                     to_user = 0;
-                    if (qp->sq.head - qp->sq.tail + 1 >= qp->sq.max_post)
+                    if (srmc->cul_pending_bytes > QUEUE_LIMIT || qp->sq.head - qp->sq.tail + 1 >= qp->sq.max_post)
                     {
                         ctrl->fm_ce_se |= MLX5_WQE_CTRL_CQ_UPDATE;
                         //pr_info("insert kernel cqe\n");
@@ -1028,21 +1054,26 @@ int scheduler_polling(void *sched_data)
                     srmc->cur_cqe++;
                     srmc->cul_pending_bytes = 0;
 
-
-                    //入队操作放到这里
-                    if(pre_srmcs[polling_head]!=NULL){
-                        pr_info("err:exceed queue length\n");
-                        //此时队列满，必须poll到,此时head = (tail-1+polling_cnt)%polling_cnt
-                        while((ret = srm_poll_srmc_once(pre_srmc, wc, cqe))!=-1){
-                            ;
+                    if (!in_queue[srmc->idx])
+                    {
+                        if (pre_srmcs[polling_head] != NULL)
+                        {
+                            pre_srmc = pre_srmcs[polling_tail];
+                            pre_srmcs[polling_tail] = NULL;
+                            polling_tail = (polling_tail + 1) % SRMC_POLLING_CNT;
+                            pr_info("err:exceed queue length\n");
+                            // 此时队列满，必须poll到,此时head = (tail-1+polling_cnt)%polling_cnt
+                            while ((ret = srm_poll_srmc_once(pre_srmc, wc, cqe))!=-1)
+                            {
+                                ;
+                            }
+                            in_queue[pre_srmc->idx] = 0;
                         }
-                        in_queue[pre_srmc->idx] = 0;
-                    }
-                            
-                    if(!in_queue[srmc->idx]){
+
+
                         pre_srmcs[polling_head] = srmc;
-                        polling_head = (polling_head + 1)%SRMC_POLLING_CNT;
-                        in_queue[srmc->idx]= 1;
+                        polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
+                        in_queue[srmc->idx] = 1;
                     }
                 }
                 // pr_info("length:%d,srmc_pending_bytes:%llu,srmc_cul_pending_bytes:%llu,sig:%d,srmc_idx:%d\n",
@@ -1411,8 +1442,9 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
                 srmc_small->ini_cb.refcnt = 1;
                 srmc_large->ini_cb.refcnt = 1;
             }
-            srmc_small->idx = j;
-            srmc_large->idx = j;
+            srmc_small->idx = 2*j-1;
+            srmc_large->idx = 2*j;
+
 
             sched->srmc_small_tb[j] = srmc_small;
             sched->srmc_large_tb[j] = srmc_large;
