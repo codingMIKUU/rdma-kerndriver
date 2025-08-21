@@ -798,10 +798,10 @@ int scheduler_polling(void *sched_data)
                             }
                             in_queue[pre_srmc->idx] = 0;
                         }
-                        else if(pre_srmc->sig_cnt>= SQ_DEPTH){
+                        else if(pre_srmc->sig_cnt>= SQ_DEPTH || pre_srmc->ini_cb.qp->sq.head - pre_srmc->ini_cb.qp->sq.tail >= SQ_DEPTH){
                             pr_info("cq queue exceed SQ_DEPTH\n");
-                            //cqe队列满，必须poll到一个以上,让sig_cnt小于SQ_DEPTH
-                            while(pre_srmc->sig_cnt>= SQ_DEPTH){
+                            //cqe队列满或者sq队列满，必须poll到一个以上,让sig_cnt小于SQ_DEPTH
+                            while(pre_srmc->sig_cnt>= SQ_DEPTH || pre_srmc->ini_cb.qp->sq.head - pre_srmc->ini_cb.qp->sq.tail >= SQ_DEPTH){
                                 srm_poll_srmc_once(pre_srmc, wc, cqe);
                             }
                             if(!pre_srmc->sig_cnt){
