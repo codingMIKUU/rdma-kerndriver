@@ -651,7 +651,7 @@ int scheduler_polling(void *sched_data)
 //     // 文件统计
 //     char pt[200] = {0};
 //     //snprintf(pt, 200, "/root/zxm/rdma-kerndriver/%ddata%d.txt", num_kqps, id);
-//     snprintf(pt, 200, "/root/zxm/rdma-kerndriver/kern_log%d.txt",id);
+//     snprintf(pt, 200, "/root/zxm/rdma-kerndriver/fcscale_%ddata_%d.txt",num_kqps,id);
 
 //     struct file *filp;
 //     loff_t pos = 0;
