@@ -35,7 +35,7 @@
 #define PORT_NUM 12345
 #define SRMC_POLLING_CNT 10000
 #define WQES_ARR_SZ 31
-const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 8;
+const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 // const size_t MESSAGE_SIZE_THRESHOLD = 1e9;
 const size_t QUEUE_LIMIT = 256 * 1024;
 const size_t SCHED_SIZE_LIMIT = 8 * 1024;
@@ -858,7 +858,7 @@ int scheduler_polling(void *sched_data)
         }
         else if (target_sz <= 7168)
         {
-            order_idx = 2;
+            order_idx = 2;//7~10原等级
         }
         else if (target_sz <= 10240)
         {
