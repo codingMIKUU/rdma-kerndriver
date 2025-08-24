@@ -32,7 +32,7 @@
 #define IP_ADDR "192.168.1.5"
 #define PORT_NUM 12345
 #define SRMC_POLLING_CNT 10000
-const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 8;
+const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 // const size_t MESSAGE_SIZE_THRESHOLD = 1e9;
 const size_t QUEUE_LIMIT = 256 * 1024;
 const size_t SCHED_SIZE_LIMIT = 8 * 1024;
@@ -566,7 +566,7 @@ static inline uint32_t srm_fastrand(uint64_t *seed)
     return (uint32_t)((*seed) >> 32);
 }
 
-const int num_kqps = 16;
+const int num_kqps = 4096;
 // const int polling_itv = 10;//间隔多少个srmc进行一次polling
 int scheduler_polling(void *sched_data)
 {
