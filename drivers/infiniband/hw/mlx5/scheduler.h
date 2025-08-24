@@ -37,6 +37,9 @@ struct mlx5_ib_sqbuf {
     uint32_t cur_post;
     struct mlx5_ib_cqbuf* cqb;
     struct mlx5_ib_sqbuf* next;//not loop
+
+
+    int idx;//该sqb在sched_group中的索引，仅用于debug
 }__attribute__((aligned(64)));
 enum test_state
 {
