@@ -8,7 +8,7 @@
 #define SQ_DEPTH 8192
 static int debug = 0; 
 #define NUM_SRMC 8192
-
+//对于接收端，NUM_SRMC等于num_kqps*2才行（因为只有一个调度器，发送端两个调度器全发往它了）
 #define NUM_SQB 1024
 
 
@@ -111,7 +111,7 @@ struct mlx5_ib_sched{
     struct mutex srmc_lock;
     struct mlx5_ib_srmc* srmc_small_tb[NUM_SRMC];//for small flows
     struct mlx5_ib_srmc* srmc_large_tb[NUM_SRMC];//for large flows
-    size_t srmc_cnt;
+    size_t srmc_cnt[2];
 };
 struct mlx5_ib_sched_id{
     struct mlx5_ib_sched* sched;

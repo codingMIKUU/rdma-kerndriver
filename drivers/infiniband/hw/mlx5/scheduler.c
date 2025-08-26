@@ -340,7 +340,7 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
     int i, j;
     for (i = 0; i < NUM_SRMC; i++)
     {
-        if (cnt_c >= sched->srmc_cnt)
+        if (cnt_c >= sched->srmc_cnt[0])
         {
             break;
         }
@@ -416,7 +416,7 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
     cnt_c = 0;
     for (i = 0; i < NUM_SRMC; i++)
     {
-        if (cnt_c >= sched->srmc_cnt)
+        if (cnt_c >= sched->srmc_cnt[1])
         {
             break;
         }
@@ -689,7 +689,7 @@ static int mod_add(int a, int b, int mod)
     return (a + b + mod) % mod;
 }
 
-const int num_kqps = 16;
+const int num_kqps = 4096;
 // const int polling_itv = 10;//间隔多少个srmc进行一次polling
 int scheduler_polling(void *sched_data)
 {
@@ -821,7 +821,7 @@ int scheduler_polling(void *sched_data)
     uint64_t polling_seed;
     polling_seed = 0xdeadbeef;
     uint32_t user_table_val,kernel_table_val;
-    int num_user_threads = 0;
+    int num_user_threads = 0,num_thread_qps,per_thread_qp_nums;
     while (!kthread_should_stop())
     {
         if (num_table_qp != sched_group.sqb_cnt || !num_table_qp){
@@ -829,7 +829,9 @@ int scheduler_polling(void *sched_data)
             continue;
         }
             
-        num_user_threads = num_table_qp / 6;
+        num_user_threads = num_table_qp / (6 * sched_group.num_sched);
+        num_thread_qps = 6* sched_group.num_sched;
+        per_thread_qp_nums = sched_group.sqb_cnt / sched_group.num_sched;
         //pr_info("num_user_threads:%d\n", num_user_threads);
         break;
     }
@@ -878,8 +880,9 @@ int scheduler_polling(void *sched_data)
         for (l = 0; l < 6; l++)
         {
             // 每个等级的遍历，取随机的起始点
-            k = polling_order[order_idx][l] + srm_fastrand(&polling_seed) % num_user_threads * 6;
-            for (m = 0; m < num_user_threads; m++, k = (k + 6) % sched_group.sqb_cnt)
+            //k = polling_order[order_idx][l] + srm_fastrand(&polling_seed) % num_user_threads * 6;
+            k = polling_order[order_idx][l]*sched_group.num_sched + id + srm_fastrand(&polling_seed) % num_user_threads * 12;
+            for (m = 0; m < num_user_threads; m++, k = (k + num_thread_qps) % sched_group.sqb_cnt)
             {
                 // 每次轮询先poll cqe
                 pre_srmc = pre_srmcs[polling_tail];
@@ -929,7 +932,8 @@ int scheduler_polling(void *sched_data)
                     }
                 }
 
-                n = polling_order[order_idx][l] * num_user_threads + k / 6;
+                //n = polling_order[order_idx][l] * num_user_threads + k / 6;
+                n = k/12+polling_order[order_idx][l]*num_user_threads + id*per_thread_qp_nums;
                 user_table_val = smp_load_acquire(&user_wqe_table[n]);
                 kernel_table_val = smp_load_acquire(&kernel_wqe_table[n]);
                 if ( user_table_val == kernel_table_val)
@@ -986,7 +990,7 @@ int scheduler_polling(void *sched_data)
     //                     pr_err("write_int_to_file: write error %d\n", ret);
 
 
-
+                    pr_err("imm should not be zero\n");
                     continue;
                 }
 
@@ -1006,35 +1010,35 @@ int scheduler_polling(void *sched_data)
                 //     break;
                 // }
                 // 192.168.1.x
-                if (id != ((imm >> 24) & 0xFF)) // 判断WR是否属于当前调度器
-                {
-                    //                      len = scnprintf(buf, 64, "%d %d %d %llu\n", 2, 2, sqb->qpn, 2);
-                    // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-                    //                     /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-                    //                     ret = kernel_write(filp, buf, len, &pos);
-                    // #else
-                    //                     ret = vfs_write(filp, buf, len, &pos);
-                    // #endif
-                    //                     if (ret < 0)
-                    //                         pr_err("write_int_to_file: write error %d\n", ret);
+    //             if (id != ((imm >> 24) & 0xFF)) // 判断WR是否属于当前调度器
+    //             {
+    //                 //                      len = scnprintf(buf, 64, "%d %d %d %llu\n", 2, 2, sqb->qpn, 2);
+    //                 // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+    //                 //                     /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+    //                 //                     ret = kernel_write(filp, buf, len, &pos);
+    //                 // #else
+    //                 //                     ret = vfs_write(filp, buf, len, &pos);
+    //                 // #endif
+    //                 //                     if (ret < 0)
+    //                 //                         pr_err("write_int_to_file: write error %d\n", ret);
 
 
-    //                 // 文件
-    //                 /* 3. 写数据 */
-    //                 len = scnprintf(buf, 128, "not this thread,k:%d,"
-    //                     "total srm qp:%d,target_sz:%lld\tuser_wqe_table for n %d:%d,kern_wqe_table:%d\n", k,
-    //                     sched_group.sqb_cnt, target_sz,n, user_table_val, kernel_table_val);
-    // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-    //                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-    //                 ret = kernel_write(filp, buf, len, &pos);
-    // #else
-    //                 ret = vfs_write(filp, buf, len, &pos);
-    // #endif
-    //                 if (ret < 0)
-    //                     pr_err("write_int_to_file: write error %d\n", ret);
+    // //                 // 文件
+    // //                 /* 3. 写数据 */
+    // //                 len = scnprintf(buf, 128, "not this thread,k:%d,"
+    // //                     "total srm qp:%d,target_sz:%lld\tuser_wqe_table for n %d:%d,kern_wqe_table:%d\n", k,
+    // //                     sched_group.sqb_cnt, target_sz,n, user_table_val, kernel_table_val);
+    // // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+    // //                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+    // //                 ret = kernel_write(filp, buf, len, &pos);
+    // // #else
+    // //                 ret = vfs_write(filp, buf, len, &pos);
+    // // #endif
+    // //                 if (ret < 0)
+    // //                     pr_err("write_int_to_file: write error %d\n", ret);
                     
-                    continue;
-                }
+    //                 continue;
+    //             }
 
                 // 我觉得还是要开这个，调度更公平
                 // if (sched_size > SCHED_SIZE_LIMIT)
@@ -1664,7 +1668,8 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
             sched->srmc_small_tb[j] = srmc_small;
             sched->srmc_large_tb[j] = srmc_large;
 
-            sched->srmc_cnt++;
+            sched->srmc_cnt[0]++;
+            sched->srmc_cnt[1]++;
 
             mutex_unlock(&sched->srmc_lock);
             if (1)
@@ -2109,7 +2114,10 @@ int srm_create_connection(struct server_conn_info *conn_info)
     DEBUG_LOG("in srm_create_connection,cma_id = %d,dgid.interface_id = %llx,dgid.subnet_prefix=%llx\n", cm_id, dgid.global.interface_id, dgid.global.subnet_prefix);
 
     idx = sched_hash_ip(dgid.raw + 12, sched_group.num_sched);
+    
     DEBUG_LOG("idx=%d\n", idx);
+
+
     sched = &sched_group.scheds[idx];
 
     hash_id = sched_hash_ip(dgid.raw + 12, NUM_SRMC);
@@ -2147,7 +2155,7 @@ int srm_create_connection(struct server_conn_info *conn_info)
     if (!srmc)
     {
         srmc = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
-        sched->srmc_cnt++;
+        sched->srmc_cnt[idx]++;
         memcpy(srmc->dgid.raw, dgid.raw, sizeof(srmc->dgid.raw));
         // 将srmc 加入到srmc_head中
         if (flags == MESSAGE_SIZE_LARGE)
