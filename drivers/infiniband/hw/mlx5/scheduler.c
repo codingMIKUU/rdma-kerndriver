@@ -689,7 +689,8 @@ static int mod_add(int a, int b, int mod)
     return (a + b + mod) % mod;
 }
 
-const int num_kqps = 4096;
+
+const int num_kqps = 16;
 // const int polling_itv = 10;//间隔多少个srmc进行一次polling
 int scheduler_polling(void *sched_data)
 {
@@ -746,41 +747,41 @@ int scheduler_polling(void *sched_data)
     // int cnt3 = 0;
     kfree(sched_id);
 
-//     // 文件统计
-//     char pt[200] = {0};
-//     //snprintf(pt, 200, "/root/zxm/rdma-kerndriver/%ddata%d.txt", num_kqps, id);
-//     snprintf(pt, 200, "/root/zxm/rdma-kerndriver/fcscale_%ddata_%d.txt",num_kqps,id);
+    // 文件统计
+    char pt[200] = {0};
+    //snprintf(pt, 200, "/root/zxm/rdma-kerndriver/%ddata%d.txt", num_kqps, id);
+    snprintf(pt, 200, "/root/zxm/rdma-kerndriver/fcscale_%ddata_%d.txt",num_kqps,id);
 
-//     struct file *filp;
-//     loff_t pos = 0;
-//     char *buf;
-//     int len;
-// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-//     mm_segment_t oldfs;
-// #endif
+    struct file *filp;
+    loff_t pos = 0;
+    char *buf;
+    int len;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+    mm_segment_t oldfs;
+#endif
 
-//     /* 1. 准备字符串缓冲区 */
-//     buf = kmalloc(128, GFP_KERNEL);
-//     if (!buf)
-//         return -ENOMEM;
+    /* 1. 准备字符串缓冲区 */
+    buf = kmalloc(256, GFP_KERNEL);
+    if (!buf)
+        return -ENOMEM;
 
-//     /* 2. 打开（或创建）目标文件 */
-// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-//     /* 小于 5.11 的内核需要 set_fs 才能访问文件系统 */
-//     oldfs = get_fs();
-//     set_fs(KERNEL_DS);
-// #endif
-//     filp = filp_open(pt,
-//                         O_WRONLY | O_CREAT | O_TRUNC,
-//                         0644);
-// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-//     set_fs(oldfs);
-// #endif
-//     if (IS_ERR(filp))
-//     {
-//         ret = PTR_ERR(filp);
-//         pr_info("Error open file\n");
-//     }
+    /* 2. 打开（或创建）目标文件 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+    /* 小于 5.11 的内核需要 set_fs 才能访问文件系统 */
+    oldfs = get_fs();
+    set_fs(KERNEL_DS);
+#endif
+    filp = filp_open(pt,
+                        O_WRONLY | O_CREAT | O_TRUNC,
+                        0644);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+    set_fs(oldfs);
+#endif
+    if (IS_ERR(filp))
+    {
+        ret = PTR_ERR(filp);
+        pr_info("Error open file\n");
+    }
 
     // 随机数序列固定种子
     uint64_t srm_seed;
@@ -939,6 +940,23 @@ int scheduler_polling(void *sched_data)
                 if ( user_table_val == kernel_table_val)
                 {
                     // 此时该qp中没有wqe
+
+                
+                    // 文件
+                    /* 3. 写数据 */
+                    len = scnprintf(buf, 256, "skip, k:%d,target_size:%lld,idx for table:%d,user_table_val:%u,"
+                        "kernel_table_val_:%u\n", k, target_sz,n,user_table_val,kernel_table_val);
+    #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+                    /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+                    ret = kernel_write(filp, buf, len, &pos);
+    #else
+                    ret = vfs_write(filp, buf, len, &pos);
+    #endif
+                    if (ret < 0)
+                        pr_err("write_int_to_file: write error %d\n", ret);
+
+
+
                     continue;
                 }
 
@@ -963,18 +981,6 @@ int scheduler_polling(void *sched_data)
                     //         cnt = 0;
                     //     }
                     // }
-
-                    //                 /* 3. 写数据 */
-                    //                 len = scnprintf(buf, 64, "%d %d %d %llu\n", 0, 0, sqb->qpn, 0);
-                    // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-                    //                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-                    //                 ret = kernel_write(filp, buf, len, &pos);
-                    // #else
-                    //                 ret = vfs_write(filp, buf, len, &pos);
-                    // #endif
-                    //                 if (ret < 0)
-                    //                     pr_err("write_int_to_file: write error %d\n", ret);
-
 
     //                 // 文件
     //                 /* 3. 写数据 */
@@ -1074,19 +1080,26 @@ int scheduler_polling(void *sched_data)
                 //pr_info("user_wqe_table for n %d:%d,kern_wqe_table:%d\n", n, user_wqe_table[n], kernel_wqe_table[n]);
 
 
-//                 // 文件
-//                 /* 3. 写数据 */
-//                 len = scnprintf(buf, 128, "sending wqes,k:%d,"
-//                     "length:%d,total srm qp:%d,target_sz:%lld\tuser_wqe_table for n %d:%d,kern_wqe_table:%d,kern_wqe_val:%d\n", k, length, 
-//                     sched_group.sqb_cnt, target_sz,n, user_table_val, kernel_wqe_table[n],kernel_table_val);
-// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-//                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-//                 ret = kernel_write(filp, buf, len, &pos);
-// #else
-//                 ret = vfs_write(filp, buf, len, &pos);
-// #endif
-//                 if (ret < 0)
-//                     pr_err("write_int_to_file: write error %d\n", ret);
+
+                end_cycles = rdtsc();
+                elapsed_cycles = end_cycles - start_cycles;
+                elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
+                start_cycles = rdtsc();
+
+
+                // 文件
+                /* 3. 写数据 */
+                len = scnprintf(buf, 256, "sending wqes,k:%d,"
+                    "length:%d,total srm qp:%d,target_sz:%lld\tuser_wqe_table for n %d:%d,kern_wqe_table:%d,kern_wqe_val:%d,elapsed_ns:%llu\n", k, length, 
+                    sched_group.sqb_cnt, target_sz,n, user_table_val, kernel_wqe_table[n],kernel_table_val,elapsed_ns);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+                /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+                ret = kernel_write(filp, buf, len, &pos);
+#else
+                ret = vfs_write(filp, buf, len, &pos);
+#endif
+                if (ret < 0)
+                    pr_err("write_int_to_file: write error %d\n", ret);
 
                 
                 hash_id = sched_hash_ip((char *)&imm, NUM_SRMC); // 查找目标SRMC
@@ -1317,9 +1330,9 @@ out:
     kfree(in_queue);
     sched->task = NULL;
 
-    // // 文件
-    // filp_close(filp, NULL);
-    // kfree(buf);
+    // 文件
+    filp_close(filp, NULL);
+    kfree(buf);
     return 0;
 err:
     pr_err("scheduler thread %d exit in error state\n", id);
@@ -1330,9 +1343,9 @@ err:
 
     sched->task = NULL;
 
-    // // 文件
-    // filp_close(filp, NULL);
-    // kfree(buf);
+    // 文件
+    filp_close(filp, NULL);
+    kfree(buf);
     return -1;
 }
 
