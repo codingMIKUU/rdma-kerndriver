@@ -123,7 +123,6 @@ __used __section(__versions) = {
 	{ 0xc29957c3, "__x86_indirect_thunk_rcx" },
 	{ 0x3316f112, "put_user_pages" },
 	{ 0x6954b75d, "mlx5_frag_buf_alloc_node" },
-	{ 0x5bb74392, "filp_close" },
 	{ 0x87b8798d, "sg_next" },
 	{ 0xa757c5f8, "rdma_read_gids" },
 	{ 0x8fa25c24, "xa_find" },
@@ -421,7 +420,6 @@ __used __section(__versions) = {
 	{ 0xe02c9c92, "__xa_erase" },
 	{ 0xea6e04a9, "ib_modify_qp_is_ok" },
 	{ 0x35bcc717, "rdma_resolve_addr" },
-	{ 0x96848186, "scnprintf" },
 	{ 0x733aa8ce, "mlx5_query_nic_vport_qkey_viol_cntr" },
 	{ 0x74c134b9, "__sw_hweight32" },
 	{ 0xad6815cd, "mlx5_rsc_dump_cmd_destroy" },
@@ -469,9 +467,7 @@ __used __section(__versions) = {
 	{ 0x88db9f48, "__check_object_size" },
 	{ 0x17c34c10, "__put_page" },
 	{ 0x93eb6339, "mlx5_eswitch_add_send_to_vport_rule" },
-	{ 0x6f7c128c, "vfs_write" },
 	{ 0xe914e41e, "strcpy" },
-	{ 0x209d914e, "filp_open" },
 	{ 0x587f22d7, "devmap_managed_key" },
 	{ 0x8a35b432, "sme_me_mask" },
 };
@@ -479,4 +475,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "A40C03ED623329A046A7A9E");
+MODULE_INFO(srcversion, "6A3EC621D616C5F05DE2C30");
