@@ -690,6 +690,17 @@ static int mod_add(int a, int b, int mod)
 }
 
 
+static int calc_level_tot_wqe_num (int n,int num_user_threads){
+    int ret;
+    int i;
+    ret = 0;
+    for( i = n/num_user_threads*num_user_threads;i<=(n/num_user_threads+1)*num_user_threads;i++){
+        ret += user_wqe_table[i] - kernel_wqe_table[i];
+    }
+    return ret;
+}
+
+
 const int num_kqps = 16;
 // const int polling_itv = 10;//间隔多少个srmc进行一次polling
 int scheduler_polling(void *sched_data)
@@ -822,6 +833,11 @@ int scheduler_polling(void *sched_data)
     polling_seed = 0xdeadbeef;
     uint32_t user_table_val,kernel_table_val;
     int num_user_threads = 0,num_thread_qps,per_thread_qp_nums;
+
+    int ten_level,hund_level;
+    int skip_level_arr[4] = {-1,-1,-1,-1};//0~4KB,4~10KB,10~100KB,>100KB
+    int skip_level_cnt[4] = {0,0,0,0};
+    int level;
     while (!kthread_should_stop())
     {
         if (num_table_qp != sched_group.sqb_cnt || !num_table_qp){
@@ -871,9 +887,37 @@ int scheduler_polling(void *sched_data)
         tfree = 1;
         for (l = 0; l < 4; l++)
         {
+            level = polling_order[order_idx][l];
+            if(skip_level_arr[level]>=0){
+                // 当前等级检查跳过等级
+                if(skip_level_cnt[level]<0){
+                    //代表刚刚降级，还需要轮询
+                    ;
+                }
+                else if(skip_level_cnt[level]< (1<<skip_level_arr[level])){
+                    skip_level_cnt[level]++;
+
+
+    //                 // 文件
+    //                 /* 3. 写数据 */
+    //                 len = scnprintf(buf, 256, "level %d skip ,skip cnt:%d,skip level:%d\n",level,skip_level_cnt[level],skip_level_arr[level]);
+    // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+    //                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+    //                 ret = kernel_write(filp, buf, len, &pos);
+    // #else
+    //                 ret = vfs_write(filp, buf, len, &pos);
+    // #endif
+    //                 if (ret < 0)
+    //                     pr_err("write_int_to_file: write error %d\n", ret);
+
+                    
+                    continue;
+                }
+            }
+        
             // 每个等级的遍历，取随机的起始点
             //k = polling_order[order_idx][l] + srm_fastrand(&polling_seed) % num_user_threads * 6;
-            k = polling_order[order_idx][l]*sched_group.num_sched + id + srm_fastrand(&polling_seed) % num_user_threads * 4 * sched_group.num_sched;
+            k = level*sched_group.num_sched + id + srm_fastrand(&polling_seed) % num_user_threads * 4 * sched_group.num_sched;
             for (m = 0; m < num_user_threads; m++, k = (k + num_thread_qps) % sched_group.sqb_cnt)
             {
                 // 每次轮询先poll cqe
@@ -925,7 +969,7 @@ int scheduler_polling(void *sched_data)
                 }
 
                 //n = polling_order[order_idx][l] * num_user_threads + k / 6;
-                n = k/(4*sched_group.num_sched)+polling_order[order_idx][l]*num_user_threads + id*per_thread_qp_nums;
+                n = k/(4*sched_group.num_sched)+level*num_user_threads + id*per_thread_qp_nums;
                 user_table_val = smp_load_acquire(&user_wqe_table[n]);
                 kernel_table_val = smp_load_acquire(&kernel_wqe_table[n]);
                 if ( user_table_val == kernel_table_val)
@@ -1301,10 +1345,61 @@ int scheduler_polling(void *sched_data)
                 // atomic_inc(&kernel_wqe_table[n]); // 同样提前，在cur_post++之前，以防线程认为还有wqe但找不到的情况
                 // sqb->cur_post++;       // 可以提前，更加快
                 send_ok = 1;
+
+
+
+                //由于轮询到了，降低退避等级,并且再次轮询看是否降级
+                skip_level_arr[level]--;
+                skip_level_arr[level] = max(skip_level_arr[level], -1);
+                skip_level_cnt[level] = -1;
+
+
+
+//                 //文件
+//                 /* 3. 写数据 */
+//                 int level_tot_wqe_num = calc_level_tot_wqe_num(n,num_user_threads);
+//                 len = scnprintf(buf, 256, "level %d down ,skip level:%d,level's total wqe num:%d\n",level,skip_level_arr[level],level_tot_wqe_num);
+// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+//                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+//                 ret = kernel_write(filp, buf, len, &pos);
+// #else
+//                 ret = vfs_write(filp, buf, len, &pos);
+// #endif
+//                 if (ret < 0)
+//                     pr_err("write_int_to_file: write error %d\n", ret);
+
+                
+
+
                 break;
             }
             if (send_ok)
                 break;
+
+
+            //该等级空转，上升skip level，最多退避256次
+            if(level<=1){
+                skip_level_arr[level] = min(-1,skip_level_arr[level]+1);
+            }
+            else{
+                skip_level_arr[level] = min(8,skip_level_arr[level]+1);
+            }
+            skip_level_cnt[level] = 0;
+
+
+//             //文件
+//             /* 3. 写数据 */
+//             len = scnprintf(buf, 256, "level %d up ,skip level:%d\n",level,skip_level_arr[level]);
+// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+//             /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
+//             ret = kernel_write(filp, buf, len, &pos);
+// #else
+//             ret = vfs_write(filp, buf, len, &pos);
+// #endif
+//             if (ret < 0)
+//                 pr_err("write_int_to_file: write error %d\n", ret);
+                            
+               
         }
         cnt += tfree;
         if (cnt % 1000000 == 0)
