@@ -92,6 +92,7 @@ struct mlx5_wqe_info{
     struct mlx5_ib_sqbuf* sqb;
     u16 wqe_counter;
     size_t pending_bytes;
+    size_t byte_cnt;
     u8 to_user;
     u8 valid;
 };
@@ -112,6 +113,7 @@ struct mlx5_ib_sched{
     struct mlx5_ib_srmc* srmc_small_tb[NUM_SRMC];//for small flows
     struct mlx5_ib_srmc* srmc_large_tb[NUM_SRMC];//for large flows
     size_t srmc_cnt[2];
+    int id;
 };
 struct mlx5_ib_sched_id{
     struct mlx5_ib_sched* sched;
@@ -153,7 +155,7 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group* sched_group,int qpn);
 int mlx5_ib_destroy_srmc(struct mlx5_ib_sched* sched,int ah_id);
 int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc,struct ib_pd *pd,int flags,int qpn);
 int mlx5_sched_run_server(struct srm_cb *cb);
-int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc,struct ib_pd *pd,union ib_gid *dgid,int flags);
+int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc,struct ib_pd *pd,union ib_gid *dgid,int flags,int id);
 void ib_sched_free_buf(struct srm_cb *cb);
 int sched_hash_ip(char addr[4],int n);
 int srm_accept(struct srm_cb *cb);
