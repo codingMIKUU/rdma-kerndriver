@@ -106,6 +106,7 @@ struct mlx5_ib_srmc{
    size_t pending_bytes;//total pending bytes
    size_t cul_pending_bytes;//next cqe's pending bytes
    int idx;// 该srmc在表中的索引
+   int srmc_idx; //该srmc在创建顺序中排第几个(用于分配cq)
 }__attribute__((aligned(64)));
 struct mlx5_ib_sched{
     struct task_struct* task;

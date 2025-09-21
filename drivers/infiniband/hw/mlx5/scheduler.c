@@ -35,6 +35,8 @@
 #define PORT_NUM 12345
 #define SRMC_POLLING_CNT 10000
 #define WQES_ARR_SZ 31
+#define CQ_NUM 1
+#define SCHED_NUM 2
 const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 // const size_t MESSAGE_SIZE_THRESHOLD = 1e9;
 const size_t QUEUE_LIMIT = 256 * 1024;
@@ -44,7 +46,7 @@ static uint32_t *user_wqe_table, *user_level_table; // 用户态mmap表，表示
 static struct page **user_wqe_pages, *user_level_pages;
 uint32_t kernel_wqe_table[NUM_SQB]; // 内核态表，表示当前srm qp中内核已发送多少个wqe
 int num_table_qp, num_table_level;
-struct ib_cq *shared_cq[256]; // 每个内核线程一个cq
+struct ib_cq *shared_cq[SCHED_NUM][CQ_NUM*2]; // 每个内核线程一个cq,大小srmc各CQ_NUM个cq
 
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx)
 {
@@ -875,6 +877,8 @@ int scheduler_polling(void *sched_data)
     int skip_level_arr[4] = {-1, -1, -1, -1}; // 0~4KB,4~10KB,10~100KB,>100KB
     int skip_level_cnt[4] = {0, 0, 0, 0};
     int level;
+
+    struct mlx5_ib_srmc* cq_srmc_tb[2*CQ_NUM] = {0};//保存每个cq对应srmc代表
     while (!kthread_should_stop())
     {
         if (num_table_qp != sched_group.sqb_cnt || !num_table_qp)
@@ -944,7 +948,7 @@ int scheduler_polling(void *sched_data)
                         {
                             srm_poll_srmc_once(pre_srmc, wc, cqe);
                         }
-                        in_queue[pre_srmc->idx] = 0;
+                        in_queue[pre_srmc->srmc_idx%(2*CQ_NUM)] = 0;
                     }
                     else if (pre_srmc->sig_cnt >= SQ_DEPTH || (int)(pre_srmc->ini_cb.qp->sq.head - pre_srmc->ini_cb.qp->sq.tail) >= pre_srmc->ini_cb.qp->sq.max_post)
                     {
@@ -963,7 +967,7 @@ int scheduler_polling(void *sched_data)
                         if (!pre_srmc->sig_cnt)
                         {
                             // poll完
-                            in_queue[pre_srmc->idx] = 0;
+                            in_queue[pre_srmc->srmc_idx%(2*CQ_NUM)] = 0;
                         }
                         else
                         {
@@ -982,7 +986,7 @@ int scheduler_polling(void *sched_data)
                 else
                 {
                     // poll完了，出队
-                    in_queue[pre_srmc->idx] = 0;
+                    in_queue[pre_srmc->srmc_idx%(2*CQ_NUM)] = 0;
                 }
             }
 
@@ -1307,7 +1311,7 @@ int scheduler_polling(void *sched_data)
 
                 if (sig)
                 {
-                    if (!in_queue[srmc->idx])
+                    if (!in_queue[srmc->srmc_idx%(2*CQ_NUM)])
                     {
                         if (pre_srmcs[polling_head] != NULL)
                         {
@@ -1320,27 +1324,18 @@ int scheduler_polling(void *sched_data)
                             {
                                 ;
                             }
-                            in_queue[pre_srmc->idx] = 0;
+                            in_queue[pre_srmc->srmc_idx%(2*CQ_NUM)] = 0;
                         }
 
-                        // pre_srmcs[polling_head] = srmc;
-                        // polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
-                        // in_queue[srmc->idx] = 1;
-                        if (pre_srmcs[polling_tail] == NULL)
-                        {
-                            // 当前队列中不剩了才进行入队
-                            pre_srmcs[polling_head] = srmc;
-                            polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
-                            in_queue[srmc->idx] = 1;
-                        }
-                        else
-                        {
-                            // 直接用队列中的pre_srmc
-                            ;
-                        }
+                        if(cq_srmc_tb[srmc->srmc_idx%(2*CQ_NUM)] == NULL)
+                            cq_srmc_tb[srmc->srmc_idx%(2*CQ_NUM)] = srmc;
+
+                        pre_srmcs[polling_head] = cq_srmc_tb[srmc->srmc_idx%(2*CQ_NUM)];
+                        polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
+                        in_queue[srmc->srmc_idx%(2*CQ_NUM)] = 1;
                     }
 
-                    pre_srmc = pre_srmcs[polling_tail];
+                    pre_srmc = cq_srmc_tb[srmc->srmc_idx%(2*CQ_NUM)];
                     // if (pre_srmc == NULL)
                     // {
                     //     pr_err("pre_srmc is null\n");
@@ -1419,7 +1414,7 @@ int scheduler_polling(void *sched_data)
                             {
                                 srm_poll_srmc_once(pre_srmc, wc, cqe);
                             }
-                            in_queue[pre_srmc->idx] = 0;
+                            in_queue[pre_srmc->srmc_idx%(2*CQ_NUM)] = 0;
                         }
                         else if (pre_srmc->sig_cnt >= SQ_DEPTH || (int)(srmc->ini_cb.qp->sq.head - srmc->ini_cb.qp->sq.tail) >= srmc->ini_cb.qp->sq.max_post)
                         {
@@ -1438,7 +1433,7 @@ int scheduler_polling(void *sched_data)
                             if (!pre_srmc->sig_cnt)
                             {
                                 // poll完
-                                in_queue[pre_srmc->idx] = 0;
+                                in_queue[pre_srmc->srmc_idx%(2*CQ_NUM)] = 0;
                             }
                             else
                             {
@@ -1457,7 +1452,7 @@ int scheduler_polling(void *sched_data)
                     else
                     {
                         // poll完了，出队
-                        in_queue[pre_srmc->idx] = 0;
+                        in_queue[pre_srmc->srmc_idx%(2*CQ_NUM)] = 0;
                     }
                 }
 
@@ -1713,9 +1708,10 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
 
     for (i = 0; i < sched_group->num_sched; i++)
     {
-        // free cq
-        if (shared_cq[i])
-            ib_destroy_cq(shared_cq[i]);
+        for( j = 0;j<(2*CQ_NUM);j++)
+            // free cq
+            if (shared_cq[i][j])
+                ib_destroy_cq(shared_cq[i][j]);
     }
 
     // clean up srm qp table
@@ -1908,6 +1904,9 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
             }
             srmc_small->idx = 2 * j - 1;
             srmc_large->idx = 2 * j;
+
+            srmc_small->srmc_idx = i;
+            srmc_large->srmc_idx = i+CQ_NUM;
 
             sched->srmc_small_tb[j] = srmc_small;
             sched->srmc_large_tb[j] = srmc_large;
@@ -2725,9 +2724,9 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
     cq_attr.cqe = cb->txdepth;
     cq_attr.comp_vector = 0;
     // change to event?
-    if (!shared_cq[id])
-        shared_cq[id] = ib_create_cq(cb->cm_id->device, NULL, NULL, NULL, &cq_attr);
-    cb->cq = shared_cq[id];
+    if (!shared_cq[id][srmc->srmc_idx%(2*CQ_NUM)])
+        shared_cq[id][srmc->srmc_idx%(2*CQ_NUM)] = ib_create_cq(cb->cm_id->device, NULL, NULL, NULL, &cq_attr);
+    cb->cq = shared_cq[id][srmc->srmc_idx%(2*CQ_NUM)];
     if (IS_ERR(cb->cq))
     {
         printk(KERN_ERR "ib_create_cq failed,cq:%s\n", PTR_ERR(cb->cq));
