@@ -8,6 +8,11 @@
         "string_view": "c",
         "initializer_list": "c",
         "utility": "c",
-        "cmath": "c"
+        "cmath": "c",
+        "vector": "c",
+        "optional": "c",
+        "system_error": "c",
+        "memory": "c",
+        "string": "c"
     }
 }
