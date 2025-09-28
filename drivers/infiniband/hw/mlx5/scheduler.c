@@ -1111,17 +1111,17 @@ int scheduler_polling(void *sched_data)
                     //                     if (ret < 0)
                     //                         pr_err("write_int_to_file: write error %d\n", ret);
 
-                    if (use_user_idx)
-                    {
-                        use_user_idx = 0;
-                        // pr_err("k:%d,should not use user idx and not found wqe\n", k);
+                    // if (use_user_idx)
+                    // {
+                    //     use_user_idx = 0;
+                    //     // pr_err("k:%d,should not use user idx and not found wqe\n", k);
 
-                        // // 文件
-                        // len = scnprintf(buf, 256, "k:%d,should not use user idx and not found wqe\n", k);
-                        // ret = vfs_write(filp, buf, len, &pos);
-                        // if (ret < 0)
-                        //     pr_err("write_int_to_file: write error %d\n", ret);
-                    }
+                    //     // // 文件
+                    //     // len = scnprintf(buf, 256, "k:%d,should not use user idx and not found wqe\n", k);
+                    //     // ret = vfs_write(filp, buf, len, &pos);
+                    //     // if (ret < 0)
+                    //     //     pr_err("write_int_to_file: write error %d\n", ret);
+                    // }
 
                     // //文件
                     // if (level <= 1)

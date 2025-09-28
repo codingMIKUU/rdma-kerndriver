@@ -138,6 +138,7 @@ struct mlx5_ib_server{
     struct srm_cb server_cb;
 };
 enum srmc_create_flag{
+
     SRMC_CREATE_FLAG_INIT_QP = 1,
     SRMC_CREATE_FLAG_TGT_QP = 2,
 };
