@@ -745,7 +745,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 512;
+const int num_kqps = 128;
 // const int polling_itv = 10;//间隔多少个srmc进行一次polling
 int scheduler_polling(void *sched_data)
 {
@@ -892,6 +892,8 @@ int scheduler_polling(void *sched_data)
     {
         free_cqe_idx[i] = i;
     }
+
+
 
     while (!kthread_should_stop())
     {
@@ -1049,7 +1051,7 @@ int scheduler_polling(void *sched_data)
                 // 大消息上升退避等级
                 if (level >= 1)
                 {
-                    skip_level_arr[level] = min(8, skip_level_arr[level] + 1);
+                    skip_level_arr[level] = min(2, skip_level_arr[level] + 1);
                     skip_level_cnt[level] = 0;
                 }
 
@@ -1252,10 +1254,10 @@ int scheduler_polling(void *sched_data)
                 // pr_info("sending wqes,k:%d,length:%d,total srm qp:%d,target_sz:%d\n", k, length, sched_group.sqb_cnt, target_sz);
                 // pr_info("user_wqe_table for n %d:%d,kern_wqe_table:%d\n", n, user_wqe_table[n], kernel_wqe_table[n]);
 
-                end_cycles = rdtsc();
-                elapsed_cycles = end_cycles - start_cycles;
-                elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
-                start_cycles = rdtsc();
+                // end_cycles = rdtsc();
+                // elapsed_cycles = end_cycles - start_cycles;
+                // elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
+                // start_cycles = rdtsc();
 
                 //                 // 文件
                 //                 /* 3. 写数据 */
@@ -1601,17 +1603,17 @@ int scheduler_polling(void *sched_data)
             if (send_ok)
                 break;
 
-            pr_err("shouldn't find no wqe to send\n");
-            // // 该等级空转，上升skip level，最多退避256次
-            // if (level <= 1)
-            // {
-            //     skip_level_arr[level] = min(0, skip_level_arr[level] + 1);
-            // }
-            // else
-            // {
-            //     skip_level_arr[level] = min(10, skip_level_arr[level] + 1);
-            // }
-            // skip_level_cnt[level] = 0;
+            // pr_err("shouldn't find no wqe to send\n");
+            //  // 该等级空转，上升skip level，最多退避256次
+            //  if (level <= 1)
+            //  {
+            //      skip_level_arr[level] = min(0, skip_level_arr[level] + 1);
+            //  }
+            //  else
+            //  {
+            //      skip_level_arr[level] = min(10, skip_level_arr[level] + 1);
+            //  }
+            //  skip_level_cnt[level] = 0;
 
             //             //文件
             //             /* 3. 写数据 */
