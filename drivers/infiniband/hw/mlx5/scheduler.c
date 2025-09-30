@@ -745,7 +745,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 128;
+const int num_kqps = 512;
 // const int polling_itv = 10;//间隔多少个srmc进行一次polling
 int scheduler_polling(void *sched_data)
 {
@@ -894,8 +894,8 @@ int scheduler_polling(void *sched_data)
     }
 
     uint32_t level_owqe_cnt_arr[4] = {0};
-    uint32_t level_wqe_cnt,wqe_cnt,user_threads_idx;
-    int sending_case ; //对应新的wqe个数和旧的wqe个数的几种情况,0~2代表三种情况，3代表应该break了
+    uint32_t level_wqe_cnt, wqe_cnt, user_threads_idx;
+    int sending_case; // 对应新的wqe个数和旧的wqe个数的几种情况,0~2代表三种情况，3代表应该break了
 
     while (!kthread_should_stop())
     {
@@ -920,7 +920,6 @@ int scheduler_polling(void *sched_data)
 
     uint64_t skip_cnt10 = 0, skip_cnt100 = 0, empty_rolling10 = 0, empty_rolling100 = 0;
     uint64_t wqe_sending_target_cnt = 10240;
-
 
     while (!kthread_should_stop())
     {
@@ -1040,7 +1039,6 @@ int scheduler_polling(void *sched_data)
             if (!level_wqe_cnt)
             {
 
-
                 // //文件
                 // if (level <= 1)
                 // {
@@ -1093,12 +1091,9 @@ int scheduler_polling(void *sched_data)
             // // 插入获取屏障：确保读取b后，c的最新值已可见
             // smp_rmb();  // 读内存屏障，阻止读重排
 
-
-            k = level * sched_group.num_sched + id + srm_fastrand(&polling_seed)%num_user_threads * 4 * sched_group.num_sched;
-            for (m = 0;m<num_user_threads;m++,k = (k+num_thread_qps)%sched_group.sqb_cnt)
+            k = level * sched_group.num_sched + id + srm_fastrand(&polling_seed) % num_user_threads * 4 * sched_group.num_sched;
+            for (m = 0; m < num_user_threads; m++, k = (k + num_thread_qps) % sched_group.sqb_cnt)
             {
-
-
 
                 // n = polling_order[order_idx][l] * num_user_threads + k / 6;
                 n = k / (4 * sched_group.num_sched) + level * num_user_threads + id * per_thread_qp_nums;
@@ -1175,7 +1170,6 @@ int scheduler_polling(void *sched_data)
                 //     wqe_cnt = user_table_val - kernel_table_val;
                 //     sending_case = 3;
                 // }
-                
 
                 sqb = sched_group.sqb_arr[k];
                 if (sqb == NULL)
@@ -1594,8 +1588,6 @@ int scheduler_polling(void *sched_data)
                     }
                 }
 
-
-
                 // if (level >= 1)
                 // {
                 //     // 由于轮询到了，降低退避等级,并且再次轮询看是否降级
@@ -1640,6 +1632,7 @@ int scheduler_polling(void *sched_data)
                 // }
 
                 kernel_level_table[level + 4 * id]++;
+                break;
 
                 // if(sending_case == 0){
                 //     sending_case == 4;
