@@ -893,7 +893,9 @@ int scheduler_polling(void *sched_data)
         free_cqe_idx[i] = i;
     }
 
-
+    uint32_t level_owqe_cnt_arr[4] = {0};
+    uint32_t level_wqe_cnt,wqe_cnt,user_threads_idx;
+    int sending_case ; //对应新的wqe个数和旧的wqe个数的几种情况,0~2代表三种情况，3代表应该break了
 
     while (!kthread_should_stop())
     {
@@ -918,6 +920,7 @@ int scheduler_polling(void *sched_data)
 
     uint64_t skip_cnt10 = 0, skip_cnt100 = 0, empty_rolling10 = 0, empty_rolling100 = 0;
     uint64_t wqe_sending_target_cnt = 10240;
+
 
     while (!kthread_should_stop())
     {
@@ -1016,27 +1019,28 @@ int scheduler_polling(void *sched_data)
             }
 
             level = polling_order[order_idx][l];
-            if (level >= 1 && skip_level_arr[level] >= 0)
-            {
-                // 当前等级检查跳过等级
-                if (skip_level_cnt[level] < 0)
-                {
-                    // 代表刚刚降级，还需要轮询
-                    ;
-                }
-                else if (skip_level_cnt[level] < (1 << skip_level_arr[level]))
-                {
-                    skip_level_cnt[level]++;
-                    continue;
-                }
-                // pr_info("level:%d,skip_level:%d,skip cnt:%d,skip.\n",level,skip_level_arr[level],skip_level_cnt[level]);
-            }
+            // if (level >= 1 && skip_level_arr[level] >= 0)
+            // {
+            //     // 当前等级检查跳过等级
+            //     if (skip_level_cnt[level] < 0)
+            //     {
+            //         // 代表刚刚降级，还需要轮询
+            //         ;
+            //     }
+            //     else if (skip_level_cnt[level] < (1 << skip_level_arr[level]))
+            //     {
+            //         skip_level_cnt[level]++;
+            //         continue;
+            //     }
+            //     // pr_info("level:%d,skip_level:%d,skip cnt:%d,skip.\n",level,skip_level_arr[level],skip_level_cnt[level]);
+            // }
 
             user_level_val = smp_load_acquire(&user_level_table[level + 4 * id]);
-            if (user_level_val == kernel_level_table[level + 4 * id])
+            level_wqe_cnt = user_level_val - kernel_level_table[level + 4 * id];
+            if (!level_wqe_cnt)
             {
-                // 等级表判断是否该等级有wqe
-                level_qp_st_arr[level] = -1;
+                level_owqe_cnt_arr[level] = level_wqe_cnt;
+
 
                 // //文件
                 // if (level <= 1)
@@ -1048,12 +1052,12 @@ int scheduler_polling(void *sched_data)
                 //     skip_cnt100++;
                 // }
 
-                // 大消息上升退避等级
-                if (level >= 1)
-                {
-                    skip_level_arr[level] = min(2, skip_level_arr[level] + 1);
-                    skip_level_cnt[level] = 0;
-                }
+                // // 大消息上升退避等级
+                // if (level >= 1)
+                // {
+                //     skip_level_arr[level] = min(2, skip_level_arr[level] + 1);
+                //     skip_level_cnt[level] = 0;
+                // }
 
                 //                 // 文件
                 //                 /* 3. 写数据 */
@@ -1069,6 +1073,24 @@ int scheduler_polling(void *sched_data)
                 continue;
             }
 
+            if(level_owqe_cnt_arr[level] != level_wqe_cnt){
+                if(level_owqe_cnt_arr[level] == 0){
+                    //在上一次遍历时该等级没有wqe，则直接用下标表
+                    user_threads_idx = smp_load_acquire(&user_idx_table[level + 4 * id]);
+                    sending_case = 0;
+                }
+                else{
+                    //上次遍历有wqe，则先用顺序遍历的下标，空转再用下标表，防止饥饿问题
+                    user_threads_idx = level_qp_st_arr[level];
+                    sending_case = 1;
+                }
+            }
+            else {
+                //wqe个数相较于上一次没有变化，直接使用上次下标
+                user_threads_idx = level_qp_st_arr[level];
+                sending_case = 2;
+            }
+
             // // 插入获取屏障：确保读取b后，c的最新值已可见
             // smp_rmb();  // 读内存屏障，阻止读重排
 
@@ -1079,11 +1101,11 @@ int scheduler_polling(void *sched_data)
                 use_user_idx = 1;
             }
 
-            k = level * sched_group.num_sched + id + level_qp_st_arr[level] * 4 * sched_group.num_sched;
-            for (m = 0; m < num_user_threads; m++, k = (k + num_thread_qps) % sched_group.sqb_cnt)
+            k = level * sched_group.num_sched + id + user_threads_idx * 4 * sched_group.num_sched;
+            for (;;)
             {
 
-                level_qp_st_arr[level] = (level_qp_st_arr[level] + 1) % num_user_threads;
+
 
                 // n = polling_order[order_idx][l] * num_user_threads + k / 6;
                 n = k / (4 * sched_group.num_sched) + level * num_user_threads + id * per_thread_qp_nums;
@@ -1134,8 +1156,33 @@ int scheduler_polling(void *sched_data)
                     // {
                     //     skip_cnt100++;
                     // }
+
+                    if(sending_case == 0){
+                        sending_case == 4;
+                        pr_err("should not use user idx and not found wqe\n");
+                        break;
+                    }
+                    else if (sending_case == 1){
+                        sending_case = 0;//接下来访问下标表
+                        user_threads_idx = smp_load_acquire(&user_idx_table[level + 4 * id]);
+                        k = level * sched_group.num_sched + id + user_threads_idx * 4 * sched_group.num_sched;
+                    }else if(sending_case == 2){
+                        level_qp_st_arr[level] = (level_qp_st_arr[level]+1)%num_user_threads;
+                        k = (k + num_thread_qps) % sched_group.sqb_cnt;
+                    }else if(sending_case == 3){
+                        //不应该在这里
+                        pr_err("should not be here,sending_case is 3,should break after sending\n");
+                        break;
+                    }
                     continue;
                 }
+
+                if(level == 1 && sending_case == 2){
+                    //这种情况需要排空wqe
+                    wqe_cnt = user_table_val - kernel_table_val;
+                    sending_case = 3;
+                }
+                
 
                 sqb = sched_group.sqb_arr[k];
                 if (sqb == NULL)
@@ -1554,13 +1601,15 @@ int scheduler_polling(void *sched_data)
                     }
                 }
 
-                if (level >= 1)
-                {
-                    // 由于轮询到了，降低退避等级,并且再次轮询看是否降级
-                    skip_level_arr[level]--;
-                    skip_level_arr[level] = max(skip_level_arr[level], -1);
-                    skip_level_cnt[level] = -1;
-                }
+
+
+                // if (level >= 1)
+                // {
+                //     // 由于轮询到了，降低退避等级,并且再次轮询看是否降级
+                //     skip_level_arr[level]--;
+                //     skip_level_arr[level] = max(skip_level_arr[level], -1);
+                //     skip_level_cnt[level] = -1;
+                // }
 
                 //                 //文件
                 //                 /* 3. 写数据 */
@@ -1598,7 +1647,30 @@ int scheduler_polling(void *sched_data)
                 // }
 
                 kernel_level_table[level + 4 * id]++;
-                break;
+
+                if(sending_case == 0){
+                    sending_case == 4;
+                }
+                else if (sending_case == 1){
+                    level_qp_st_arr[level] = (level_qp_st_arr[level]+1)%num_user_threads;//直接下一个吗？还是允许连续发有限个？
+                    sending_case = 4;
+                }else if(sending_case == 2){
+                    level_qp_st_arr[level] = (level_qp_st_arr[level]+1)%num_user_threads;//直接下一个吗？还是允许连续发有限个？
+                    sending_case = 4;
+                }
+                else if(sending_case == 3){
+                    //顺序遍历到level 1的情况，对于level 1的队列，需要排空，继续发送
+                    wqe_cnt--;
+                    if(wqe_cnt == 0){
+                        sending_case = 4;
+                    }
+                }
+
+                if(sending_case == 4){
+                    //当前情况发送完毕，更新old值,需要使用最新的user_level_table更新
+                    level_owqe_cnt_arr[level] = smp_load_acquire(&user_level_table[level + 4*id]) - kernel_level_table[level + 4*id];
+                    break;
+                }
             }
             if (send_ok)
                 break;
