@@ -1038,6 +1038,7 @@ int scheduler_polling(void *sched_data)
             level_wqe_cnt = user_level_val - kernel_level_table[level + 4 * id];
             if (!level_wqe_cnt)
             {
+                //level_owqe_cnt_arr[level] = level_wqe_cnt;
 
                 // //文件
                 // if (level <= 1)
@@ -1078,20 +1079,20 @@ int scheduler_polling(void *sched_data)
             //     }
             //     else{
             //         //上次遍历有wqe，则先用顺序遍历的下标，空转再用下标表，防止饥饿问题
-            //         user_threads_idx = level_qp_st_arr[level];
+            //         user_threads_idx = srm_fastrand(&polling_seed) % num_user_threads;
             //         sending_case = 1;
             //     }
             // }
             // else {
             //     //wqe个数相较于上一次没有变化，直接使用上次下标
-            //     user_threads_idx = level_qp_st_arr[level];
+            //     user_threads_idx = srm_fastrand(&polling_seed) % num_user_threads;
             //     sending_case = 2;
             // }
 
             // // 插入获取屏障：确保读取b后，c的最新值已可见
             // smp_rmb();  // 读内存屏障，阻止读重排
 
-            k = level * sched_group.num_sched + id + srm_fastrand(&polling_seed) % num_user_threads * 4 * sched_group.num_sched;
+            k = level * sched_group.num_sched + id + srm_fastrand(&polling_seed)%num_user_threads * 4 * sched_group.num_sched;
             for (m = 0; m < num_user_threads; m++, k = (k + num_thread_qps) % sched_group.sqb_cnt)
             {
 
@@ -1146,16 +1147,16 @@ int scheduler_polling(void *sched_data)
                     // }
 
                     // if(sending_case == 0){
-                    //     sending_case == 4;
-                    //     pr_err("should not use user idx and not found wqe\n");
-                    //     break;
+                    //     sending_case = 2;
+                    //     //pr_err("should not use user idx and not found wqe\n");
+                    //     user_threads_idx = srm_fastrand(&polling_seed) % num_user_threads;
+                    //     k = level * sched_group.num_sched + id + user_threads_idx * 4 * sched_group.num_sched;
                     // }
                     // else if (sending_case == 1){
                     //     sending_case = 0;//接下来访问下标表
                     //     user_threads_idx = smp_load_acquire(&user_idx_table[level + 4 * id]);
                     //     k = level * sched_group.num_sched + id + user_threads_idx * 4 * sched_group.num_sched;
                     // }else if(sending_case == 2){
-                    //     level_qp_st_arr[level] = (level_qp_st_arr[level]+1)%num_user_threads;
                     //     k = (k + num_thread_qps) % sched_group.sqb_cnt;
                     // }else if(sending_case == 3){
                     //     //不应该在这里
@@ -1635,13 +1636,13 @@ int scheduler_polling(void *sched_data)
                 break;
 
                 // if(sending_case == 0){
-                //     sending_case == 4;
+                //     sending_case = 4;
                 // }
                 // else if (sending_case == 1){
-                //     level_qp_st_arr[level] = (level_qp_st_arr[level]+1)%num_user_threads;//直接下一个吗？还是允许连续发有限个？
+                //     //level_qp_st_arr[level] = (level_qp_st_arr[level]+1)%num_user_threads;//直接下一个吗？还是允许连续发有限个？
                 //     sending_case = 4;
                 // }else if(sending_case == 2){
-                //     level_qp_st_arr[level] = (level_qp_st_arr[level]+1)%num_user_threads;//直接下一个吗？还是允许连续发有限个？
+                //     //level_qp_st_arr[level] = (level_qp_st_arr[level]+1)%num_user_threads;//直接下一个吗？还是允许连续发有限个？
                 //     sending_case = 4;
                 // }
                 // else if(sending_case == 3){
