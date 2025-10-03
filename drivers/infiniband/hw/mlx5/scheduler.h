@@ -16,6 +16,9 @@ static int debug = 0;
     if (debug) \
     printk
 
+// 5. 缓存行对齐（优化缓存友好性）
+#define CACHELINE_ALIGNED __cacheline_aligned
+
 struct mlx5_ib_cqbuf{
     void* buf;
     struct page** pages;
@@ -26,7 +29,7 @@ struct mlx5_ib_cqbuf{
     int op_own;
     struct mutex lock;
     struct mlx5_ib_cqbuf* next;//not loop
-}__attribute__((aligned(64)));
+}CACHELINE_ALIGNED;
 struct mlx5_ib_sqbuf {
     void* buf;
     struct page** pages;
@@ -40,7 +43,7 @@ struct mlx5_ib_sqbuf {
 
 
     int idx;//该sqb在sched_group中的索引，仅用于debug
-}__attribute__((aligned(64)));
+}CACHELINE_ALIGNED;
 enum test_state
 {
 	IDLE = 1,
@@ -96,7 +99,7 @@ struct mlx5_wqe_info{
     u8 to_user;
     u8 valid;
 };
-struct mlx5_ib_srmc{
+struct mlx5_ib_srmc {
    struct srm_cb ini_cb;
    struct srm_cb tgt_cb;
    union ib_gid dgid;
@@ -107,7 +110,7 @@ struct mlx5_ib_srmc{
    size_t cul_pending_bytes;//next cqe's pending bytes
    int idx;// 该srmc在表中的索引
    int srmc_idx; //该srmc在创建顺序中排第几个(用于分配cq)
-}__attribute__((aligned(64)));
+}CACHELINE_ALIGNED;
 struct mlx5_ib_sched{
     struct task_struct* task;
     struct mutex srmc_lock;
