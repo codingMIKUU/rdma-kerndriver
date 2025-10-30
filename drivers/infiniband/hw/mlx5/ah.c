@@ -112,6 +112,9 @@ int mlx5_ib_create_ah(struct ib_ah *ibah, struct rdma_ah_init_attr *init_attr,
 	struct mlx5_ib_dev *dev = to_mdev(ibah->device);
 	enum rdma_ah_attr_type ah_type = ah_attr->type;
 
+
+	int i;
+
 	if ((ah_type == RDMA_AH_ATTR_TYPE_ROCE) &&
 	    !(rdma_ah_get_ah_flags(ah_attr) & IB_AH_GRH))
 		return -EINVAL;
@@ -147,8 +150,9 @@ int mlx5_ib_create_ah(struct ib_ah *ibah, struct rdma_ah_init_attr *init_attr,
 	{
 		// int idx = sched_hash_ip(grh->dgid.raw+12,sched_group.num_sched);
 		// ibah->srmc_flags = is_xrc_exists(&sched_group.scheds[idx],ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
-		ibah->srmc_flags = is_xrc_exists(&sched_group.scheds[0],ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
-		is_xrc_exists(&sched_group.scheds[1],ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
+		for(i = 0;i<NUM_SCHED;i++){
+			ibah->srmc_flags = is_xrc_exists(&sched_group.scheds[i],ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
+		}
 		DEBUG_LOG("内核srmc_flags: %u\n", ibah->srmc_flags);
 	}
 	create_ib_ah(dev, ah, init_attr);

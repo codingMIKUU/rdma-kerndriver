@@ -93,7 +93,6 @@ static LIST_HEAD(mlx5_ib_dev_list);
  */
 static DEFINE_MUTEX(mlx5_ib_multiport_mutex);
 
-static const int num_sched = 2;
 struct mlx5_ib_sched_group sched_group;
 
 
@@ -5335,7 +5334,7 @@ static int __init mlx5_ib_init(void)
 
 	pr_info("mlx5_ib init\n");
 	//init scheduler
-	ret = mlx5_ib_sched_init(&sched_group,num_sched);
+	ret = mlx5_ib_sched_init(&sched_group,NUM_SCHED);
 	if (ret){
 		pr_err("mlx5_ib_sched_init failed\n");
 	}

@@ -343,7 +343,7 @@ endif
 	install -d $(INSTALL_MOD_PATH)/etc/
 
 
-clean: clean_k
+clean: clean_kernel
 clean_kernel:
 	$(MAKE) -C $(KSRC_OBJ) rm-files= M="$(CWD)" $(WITH_MAKE_PARAMS) clean
 

@@ -3,15 +3,17 @@
         {
             "name": "Linux",
             "includePath": [
-                "/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include",
-                "/home/dell/zxm/linux-headers-5.4.0-86/include",
-                "${workspaceFolder}/**/**/**",
-                "/home/dell/zxm/linux-headers-5.4.0-86/arch/*/include",
+                // 保留原有的系统头文件路径
                 "/usr/src/linux-headers-5.4.0-86-generic/include",
-                "/home/dell/zxm/mlnx-ofed-kernel-24.10.OFED.24.10.1.1.4.1/include/uapi",
-                "/home/dell/zxm/rdma-core/build/include"
+                "/usr/src/linux-headers-5.4.0-86-generic/arch/x86/include",
+                // 添加当前工作区目录（关键）：递归包含所有子目录
+                "${workspaceFolder}/**"
             ],
-            "defines": []
+            "defines": ["__KERNEL__", "MODULE"],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "gnu17",  // 确保与代码标准一致（如内核用gnu17）
+            "cppStandard": "gnu++17",
+            "intelliSenseMode": "linux-gcc-x64"
         }
     ],
     "version": 4

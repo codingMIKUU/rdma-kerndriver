@@ -1,1 +1,0 @@
-cmd_/root/zxm/rdma-kerndriver/compat/build/conftest.ko := ld -r -m elf_x86_64  -z max-page-size=0x200000  --build-id  -T ./scripts/module-common.lds -o /root/zxm/rdma-kerndriver/compat/build/conftest.ko /root/zxm/rdma-kerndriver/compat/build/conftest.o /root/zxm/rdma-kerndriver/compat/build/conftest.mod.o;  true
