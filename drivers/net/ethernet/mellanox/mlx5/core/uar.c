@@ -423,3 +423,54 @@ void mlx5_pcie_print_link_status(struct mlx5_core_dev *dev)
 		       width, width_cap);
 }
 EXPORT_SYMBOL(mlx5_pcie_print_link_status);
+
+/* uar.c 内部 helper：按 uar_index 找对应的 uars_page */
+/* 通过任意 uar_index 找到对应的系统页结构（支持多个 UAR 同页） */
+struct mlx5_uars_page *mlx5_get_uars_page_by_index(struct mlx5_core_dev *mdev,
+                                                   int uar_index)
+{
+    struct mlx5_uars_page *up;
+    int want_sys_idx, have_sys_idx;
+    int shift = PAGE_SHIFT - MLX5_ADAPTER_PAGE_SHIFT; /* 计算一个系统页中 UAR 的个数的 log2 */
+
+    mutex_lock(&mdev->priv.bfregs.reg_head.lock);
+
+    want_sys_idx = MLX5_CAP_GEN(mdev, uar_4k) ? (uar_index >> shift) : uar_index;
+
+    list_for_each_entry(up, &mdev->priv.bfregs.reg_head.list, list) {
+        have_sys_idx = MLX5_CAP_GEN(mdev, uar_4k) ? (up->index >> shift) : up->index;
+        if (have_sys_idx == want_sys_idx) {
+            kref_get(&up->ref_count);
+            mutex_unlock(&mdev->priv.bfregs.reg_head.lock);
+            return up;
+        }
+    }
+
+    mutex_unlock(&mdev->priv.bfregs.reg_head.lock);
+    return NULL;
+}
+EXPORT_SYMBOL(mlx5_get_uars_page_by_index);
+
+/* 计算指定 uar_index 的基地址（针对该 index 对应的具体 UAR 子区域） */
+void __iomem *mlx5_get_uar_base(struct mlx5_core_dev *mdev,
+                                int uar_index, struct mlx5_uars_page **ret_up)
+{
+    struct mlx5_uars_page *up;
+    int shift = PAGE_SHIFT - MLX5_ADAPTER_PAGE_SHIFT;
+    int per_sys = MLX5_CAP_GEN(mdev, uar_4k) ? (1 << shift) : 1;
+    int offset_in_page;
+
+    up = mlx5_get_uars_page_by_index(mdev, uar_index);
+    if (!up)
+        return NULL;
+
+    if (ret_up)
+        *ret_up = up;
+
+    if (per_sys == 1)
+        return up->map; /* 只有一个 UAR */
+
+    offset_in_page = (uar_index & (per_sys - 1)) << MLX5_ADAPTER_PAGE_SHIFT;
+    return up->map + offset_in_page;
+}
+EXPORT_SYMBOL(mlx5_get_uar_base);

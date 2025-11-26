@@ -1946,7 +1946,7 @@ out:
 
 static int ib_uverbs_modify_qp(struct uverbs_attr_bundle *attrs)
 {
-	pr_info("in ib_uverbs_modify_qp\n");
+	//pr_info("in ib_uverbs_modify_qp\n");
 	struct ib_uverbs_ex_modify_qp cmd;
 	int ret;
 

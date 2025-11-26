@@ -344,11 +344,6 @@ struct mlx5_ib_create_qp {
 	};
 	__u32  ece_options;
 	struct  mlx5_ib_create_qp_dci_streams dci_streams;
-	__u32 index_uar_in_page;
-	__u32 index_in_uar;
-	__u32 db_bf_reg_size;
-	__u32 bf_buf_size;
-	__u32 bf_offset;
 	__u16 reserved;
 };
 

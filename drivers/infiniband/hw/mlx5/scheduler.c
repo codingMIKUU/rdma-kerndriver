@@ -30,18 +30,25 @@
 #include <linux/uaccess.h>
 
 #include "mlx5_avl_tree.h"
+#include <linux/mlx5/driver.h>
 
 static uint32_t *user_wqe_table, *user_level_table;
-struct idx_table_entry *user_idx_table[MAX_USER_THREADS_NUM][NUM_SCHED];
-struct hash_table_entry *user_hash_table[MAX_USER_THREADS_NUM][NUM_SCHED]; // 用户态mmap表，表示当前多少个wqe已经下发
-static struct page **user_wqe_pages, **user_level_pages, **user_idx_pages[MAX_USER_THREADS_NUM][NUM_SCHED], **user_hash_pages[MAX_USER_THREADS_NUM][NUM_SCHED];
+struct xrc_table_entry ***user_xrc_table;//三维数组
+// 用户态mmap表，表示当前多少个wqe已经下发
+static struct page **user_wqe_pages, **user_level_pages, **user_xrc_pages;
 uint32_t kernel_wqe_table[NUM_SQB], kernel_level_table[4 * NUM_SCHED]; // 内核态表，表示当前srm qp中内核已发送多少个wqe
-int num_table_qp, num_table_level;
-int hash_entry_num_pb, num_idx_table_entry, num_hash_table_entry, num_hash_table_key;
-int idx_table_cur_post[MAX_USER_THREADS_NUM][NUM_SCHED];
+int num_table_qp, num_table_level,num_xrc_per_srm,num_user_threads, num_xrc_qp;
 
 struct ib_cq *shared_cq[NUM_SCHED][CQ_NUM]; // 每个内核线程一个cq,大小srmc各CQ_NUM个cq
 
+uint16_t tot_xrc_sended_wqes[MAX_USER_THREADS_NUM][NUM_SCHED][MAX_USER_XRC_QP_PER_SRM],
+            cur_xrc_sended_wqes[MAX_USER_THREADS_NUM][NUM_SCHED][MAX_USER_XRC_QP_PER_SRM]; // 统计0~4KB，每个用户线程每个xrc qp发送了多少wqe
+uint64_t lst_xrc_bytes[MAX_USER_THREADS_NUM][NUM_SCHED][MAX_USER_XRC_QP_PER_SRM]; // 0~4KB,记录上次统计时每个xrc qp发送的总字节数
+extern struct mlx5_uars_page *mlx5_get_uars_page_by_index(struct mlx5_core_dev *mdev,
+                                                   int uar_index);
+ 
+
+                                                   
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx)
 {
     DEBUG_LOG("in mlx5_ib_map_ubuf\n");
@@ -71,8 +78,8 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
     uq->qpn = qpn;
     uq->uidx = uidx;
     uq->sq_size = size;
-    uq->wqe_cnt = size / MLX5_SEND_WQE_BB;
-    DEBUG_LOG("sqb->wqe_cnt:%d\n", uq->wqe_cnt);
+    uq->wqe_cnt = size / sizeof(struct srm_qp_entry);//改成srm_qp_entry的大小
+    pr_info("DEBUG: sqb->wqe_cnt:%d\n", uq->wqe_cnt);
     uq->buf = vmap(pages, npages, VM_MAP, PAGE_KERNEL); // map the pages(phys addr) to kernel space（virtual addr），非连续物理页映射到虚拟页
     uq->pages = pages;
     if (!uq->buf)
@@ -86,21 +93,7 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
         return -ENOMEM;
     }
 
-    mutex_lock(&sched_group->cq_lock);
-    for (i = 0; i < sched_group->cqb_cnt; i++)
-    {
-        cqb = sched_group->cqb_arr[i];
-        if (cqb->cqn == cqn)
-        {
-            uq->cqb = cqb;
-            break;
-        }
-    }
-    if (uq->cqb == NULL)
-    {
-        pr_err("cqn %d not found\n", cqn);
-    }
-    mutex_unlock(&sched_group->cq_lock);
+
 
     sched_group->sqb_arr[sched_group->sqb_cnt] = uq;
     uq->idx = sched_group->sqb_cnt; // for debug only
@@ -112,6 +105,44 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
     return 0;
 }
 
+struct mlx5_uars_page *srm_get_user_uars_page(struct mlx5_ib_dev *dev, u32 uar_index)
+{
+    struct mlx5_core_dev *mdev = dev->mdev;
+    struct mlx5_uars_page *up;
+
+    up = mlx5_get_uars_page_by_index(mdev, uar_index);
+    if (!up)
+        return NULL;
+
+    /* 这一页就是和用户共享的那一页：up->index == uar_index */
+    return up;  /* 用完时记得 mlx5_put_uars_page(mdev, up) */
+}
+
+int srm_map_bf(struct mlx5_ib_sched_group *sched_group,struct mlx5_ib_create_qp *ucmd,struct mlx5_ib_dev *dev) {
+    pr_info("DEBUG:in srm_map_bf,ucmd->bfreg_index:%d,ucmd->index_uar_in_page:%d\n",ucmd->bfreg_index,ucmd->index_uar_in_page);
+    
+    int ret ;
+    struct xrc_bf_entry *xrc_bf = kzalloc(sizeof(struct xrc_bf_entry), GFP_KERNEL);
+    u64 kaddr = dev->mdev->bar_addr + ucmd->bfreg_index*PAGE_SIZE;
+    xrc_bf->uar_page_vaddr = ioremap_wc(kaddr, MLX5_ADAPTER_PAGE_SIZE);
+    if(!xrc_bf->uar_page_vaddr){
+        pr_err("DEBUG: ioremap_wc failed\n");
+        ret = -ENOMEM;
+        goto err;
+    }
+    xrc_bf->bf_addr = xrc_bf->uar_page_vaddr
+                        + MLX5_BF_OFFSET
+                        + ucmd->index_in_uar * ucmd->db_bf_reg_size;
+    xrc_bf->bf_size = ucmd->bf_buf_size;
+    xrc_bf->bf_offset = ucmd->bf_offset;;
+    pr_info("DEBUG: bf_addr=%px, bf_size=%d, bf_offset=%d\n", xrc_bf->bf_addr, xrc_bf->bf_size, xrc_bf->bf_offset);
+    sched_group->xrc_bf_arr[sched_group->xrc_bf_cnt++] = xrc_bf;
+    return 0;
+err:
+    kfree(xrc_bf);
+    return -ENOMEM;
+
+}
 int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int cqn)
 {
     DEBUG_LOG("in mlx5_ib_map_cq_ubuf\n");
@@ -900,6 +931,12 @@ static inline uint64_t calc_time(uint64_t start_cycles, uint64_t end_cycles){
     elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
     return elapsed_ns;
 }
+
+void srm_doorbell(struct xrc_bf_entry *bf, uint64_t ctrl){
+    wmb();
+    mlx5_write64((__be32 *)&ctrl, bf->bf_addr + bf->bf_offset);
+    bf->bf_offset ^= bf->bf_size;
+}
 int scheduler_polling(void *sched_data)
 {
     extern struct mlx5_ib_sched_group sched_group;
@@ -1013,7 +1050,10 @@ int scheduler_polling(void *sched_data)
 
     int wqe_cur_idx = 0;
     uint64_t wqe_tot_sz = 4096 * WQES_ARR_SZ;
+    uint64_t wqe_ewma_sz = 4096 * WQES_ARR_SZ;//ewma algo
     uint64_t cur_wqes[WQES_ARR_SZ] = {0};
+    uint64_t alpha_a = 1;
+    uint64_t alpha_b = 4; // ewma系数为1/4
     for (i = 0; i < WQES_ARR_SZ; i++)
     {
         cur_wqes[i] = 4096;
@@ -1029,7 +1069,7 @@ int scheduler_polling(void *sched_data)
     uint64_t polling_seed;
     polling_seed = 0xdeadbeef;
     uint32_t user_table_val, kernel_table_val, user_level_val;
-    int num_user_threads = 0, num_thread_qps, per_thread_qp_nums;
+    int num_thread_qps, per_thread_qp_nums;
 
     int ten_level, hund_level;
     int skip_level_arr[4] = {-1, -1, -1, -1}; // 0~4KB,4~10KB,10~100KB,>100KB
@@ -1058,7 +1098,7 @@ int scheduler_polling(void *sched_data)
             continue;
         }
 
-        num_user_threads = num_table_qp / (4 * sched_group.num_sched);
+        
         num_thread_qps = 4 * sched_group.num_sched;                       // 用户态每个线程有多少个qp
         per_thread_qp_nums = sched_group.sqb_cnt / sched_group.num_sched; // 内核态每个调度器有多少个qp
         // pr_info("num_user_threads:%d\n", num_user_threads);
@@ -1093,6 +1133,7 @@ int scheduler_polling(void *sched_data)
         //     printk(KERN_INFO "用户态sq切换开销elapsed_time0 = %llu ns\n", elapsed_time0);
         // }
 
+        //target_sz = wqes_limit_sz - wqe_ewma_sz;
         target_sz = wqes_limit_sz - (wqe_tot_sz - cur_wqes[wqe_cur_idx]);
         if (target_sz <= 0)
         {
@@ -1119,68 +1160,7 @@ int scheduler_polling(void *sched_data)
         tfree = 1;
         for (l = 0; l < 4; l++)
         {
-            // // 每等级遍历时，先poll cqe
-            // pre_srmc = pre_srmcs[polling_tail];
-            // pre_srmcs[polling_tail] = NULL;
-            // if (pre_srmc)
-            // {
-            //     polling_tail = (polling_tail + 1) & (SRMC_POLLING_CNT - 1);
-            //     // ret = srm_poll_srmc_once_debug(pre_srmc, wc, cqe, filp, &pos, buf, &start_cycles_cq, &end_cycles_cq,free_cqe_idx,&free_cqe_cnt); // 文件
-            //     ret = srm_poll_srmc_once(pre_srmc, wc, cqe, free_cqe_idx, &free_cqe_cnt);
-            //     if (pre_srmc->sig_cnt)
-            //     {
-            //         // 这次没poll完
-            //         if (unlikely(pre_srmcs[polling_head] != NULL))
-            //         {
-            //             pr_info("cq polling queue exceed queue length\n");
-            //             // 此时polling队列满，必须poll完
-            //             while (pre_srmc->sig_cnt)
-            //             {
-            //                 srm_poll_srmc_once(pre_srmc, wc, cqe, free_cqe_idx, &free_cqe_cnt);
-            //             }
-            //             in_queue[pre_srmc->srmc_idx % (CQ_NUM)] = 0;
-            //         }
-            //         else if (unlikely(pre_srmc->sig_cnt >= SQ_DEPTH || (int)(pre_srmc->ini_cb.qp->sq.head - pre_srmc->ini_cb.qp->sq.tail) >= pre_srmc->ini_cb.qp->sq.max_post))
-            //         {
-            //             if (pre_srmc->sig_cnt >= SQ_DEPTH)
-            //                 pr_info("cq queue exceed SQ_DEPTH\n");
-            //             else
-            //             {
-            //                 pr_info("exceed max_post,sq.head:%d, sq.tail:%d,max_post:%d",
-            //                         pre_srmc->ini_cb.qp->sq.head, pre_srmc->ini_cb.qp->sq.tail, pre_srmc->ini_cb.qp->sq.max_post);
-            //             }
-            //             // cqe队列满或者sq队列满，必须poll到一个以上,让sig_cnt小于SQ_DEPTH
-            //             while (pre_srmc->sig_cnt >= SQ_DEPTH || pre_srmc->ini_cb.qp->sq.head - pre_srmc->ini_cb.qp->sq.tail >= pre_srmc->ini_cb.qp->sq.max_post)
-            //             {
-            //                 srm_poll_srmc_once(pre_srmc, wc, cqe, free_cqe_idx, &free_cqe_cnt);
-            //             }
-            //             if (!pre_srmc->sig_cnt)
-            //             {
-            //                 // poll完
-            //                 in_queue[pre_srmc->srmc_idx % (CQ_NUM)] = 0;
-            //             }
-            //             else
-            //             {
-            //                 // 没poll完，重新加入队列
-            //                 pre_srmcs[polling_head] = pre_srmc;
-            //                 polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
-            //             }
-            //         }
-            //         else
-            //         {
-            //             // 重新加入队列
-            //             pre_srmcs[polling_head] = pre_srmc;
-            //             polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
-            //         }
-            //     }
-            //     else
-            //     {
-            //         // poll完了，出队
-            //         in_queue[pre_srmc->srmc_idx & (CQ_NUM-1)] = 0;
-            //     }
-            // }
-            poll_srmc_inline(pre_srmcs, &polling_tail, &polling_head, in_queue, wc, cqe, free_cqe_idx, &free_cqe_cnt, id, srmc);
-
+           
             level = polling_order[order_idx][l];
             // if (level >= 1 && skip_level_arr[level] >= 0)
             // {
@@ -1235,23 +1215,7 @@ int scheduler_polling(void *sched_data)
                 continue;
             }
 
-            // if(level_owqe_cnt_arr[level] != level_wqe_cnt){
-            //     if(level_owqe_cnt_arr[level] == 0){
-            //         //在上一次遍历时该等级没有wqe，则直接用下标表
-            //         user_threads_idx = smp_load_acquire(&user_idx_table[level + 4 * id]);
-            //         sending_case = 0;
-            //     }
-            //     else{
-            //         //上次遍历有wqe，则先用顺序遍历的下标，空转再用下标表，防止饥饿问题
-            //         user_threads_idx = srm_fastrand(&polling_seed) % num_user_threads;
-            //         sending_case = 1;
-            //     }
-            // }
-            // else {
-            //     //wqe个数相较于上一次没有变化，直接使用上次下标
-            //     user_threads_idx = srm_fastrand(&polling_seed) % num_user_threads;
-            //     sending_case = 2;
-            // }
+
 
             // // 插入获取屏障：确保读取b后，c的最新值已可见
             // smp_rmb();  // 读内存屏障，阻止读重排
@@ -1261,14 +1225,7 @@ int scheduler_polling(void *sched_data)
             for (m = 0; m < num_user_threads;
                  m++, k = (k + num_thread_qps) % (sched_group.sqb_cnt))//时延线程需改
             {
-                // if(m == 0){
-                //     user_thread_idx = 16;
-                //     k = level * sched_group.num_sched + id + user_thread_idx * num_thread_qps;
-                // }else if(m==1){
-                //     user_thread_idx = srm_fastrand(&polling_seed) % 16;
-                //     k = level * sched_group.num_sched + id + user_thread_idx * num_thread_qps;
-                // }
-                // n = polling_order[order_idx][l] * num_user_threads + k / 6;
+
                 n = user_thread_idx + level * num_user_threads + id_mul_per_thread_qp_nums;
 
                 user_table_val = smp_load_acquire(&user_wqe_table[n]);
@@ -1339,7 +1296,7 @@ int scheduler_polling(void *sched_data)
                     // }
 
                     user_thread_idx++;
-                    if (user_thread_idx >= num_user_threads)//时延线程提前需改
+                    if (user_thread_idx >= num_user_threads)//如果时延线程提前,需改
                     {
                         user_thread_idx = 0;
                     }
@@ -1355,637 +1312,112 @@ int scheduler_polling(void *sched_data)
 
                 idx_queue_cnt = 0;
                 //uint64_t elapsed_ns0,elapsed_ns1,elapsed_ns2,elapsed_ns3,elapsed_ns4,elapsed_ns5;
+
+
                 
                 if (level == 0)
                 {
-                    int hash_cur_post, idx_cur_post;
-
-                    //start_cycles = rdtsc();
-                    for (; !kthread_should_stop();)
-                    {
-                        uint32_t idx_valid = smp_load_acquire(&user_idx_table[user_thread_idx][id][idx_table_cur_post[user_thread_idx][id]].valid);
-
-                        if (!idx_valid)
-                        {
-                            idx_table_cur_post[user_thread_idx][id] = (idx_table_cur_post[user_thread_idx][id] + 1) % num_idx_table_entry;
+                    for(;!kthread_should_stop();){
+                        if(user_table_val==kernel_wqe_table[n])
+                            break;
+                        struct srm_qp_entry *qp_entry = (struct srm_qp_entry *)sqb->buf + (sqb->cur_post & (sqb->wqe_cnt - 1));
+                        uint32_t srm_qp_valid = smp_load_acquire(&qp_entry->valid);
+                        if(!srm_qp_valid){
+                            pr_err("level = 0,qp entry is invalid. k:%d, sqb->cur_post:%u,user_thread_idx:%d, user_wqe_table:%u, user_kernel_table:%u\n",k, sqb->cur_post, user_thread_idx,user_wqe_table[n], kernel_wqe_table[n]);
+                            goto err;
+                        }
+                        int xrc_qp_idx = qp_entry->qp_idx;
+                        
+                        if(tot_xrc_sended_wqes[user_thread_idx][id][xrc_qp_idx] != cur_xrc_sended_wqes[user_thread_idx][id][xrc_qp_idx]){
+                            //代表当前的srm qp entry对应的wqe已经doorbell了，直接++
+                            cur_xrc_sended_wqes[user_thread_idx][id][xrc_qp_idx]++;
+                            sqb->cur_post++;
+                            smp_store_release(&qp_entry->valid, 0); // 置0表示该wqe已被调度器取走
+                            //pr_info("sended wqe,skip\n");
+                            kernel_wqe_table[n]++;
+                            kernel_level_table[level + level_table_bias]++;
                             continue;
                         }
-                        //end_cycles = rdtsc();
-                        //elapsed_ns0 = calc_time(start_cycles,end_cycles);
 
 
-                        //start_cycles = rdtsc();
-                        hash_cur_post = user_idx_table[user_thread_idx][id][idx_table_cur_post[user_thread_idx][id]].hash_table_idx;
-                        //end_cycles = rdtsc();
 
-                        //elapsed_ns1 = calc_time(start_cycles,end_cycles);
+                        //接下来一次doorbell xrc qp中的多个wqe
+                        uint64_t xrc_ctrl = smp_load_acquire(&user_xrc_table[user_thread_idx][id][xrc_qp_idx].ctrl);
+                        uint64_t xrc_tot_bytes = smp_load_acquire(&user_xrc_table[user_thread_idx][id][xrc_qp_idx].tot_bytes) - lst_xrc_bytes[user_thread_idx][id][xrc_qp_idx];
                         
-                        // if(hash_cur_post >= num_hash_table_entry){
-                        //     pr_err("hash_cur_post>=num_hash_table_entry,hash_cur_post:%d\n",hash_cur_post);
-                        //     goto err;
-                        // }
-                        // pr_info("user_thread_idx:%d,sched_id:%d,idx_cur_post:%d,hash_cur_post:%d\n",user_thread_idx,id, idx_table_cur_post[user_thread_idx][id],hash_cur_post);
+                        lst_xrc_bytes[user_thread_idx][id][xrc_qp_idx] += xrc_tot_bytes;
+
+                        uint32_t opmod_idx_opcode = be32_to_cpu((uint32_t)xrc_ctrl);
+                        uint16_t new_tot_wqes = ((opmod_idx_opcode>>8) & 0xffff) + 1;
+                        uint16_t delta = new_tot_wqes - tot_xrc_sended_wqes[user_thread_idx][id][xrc_qp_idx];
+                        kernel_wqe_table[n]++;
+                        kernel_level_table[level + level_table_bias]++;
+                        tot_xrc_sended_wqes[user_thread_idx][id][xrc_qp_idx] = new_tot_wqes;//ctrl里的是当前的，需要+
+                        cur_xrc_sended_wqes[user_thread_idx][id][xrc_qp_idx]++;
+                        sqb->cur_post++;
+                        srm_doorbell(sched_group.xrc_bf_arr[user_thread_idx*NUM_SCHED*4*num_xrc_per_srm
+                                        + (4*id+level)*num_xrc_per_srm + xrc_qp_idx],
+                                    xrc_ctrl);
                         
-                        //start_cycles = rdtsc();
-                        idx_table_cur_post[user_thread_idx][id] = (idx_table_cur_post[user_thread_idx][id] + 1) % num_idx_table_entry;
-                        //end_cycles = rdtsc();
+                        wqe_tot_sz -= cur_wqes[wqe_cur_idx];
+                        wqe_tot_sz += xrc_tot_bytes;
+                        cur_wqes[wqe_cur_idx] = xrc_tot_bytes;
+                        wqe_cur_idx = (wqe_cur_idx + 1) % WQES_ARR_SZ;
 
-                        //elapsed_ns2 = calc_time(start_cycles,end_cycles);
+                        smp_store_release(&qp_entry->valid, 0); // 置0表示该wqe已被调度器取走
 
-                        // t_cnt_idx++;
-                        // if(t_cnt_idx%10000 == 0)
-                        //     pr_info("in idx_table, ns0:%llu,ns1:%llu,ns2:%llu\n",elapsed_ns0,elapsed_ns1,elapsed_ns2);
+
+                        // pr_info("DEBUG: xrc_tot_bytes %d, new_tot_wqes %d, user_thread_idx %d, xrc_qp_idx %d, xrc_ctrl:%llu， cur_xrc_sended_wqes:%hu," 
+                        //         "k:%d,sqb->cur_post:%d\n",
+                        //      (uint32_t)xrc_tot_bytes, new_tot_wqes, user_thread_idx, xrc_qp_idx, xrc_ctrl,
+                        //       cur_xrc_sended_wqes[user_thread_idx][id][xrc_qp_idx],k, sqb->cur_post);
+                        
+                        send_ok = 1;
                         break;
-                    }
-
-                    int fst_hash_entry = 1;
-                    uint32_t cnt_hash = 0;
-
-                    //start_cycles = rdtsc();
-                    for (; idx_queue_cnt < aggr_limit && !kthread_should_stop();)
-                    {
-                        // 聚合直到没有元素了
-                        uint32_t hash_valid = smp_load_acquire(&user_hash_table[user_thread_idx][id][hash_cur_post].valid);
-                        if (hash_valid == -1 || hash_valid == 0)
-                        {
-                            if (fst_hash_entry)
-                            {
-                                cnt_hash++;
-                                if (cnt_hash % 1000000 == 0)
-                                    pr_err("err:fst hash entry should be valid ,but not. idx_table_idx:%d\n", user_hash_table[user_thread_idx][id][hash_cur_post].idx_table_idx);
-                                continue;
-                            }
-                            else
-                                break;
-                        }
-                        //end_cycles = rdtsc();
-                        //elapsed_ns0 = calc_time(start_cycles,end_cycles);
                         
-                        fst_hash_entry = 0;
-
-                        //start_cycles = rdtsc();
-                        idx_cur_post = user_hash_table[user_thread_idx][id][hash_cur_post].idx_table_idx;
-                        //end_cycles = rdtsc();
-                        //elapsed_ns1 = calc_time(start_cycles,end_cycles);
-
-
-                        // if(idx_queue_cnt>=1024){
-                        //     pr_err("idx_queue_cnt>=1024\n");
-                        //     msleep(10000);
-                        //     break;
-                        // }
-
-                        //start_cycles = rdtsc();
-                        wqe_idx_queue[idx_queue_cnt++] = user_idx_table[user_thread_idx][id][idx_cur_post].wqe_idx; // kk
-
-                        //end_cycles = rdtsc();
-                        //elapsed_ns2 = calc_time(start_cycles,end_cycles);
-                        // if(user_idx_table[user_thread_idx][id][idx_cur_post].wqe_idx >=(sqb->wqe_cnt)){
-                        //     pr_err("err:wqe_idx > wqe_cnt,wqe_idx:%d\n",wqe_idx_queue[idx_queue_cnt-1]);
-                        //     goto err;
-                        // }
-                        // pr_info("valid hash_cur_post:%d,wqe idx:%d\n",hash_cur_post,user_idx_table[user_thread_idx][id][idx_cur_post].wqe_idx);
-                        //start_cycles = rdtsc();
-                        smp_store_release(&user_hash_table[user_thread_idx][id][hash_cur_post].valid, 0);
-                        smp_store_release(&user_idx_table[user_thread_idx][id][idx_cur_post].valid, 0);
-                        // end_cycles = rdtsc();
-                        //elapsed_ns3 = calc_time(start_cycles,end_cycles);
-
-
-                        // t_cnt_hash++;
-                        // if(t_cnt_hash%10000 == 0)
-                        //     pr_info("in hash table,ns0:%llu,ns1:%llu,ns2:%llu,ns3:%llu\n",elapsed_ns0,elapsed_ns1,elapsed_ns2,elapsed_ns3);
-
-                        //start_cycles =rdtsc();
-                        hash_cur_post++;
-                        if (hash_cur_post % hash_entry_num_pb == 0)
-                            hash_cur_post -= hash_entry_num_pb;
                     }
+                    
                 }
                 else
                 {
-                    wqe_idx_queue[idx_queue_cnt++] = sqb->cur_post & (sqb->wqe_cnt - 1);
+                    struct srm_qp_entry *qp_entry = (struct srm_qp_entry *)sqb->buf + (sqb->cur_post & (sqb->wqe_cnt - 1));
+                    uint32_t srm_qp_valid = smp_load_acquire(&qp_entry->valid);
+                    if(!srm_qp_valid){
+                        pr_err("level > 0, qp entry is invalid\n");
+                        goto err;
+                    }
+                    int xrc_qp_idx = qp_entry->qp_idx;
+                    smp_store_release(&qp_entry->valid, 0); // 置0表示该wqe已被调度器取走
+                    
+                    uint64_t xrc_ctrl = qp_entry->ctrl;
+                    uint64_t cur_bytes = qp_entry->bytes;
                     sqb->cur_post++;
-                }
-
-                int idx_queue_cur;
-                uint64_t tot_length = 0;
-
-                //start_cycles = rdtsc();
-                for (idx_queue_cur = 0; idx_queue_cur < idx_queue_cnt; idx_queue_cur++)
-                {
-                    // if(level == 1 && sending_case == 2){
-                    //     //这种情况需要排空wqe
-                    //     wqe_cnt = user_table_val - kernel_table_val;
-                    //     sending_case = 3;
-                    // }
-
-                    uidx = wqe_idx_queue[idx_queue_cur];
-                    uctrl = useg = (sqb->buf + (uidx << 6)); // 64B的wqe
-                    imm = smp_load_acquire(&uctrl->imm);     // 内存屏障，为1表示有wr
-                    if (unlikely(!imm))
-                    {
-                        // DEBUG_LOG("imm is 0\n");
-                        // tfree = 1;
-                        // if(id == 0){
-                        //     cnt++;
-                        //     if(cnt>10){
-                        //         pr_info("stuck in 1\n");
-                        //         cnt = 0;
-                        //     }
-                        // }
-
-                        //                 // 文件
-                        //                 /* 3. 写数据 */
-                        //                 len = scnprintf(buf, 128, "imm = 0, k:%d,target_size:%lld,idx for table:%d,user_table_val:%u,"
-                        //                     "kernel_table_val_:%u\n", k, target_sz,n,user_table_val,kernel_table_val);
-                        // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-                        //                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-                        //                 ret = kernel_write(filp, buf, len, &pos);
-                        // #else
-                        //                 ret = vfs_write(filp, buf, len, &pos);
-                        // #endif
-                        //                 if (ret < 0)
-                        //                     pr_err("write_int_to_file: write error %d\n", ret);
-
-                        pr_err("imm should not be zero\n");
-                        msleep(10);
-                        continue;
-                    }
-
-                    //                 end_time0 = rdtsc();
-                    //                 elapsed_time0 = (end_time0 - start_time0)*1000000000 / cpu_frequency_hz;
-                    //                 start_time0 = rdtsc();
-
-                    // if(sched_hash_ip((char*)&imm, sched_group.num_sched) != id){
-                    //     //DEBUG_LOG("id is not equal, id is %d\n",id);
-                    //     // if(id == 0){
-                    //     //     cnt2++;
-                    //     //     if(cnt2>10){
-                    //     //         pr_info("stuck in 2\n");
-                    //     //         cnt2 = 0;
-                    //     //     }
-                    //     // }
-                    //     break;
-                    // }
-                    // 192.168.1.x
-                    //             if (id != ((imm >> 24) & 0xFF)) // 判断WR是否属于当前调度器
-                    //             {
-                    //                 //                      len = scnprintf(buf, 64, "%d %d %d %llu\n", 2, 2, sqb->qpn, 2);
-                    //                 // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-                    //                 //                     /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-                    //                 //                     ret = kernel_write(filp, buf, len, &pos);
-                    //                 // #else
-                    //                 //                     ret = vfs_write(filp, buf, len, &pos);
-                    //                 // #endif
-                    //                 //                     if (ret < 0)
-                    //                 //                         pr_err("write_int_to_file: write error %d\n", ret);
-
-                    // //                 // 文件
-                    // //                 /* 3. 写数据 */
-                    // //                 len = scnprintf(buf, 128, "not this thread,k:%d,"
-                    // //                     "total srm qp:%d,target_sz:%lld\tuser_wqe_table for n %d:%d,kern_wqe_table:%d\n", k,
-                    // //                     sched_group.sqb_cnt, target_sz,n, user_table_val, kernel_table_val);
-                    // // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-                    // //                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-                    // //                 ret = kernel_write(filp, buf, len, &pos);
-                    // // #else
-                    // //                 ret = vfs_write(filp, buf, len, &pos);
-                    // // #endif
-                    // //                 if (ret < 0)
-                    // //                     pr_err("write_int_to_file: write error %d\n", ret);
-
-                    //                 continue;
-                    //             }
-
-                    // 我觉得还是要开这个，调度更公平
-                    // if (sched_size > SCHED_SIZE_LIMIT)
-                    // {
-                    //     DEBUG_LOG("sched once\n");
-                    //     break;
-                    // }
-
-                    kernel_wqe_table[n]++; // 取消了store_release，会不会更快？
-                    smp_store_release(&uctrl->imm, 0);
-
-                    DEBUG_LOG("uidx:%d\n", uidx);
-
-                    // imm = (imm & 0x00FFFFFF) | (1 << 24); //将1放在imm的高8位
-                    rd = ((uint16_t *)(&imm))[1]; // 从用户态获取选取的内核qp次序
-                    // if(rd >= num_kqps){
-                    //     pr_err("rd > num_kqps,rd:%d\n",rd);
-                    //     goto err;
-                    // }
-                    // pr_info("rd:%d\n", rd);       // For DEBUG
-                    ((char *)(&imm))[2] = 1;
-                    ((char *)(&imm))[3] = 1;
-                    memcpy(gid.raw + 12, &imm, 4);
-                    // gid.raw[15] = 1;
-
-                    DEBUG_LOG("found wr's gid.interface_id:%llx,subnet_prefix:%llx\n", gid.global.interface_id, gid.global.subnet_prefix);
-
-                    useg += sizeof(struct mlx5_wqe_ctrl_seg);
-                    uxrc = (struct mlx5_wqe_xrc_seg *)useg;
-                    useg += sizeof(struct mlx5_wqe_xrc_seg);
-                    uraddr = (struct mlx5_wqe_raddr_seg *)useg;
-                    useg += sizeof(struct mlx5_wqe_raddr_seg);
-                    udata = (struct mlx5_wqe_data_seg *)useg;
-
-                    length = ntohl(udata->byte_count);
-                    tot_length += length;
-                    DEBUG_LOG("length:%d\n", length);
-
-                    // pr_info("sending wqes,k:%d,length:%d,total srm qp:%d,target_sz:%d\n", k, length, sched_group.sqb_cnt, target_sz);
-                    // pr_info("user_wqe_table for n %d:%d,kern_wqe_table:%d\n", n, user_wqe_table[n], kernel_wqe_table[n]);
-
-                    // end_cycles = rdtsc();
-                    // elapsed_cycles = end_cycles - start_cycles;
-                    // elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
-                    // start_cycles = rdtsc();
-
-                    //                 // 文件
-                    //                 /* 3. 写数据 */
-                    //                 len = scnprintf(buf, 256, "sending wqes,k:%d,"
-                    //                                           "length:%d,total srm qp:%d,target_sz:%lld\tuser_wqe_table for n %d:%d,kern_wqe_table:%d,kern_wqe_val:%d,elapsed_ns:%llu\n",
-                    //                                 k, length,
-                    //                                 sched_group.sqb_cnt, target_sz, n, user_table_val, kernel_wqe_table[n], kernel_table_val, elapsed_ns);
-                    // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-                    //                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-                    //                 ret = kernel_write(filp, buf, len, &pos);
-                    // #else
-                    //                 ret = vfs_write(filp, buf, len, &pos);
-                    // #endif
-                    //                 if (ret < 0)
-                    //                     pr_err("write_int_to_file: write error %d\n", ret);
-
-                    hash_id = sched_hash_ip((char *)&imm, NUM_SRMC); // 查找目标SRMC
-                    found = 0;
-
-                    // // 时延线程在第17个
-                    // if (k != 16){
-                    //     //rd = prandom_u32_max(num_kqps - 1);
-                    //     rd = srm_fastrand(&srm_seed)%(num_kqps-1);
-                    // }
-                    // else{
-                    //     rd = num_kqps - 1;
-                    //     //pr_info("lat thread length:%d\n",length);
-                    // }
-                    // rd = srm_fastrand(&srm_seed) & (num_kqps-1);//TODO:优化随机数
-
-                    for (i = 0; i < NUM_SRMC; i++)
-                    {
-                        j = (i + hash_id) & (NUM_SRMC - 1);
-                        srmc = (length > MESSAGE_SIZE_THRESHOLD ? sched->srmc_large_tb[j] : sched->srmc_small_tb[j]);
-                        if (unlikely(srmc == NULL))
-                        {
-                            pr_err("Unexpected:No srmc found for this wr\n");
-                            goto err;
-                        }
-                        if (memcmp(srmc->dgid.raw, gid.raw, sizeof(srmc->dgid.raw)) == 0)
-                        {
-                            DEBUG_LOG("found srmc,gid.interface_id:%llx,subnet_prefix:%llx\n", srmc->dgid.global.interface_id, srmc->dgid.global.subnet_prefix);
-                            if (!srmc->ini_cb.qp)
-                            {
-                                pr_err("Unexpected:ini qp for this srmc is NULL\n");
-                                goto err;
-                            }
-                            found = 1;
-                            j = (j + rd) % NUM_SRMC; // 随机选择一个srmc
-                            srmc = (length > MESSAGE_SIZE_THRESHOLD ? sched->srmc_large_tb[j] : sched->srmc_small_tb[j]);
-                            break;
-                        }
-                    }
-                    if (unlikely(!found))
-                    {
-                        pr_err("Unexpected:No srmc found for this wr\n");
-                        goto err;
-                    }
-
-                    srmc->cul_pending_bytes += length;
-                    // sched_size += length;
-                    srmc->pending_bytes += length;
-                    tfree = 0;
-
-                    qp = srmc->ini_cb.qp;
-                    spin_lock_irqsave(&qp->sq.lock, flags);
-                    next_fence = 0;
-                    fence = qp->next_fence;
-
-                    if (unlikely(mlx5r_wq_overflow(&qp->sq, idx_queue_cur, qp->ibqp.send_cq)))
-                    {
-                        pr_err("sq overflow\n");
-                        spin_unlock_irqrestore(&qp->sq.lock, flags);
-                        goto err;
-                    }
-
-                    idx = qp->sq.cur_post & (qp->sq.wqe_cnt - 1);
-                    DEBUG_LOG("srmc qp's wqe_cnt:%d\n", srmc->ini_cb.qp->sq.wqe_cnt);
-                    ctrl = seg = mlx5_frag_buf_get_wqe(&qp->sq.fbc, idx);
-                    memcpy(ctrl, uctrl, sizeof(struct mlx5_wqe_ctrl_seg));
-                    ctrl->imm = 0;
-
-                    seg += sizeof(struct mlx5_wqe_ctrl_seg);
-                    // fence不管，可以吗?
-                    qp->sq.wr_data[idx] = 0;
-                    cur_edge = qp->sq.cur_edge;
-
-                    xrc = (struct mlx5_wqe_xrc_seg *)seg;
-                    memcpy(xrc, uxrc, sizeof(struct mlx5_wqe_xrc_seg));
-                    seg += sizeof(struct mlx5_wqe_xrc_seg);
-                    raddr = (struct mlx5_wqe_raddr_seg *)seg;
-                    memcpy(raddr, uraddr, sizeof(struct mlx5_wqe_raddr_seg));
-                    raddr->reserved = 0;
-                    seg += sizeof(struct mlx5_wqe_raddr_seg);
-                    data = (struct mlx5_wqe_data_seg *)seg;
-                    // handle_post_send_edge(&qp->sq, &seg, size,
-                    //     &cur_edge);//应该不需要？
-                    memcpy(data, udata, sizeof(struct mlx5_wqe_data_seg));
-                    seg += sizeof(struct mlx5_wqe_data_seg);
-
-                    qp->next_fence = next_fence;
-                    ctrl->opmod_idx_opcode = be32_to_cpu(ctrl->opmod_idx_opcode);
-                    mlx5_opcode = ctrl->opmod_idx_opcode & 0xFF;   // 低 8 位是 mlx5_opcode
-                    opmod = (ctrl->opmod_idx_opcode >> 24) & 0xFF; // 高 8 位是 opmod
-
-                    ctrl->opmod_idx_opcode = cpu_to_be32(((u32)(qp->sq.cur_post) << 8) |
-                                                         mlx5_opcode | ((u32)opmod << 24));
-                    ctrl->qpn_ds = cpu_to_be32((be32_to_cpu(ctrl->qpn_ds) & 0xFF) |
-                                               (qp->trans_qp.base.mqp.qpn << 8));
-                    ctrl->fm_ce_se |= fence;
-                    ctrl->fm_ce_se |= qp->sq_signal_bits;
-
-                    DEBUG_LOG("ctrl->fe_ce_se:%d,sq's signaled bits:%d\n", ctrl->fm_ce_se, qp->sq_signal_bits);
-                    DEBUG_LOG("qp's fence:%d\n", qp->next_fence);
-                    if ((ctrl->fm_ce_se & MLX5_WQE_CTRL_CQ_UPDATE))
-                    {
-                        to_user = 1;
-                    }
-                    else
-                    {
-                        to_user = 0;
-                        if ((int)(qp->sq.head - qp->sq.tail + 1) >= qp->sq.max_post)
-                        {
-                            // 当前wqe发完之后该内核qp就满了
-                            ctrl->fm_ce_se |= MLX5_WQE_CTRL_CQ_UPDATE;
-                            // pr_info("insert kernel cqe\n");
-                        }
-                    }
-                    sig = ctrl->fm_ce_se & MLX5_WQE_CTRL_CQ_UPDATE;
-
-                    if (sig)
-                    {
-                        if (free_cqe_cnt <= 0)
-                        {
-                            pr_err("free_cqe_cnt <= 0, cq exceed\n");
-                            goto err;
-                        }
-                        uidx = free_cqe_idx[--free_cqe_cnt];
-                        qp->sq.wrid[idx] = uidx;
-                    }
-
-                    qp->sq.w_list[idx].opcode = mlx5_opcode;
-                    qp->sq.wqe_head[idx] = qp->sq.head + idx_queue_cur;
-                    qp->sq.cur_post++;
-                    qp->sq.w_list[idx].next = qp->sq.cur_post;
-
-                    qp->sq.cur_edge = (unlikely(seg == cur_edge)) ? get_sq_edge(&qp->sq, qp->sq.cur_post &
-                                                                                             (qp->sq.wqe_cnt - 1))
-                                                                  : cur_edge;
-
-                    DEBUG_LOG("rdma_wr.wr.wr_id:%llu\n", qp->sq.wrid[idx]);
-                    // TODO:cur_edge
-
-                    // ring doorbell
-                    if(idx_queue_cur == idx_queue_cnt - 1)
-                        mlx5r_ring_db(qp, idx_queue_cnt, ctrl);
-                    // print_wqe_info(ctrl, sizeof(struct mlx5_wqe_ctrl_seg) +
-                    //  sizeof(struct mlx5_wqe_xrc_seg) +
-                    //  sizeof(struct mlx5_wqe_raddr_seg) +
-                    //   sizeof(struct mlx5_wqe_data_seg));
-                    spin_unlock_irqrestore(&qp->sq.lock, flags);
-
-                    // // 文件
-                    // wqe_sending_target_cnt--;
-                    // if (wqe_sending_target_cnt == 0)
-                    // {
-                    //     wqe_sending_target_cnt = 10240;
-                    //     len = scnprintf(buf, 256, "sending %llu wqes,skip time for 10KB:%llu,100KB:%llu,empty rolling for 10KB:%llu, for 100KB:%llu.\n",
-                    //                     wqe_sending_target_cnt, skip_cnt10, skip_cnt100, empty_rolling10, empty_rolling100);
-                    //     ret = vfs_write(filp, buf, len, &pos);
-                    //     if (ret < 0)
-                    //         pr_err("write_int_to_file: write error %d\n", ret);
-                    //     skip_cnt10 = 0;
-                    //     skip_cnt100 = 0;
-                    //     empty_rolling10 = 0;
-                    //     empty_rolling100 = 0;
-                    // }
-
-                    if (sig)
-                    {
-                        cq_idx = srmc->srmc_idx & (CQ_NUM - 1);
-                        if (!in_queue[cq_idx])
-                        {
-                            if (unlikely(pre_srmcs[polling_head] != NULL))
-                            {
-                                pre_srmc = pre_srmcs[polling_tail];
-                                pre_srmcs[polling_tail] = NULL;
-                                polling_tail = (polling_tail + 1) % SRMC_POLLING_CNT;
-                                pr_info("err:exceed queue length\n");
-                                // 此时队列满，必须poll到,此时head = (tail-1+polling_cnt)%polling_cnt
-                                while ((ret = srm_poll_srmc_once(pre_srmc, wc, cqe, free_cqe_idx, &free_cqe_cnt)) != -1)
-                                {
-                                    ;
-                                }
-                                in_queue[pre_srmc->srmc_idx % (CQ_NUM)] = 0;
-                            }
-
-                            if (cq_srmc_tb[cq_idx] == NULL)
-                                cq_srmc_tb[cq_idx] = srmc;
-
-                            pre_srmcs[polling_head] = cq_srmc_tb[cq_idx];
-                            polling_head = (polling_head + 1) & (SRMC_POLLING_CNT - 1);
-                            in_queue[cq_idx] = 1;
-                        }
-
-                        pre_srmc = cq_srmc_tb[cq_idx];
-                        if (unlikely(pre_srmc == NULL))
-                        {
-                            pr_err("pre_srmc is null\n");
-                        }
-
-                        DEBUG_LOG("send signaled\n");
-                        pre_srmc->wqe_infos[uidx].qpn = sqb->qpn;
-                        pre_srmc->wqe_infos[uidx].wqe_counter = wqe_idx_queue[idx_queue_cur]; // 当前cur_post提前++了，所以减1
-                        pre_srmc->wqe_infos[uidx].pending_bytes = pre_srmc->cul_pending_bytes;
-                        pre_srmc->wqe_infos[uidx].sqb = sqb;
-                        pre_srmc->wqe_infos[uidx].to_user = to_user;
-                        pre_srmc->wqe_infos[uidx].byte_cnt = length;
-                        pre_srmc->wqe_infos[uidx].valid = 1;
-                        pre_srmc->sig_cnt++;
-                        // pre_srmc->cur_cqe++;
-                        pre_srmc->cul_pending_bytes = 0;
-
-                        // pr_info("sig_cnt++,now sig_cnt:%d\n", pre_srmc->sig_cnt);
-                    }
-
-                    // pr_info("send finished,length:%d\n",length);
-
-                    // atomic_inc(&kernel_wqe_table[n]); // 同样提前，在cur_post++之前，以防线程认为还有wqe但找不到的情况
-                    // sqb->cur_post++;       // 可以提前，更加快
-                    send_ok = 1;
-
-                    // // 每发一个wqe再polling一次
-                    // pre_srmc = pre_srmcs[polling_tail];
-                    // pre_srmcs[polling_tail] = NULL;
-                    // if (pre_srmc)
-                    // {
-                    //     polling_tail = (polling_tail + 1)  & (SRMC_POLLING_CNT-1);
-                    //     // ret = srm_poll_srmc_once_debug(pre_srmc, wc, cqe, filp, &pos, buf, &start_cycles_cq, &end_cycles_cq,free_cqe_idx,&free_cqe_cnt); // 文件
-                    //     ret = srm_poll_srmc_once(pre_srmc, wc, cqe, free_cqe_idx, &free_cqe_cnt);
-                    //     if (pre_srmc->sig_cnt)
-                    //     {
-                    //         // 这次没poll完
-                    //         if (unlikely(pre_srmcs[polling_head] != NULL))
-                    //         {
-                    //             pr_info("cq polling queue exceed queue length\n");
-                    //             // 此时polling队列满，必须poll完
-                    //             while (pre_srmc->sig_cnt)
-                    //             {
-                    //                 srm_poll_srmc_once(pre_srmc, wc, cqe, free_cqe_idx, &free_cqe_cnt);
-                    //             }
-                    //             in_queue[pre_srmc->srmc_idx % (CQ_NUM)] = 0;
-                    //         }
-                    //         else if (unlikely(pre_srmc->sig_cnt >= SQ_DEPTH || (int)(srmc->ini_cb.qp->sq.head - srmc->ini_cb.qp->sq.tail) >= srmc->ini_cb.qp->sq.max_post))
-                    //         {
-                    //             if (pre_srmc->sig_cnt >= SQ_DEPTH)
-                    //                 pr_info("cq queue exceed SQ_DEPTH00\n");
-                    //             else
-                    //             {
-                    //                 pr_info("exceed max_post00,sq.head:%d, sq.tail:%d,max_post:%d",
-                    //                         pre_srmc->ini_cb.qp->sq.head, pre_srmc->ini_cb.qp->sq.tail, pre_srmc->ini_cb.qp->sq.max_post);
-                    //             }
-                    //             // //cqe队列满或者sq队列满，必须poll到一个以上,让sig_cnt小于SQ_DEPTH
-                    //             while (pre_srmc->sig_cnt >= SQ_DEPTH || srmc->ini_cb.qp->sq.head - srmc->ini_cb.qp->sq.tail >= srmc->ini_cb.qp->sq.max_post)
-                    //             {
-                    //                 srm_poll_srmc_once(pre_srmc, wc, cqe, free_cqe_idx, &free_cqe_cnt);
-                    //             }
-                    //             if (!pre_srmc->sig_cnt)
-                    //             {
-                    //                 // poll完
-                    //                 in_queue[pre_srmc->srmc_idx % (CQ_NUM)] = 0;
-                    //             }
-                    //             else
-                    //             {
-                    //                 // 没poll完，重新加入队列
-                    //                 pre_srmcs[polling_head] = pre_srmc;
-                    //                 polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
-                    //             }
-                    //         }
-                    //         else
-                    //         {
-                    //             // 重新加入队列
-                    //             pre_srmcs[polling_head] = pre_srmc;
-                    //             polling_head = (polling_head + 1) & (SRMC_POLLING_CNT-1);
-                    //         }
-                    //     }
-                    //     else
-                    //     {
-                    //         // poll完了，出队
-                    //         in_queue[pre_srmc->srmc_idx % (CQ_NUM)] = 0;
-                    //     }
-                    // }
-
-                    
-
-                    // if (level >= 1)
-                    // {
-                    //     // 由于轮询到了，降低退避等级,并且再次轮询看是否降级
-                    //     skip_level_arr[level]--;
-                    //     skip_level_arr[level] = max(skip_level_arr[level], -1);
-                    //     skip_level_cnt[level] = -1;
-                    // }
-
-                    //                 //文件
-                    //                 /* 3. 写数据 */
-                    //                 int level_tot_wqe_num = calc_level_tot_wqe_num(n,num_user_threads);
-                    //                 len = scnprintf(buf, 256, "level %d down ,skip level:%d,level's total wqe num:%d\n",level,skip_level_arr[level],level_tot_wqe_num);
-                    // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-                    //                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
-                    //                 ret = kernel_write(filp, buf, len, &pos);
-                    // #else
-                    //                 ret = vfs_write(filp, buf, len, &pos);
-                    // #endif
-                    //                 if (ret < 0)
-                    //                     pr_err("write_int_to_file: write error %d\n", ret);
-
-                    // // 查看当前wqe是不是最后一个,进行等级表的设置
-                    // if (user_wqe_table[n] == kernel_wqe_table[n])
-                    // {
-                    //     m++;
-                    //     ret = 0;
-                    //     for (; m < num_user_threads; m++, k = (k + num_thread_qps) % sched_group.sqb_cnt)
-                    //     {
-                    //         // 检查剩下的qp是否为空
-
-                    //         n = k / (4 * sched_group.num_sched) + level * num_user_threads + id * per_thread_qp_nums;
-                    //         if (user_wqe_table[n] != kernel_wqe_table[n])
-                    //         {
-                    //             // 不为空
-                    //             ret = 1;
-                    //             break;
-                    //         }
-                    //     }
-
-                    //     // level_table的下标从1开始
-                    //     user_level_table[level + 4 * id] = ret;
-                    // }
-
+                    srm_doorbell(sched_group.xrc_bf_arr[user_thread_idx*NUM_SCHED*4*num_xrc_per_srm
+                                        + (4*id + level) *num_xrc_per_srm + xrc_qp_idx],
+                                    xrc_ctrl);
+                    wqe_tot_sz -= cur_wqes[wqe_cur_idx];
+                    wqe_tot_sz += cur_bytes;
+                    cur_wqes[wqe_cur_idx] = cur_bytes;
+                    wqe_cur_idx = (wqe_cur_idx + 1) % WQES_ARR_SZ;
+                    kernel_wqe_table[n]++; 
                     kernel_level_table[level + level_table_bias]++;
-                    
-
+                    // pr_info("DEBUG: cur_bytes %d,user_thread_idx %d, xrc_qp_idx %d, xrc_ctrl:%llu\n",
+                    //          (uint32_t)cur_bytes, user_thread_idx, xrc_qp_idx,xrc_ctrl);
+                    send_ok = 1;
                 }
 
+                //pr_info("DEBUG:post send finished\n");
 
-                // end_cycles = rdtsc();
-                // elapsed_ns = calc_time(start_cycles,end_cycles);
-                // pr_info("total %d wqes, time:%llu(ns)\n",idx_queue_cnt,elapsed_ns);
+               
 
-                // if(idx_queue_cnt!=0)
-                //     pr_info("post send %d wqe finished,tot length:%d\n",idx_queue_cnt,tot_length);
 
-                wqe_tot_sz -= cur_wqes[wqe_cur_idx];
-                wqe_tot_sz += tot_length;
-                cur_wqes[wqe_cur_idx] = tot_length;
-                wqe_cur_idx = (wqe_cur_idx + 1) % WQES_ARR_SZ;
-
-                poll_srmc_inline(pre_srmcs, &polling_tail, &polling_head, in_queue, wc, cqe, free_cqe_idx, &free_cqe_cnt, id, srmc);//TODO：聚合一次poll一次
                 
                 
-                break;
-
-                // if(sending_case == 0){
-                //     sending_case = 4;
-                // }
-                // else if (sending_case == 1){
-                //     //level_qp_st_arr[level] = (level_qp_st_arr[level]+1)%num_user_threads;//直接下一个吗？还是允许连续发有限个？
-                //     sending_case = 4;
-                // }else if(sending_case == 2){
-                //     //level_qp_st_arr[level] = (level_qp_st_arr[level]+1)%num_user_threads;//直接下一个吗？还是允许连续发有限个？
-                //     sending_case = 4;
-                // }
-                // else if(sending_case == 3){
-                //     //顺序遍历到level 1的情况，对于level 1的队列，需要排空，继续发送
-                //     wqe_cnt--;
-                //     if(wqe_cnt == 0){
-                //         sending_case = 4;
-                //     }
-                // }
-
-                // if(sending_case == 4){
-                //     //当前情况发送完毕，更新old值,需要使用最新的user_level_table更新
-                //     level_owqe_cnt_arr[level] = smp_load_acquire(&user_level_table[level + 4*id]) - kernel_level_table[level + 4*id];
-                //     break;
-                // }
+                if(send_ok)
+                    break;
+                user_thread_idx++;
+                if (user_thread_idx >= num_user_threads)
+                    user_thread_idx = 0;
             }
             if (send_ok)
                 break;
@@ -2123,7 +1555,7 @@ err:
     kfree(sched_group->scheds);
     return ret;
 }
-
+//TODO:释放bf（mlx5_put_uars_page(mdev, up)）
 void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
 {
     struct mlx5_ib_sqbuf *sqb;
@@ -2131,80 +1563,80 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
     struct mlx5_ib_srmc *srmc;
     struct mlx5_ib_sched *sched;
     int npages;
-    int i, j;
+    int i, j,k;
 
-    for (i = 0; i < sched_group->num_sched; i++)
-    {
-        DEBUG_LOG("Ready to stop sched->task %d\n", i);
-        sched = &sched_group->scheds[i];
-        if (sched->task)
-        {
-            kthread_stop(sched->task);
-            sched->task = NULL;
-        }
-        mutex_lock(&sched->srmc_lock);
-        for (j = 0; j < NUM_SRMC; j++)
-        {
-            srmc = sched->srmc_small_tb[j];
-            if (srmc == NULL)
-            {
-                continue;
-            }
-            DEBUG_LOG("srmc ini_cb state:%d\n", srmc->ini_cb.state);
-            // if (srmc->ini_cb.state == CONNECTED)//可能在event处理过程中发现state是CONNECTED，造成重复释放。如何解决？
-            // {
-            //     rdma_disconnect(srmc->ini_cb.cm_id);
-            //     // ib_sched_free_buf(&srmc->ini_cb);
-            //     ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
-            //     ib_destroy_cq(srmc->ini_cb.cq);
-            // }
-            if (srmc->ini_cb.cm_id)
-            {
-                rdma_disconnect(srmc->ini_cb.cm_id);
-                ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
-                // ib_destroy_cq(srmc->ini_cb.cq);
-                //  ib_dealloc_pd(srmc->ini_cb.pd);
-                rdma_destroy_id(srmc->ini_cb.cm_id);
-            }
+    // for (i = 0; i < sched_group->num_sched; i++)
+    // {
+    //     DEBUG_LOG("Ready to stop sched->task %d\n", i);
+    //     sched = &sched_group->scheds[i];
+    //     if (sched->task)
+    //     {
+    //         kthread_stop(sched->task);
+    //         sched->task = NULL;
+    //     }
+    //     mutex_lock(&sched->srmc_lock);
+    //     for (j = 0; j < NUM_SRMC; j++)
+    //     {
+    //         srmc = sched->srmc_small_tb[j];
+    //         if (srmc == NULL)
+    //         {
+    //             continue;
+    //         }
+    //         DEBUG_LOG("srmc ini_cb state:%d\n", srmc->ini_cb.state);
+    //         // if (srmc->ini_cb.state == CONNECTED)//可能在event处理过程中发现state是CONNECTED，造成重复释放。如何解决？
+    //         // {
+    //         //     rdma_disconnect(srmc->ini_cb.cm_id);
+    //         //     // ib_sched_free_buf(&srmc->ini_cb);
+    //         //     ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
+    //         //     ib_destroy_cq(srmc->ini_cb.cq);
+    //         // }
+    //         if (srmc->ini_cb.cm_id)
+    //         {
+    //             rdma_disconnect(srmc->ini_cb.cm_id);
+    //             ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
+    //             // ib_destroy_cq(srmc->ini_cb.cq);
+    //             //  ib_dealloc_pd(srmc->ini_cb.pd);
+    //             rdma_destroy_id(srmc->ini_cb.cm_id);
+    //         }
 
-            kfree(srmc);
-        }
+    //         kfree(srmc);
+    //     }
 
-        for (j = 0; j < NUM_SRMC; j++)
-        {
-            srmc = sched->srmc_large_tb[j];
-            if (srmc == NULL)
-            {
-                continue;
-            }
-            // if (srmc->ini_cb.state == CONNECTED)
-            // {
-            //     rdma_disconnect(srmc->ini_cb.cm_id);
-            //     // ib_sched_free_buf(&srmc->ini_cb);
-            //     ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
-            //     ib_destroy_cq(srmc->ini_cb.cq);
-            // }
-            if (srmc->ini_cb.cm_id)
-            {
-                rdma_disconnect(srmc->ini_cb.cm_id);
-                ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
-                // ib_destroy_cq(srmc->ini_cb.cq);
-                //  ib_dealloc_pd(srmc->ini_cb.pd);
-                rdma_destroy_id(srmc->ini_cb.cm_id);
-            }
-            kfree(srmc);
-        }
-        mutex_unlock(&sched->srmc_lock);
-        DEBUG_LOG("clean thread %d srmc success\n", i);
-    }
+    //     for (j = 0; j < NUM_SRMC; j++)
+    //     {
+    //         srmc = sched->srmc_large_tb[j];
+    //         if (srmc == NULL)
+    //         {
+    //             continue;
+    //         }
+    //         // if (srmc->ini_cb.state == CONNECTED)
+    //         // {
+    //         //     rdma_disconnect(srmc->ini_cb.cm_id);
+    //         //     // ib_sched_free_buf(&srmc->ini_cb);
+    //         //     ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
+    //         //     ib_destroy_cq(srmc->ini_cb.cq);
+    //         // }
+    //         if (srmc->ini_cb.cm_id)
+    //         {
+    //             rdma_disconnect(srmc->ini_cb.cm_id);
+    //             ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
+    //             // ib_destroy_cq(srmc->ini_cb.cq);
+    //             //  ib_dealloc_pd(srmc->ini_cb.pd);
+    //             rdma_destroy_id(srmc->ini_cb.cm_id);
+    //         }
+    //         kfree(srmc);
+    //     }
+    //     mutex_unlock(&sched->srmc_lock);
+    //     DEBUG_LOG("clean thread %d srmc success\n", i);
+    // }
 
-    for (i = 0; i < sched_group->num_sched; i++)
-    {
-        for (j = 0; j < (CQ_NUM); j++)
-            // free cq
-            if (shared_cq[i][j])
-                ib_destroy_cq(shared_cq[i][j]);
-    }
+    // for (i = 0; i < sched_group->num_sched; i++)
+    // {
+    //     for (j = 0; j < (CQ_NUM); j++)
+    //         // free cq
+    //         if (shared_cq[i][j])
+    //             ib_destroy_cq(shared_cq[i][j]);
+    // }
 
     // clean up srm qp table
     if (user_wqe_table)
@@ -2214,6 +1646,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
         put_user_pages(user_wqe_pages, npages);
         kfree(user_wqe_pages);
     }
+    pr_info("clean wqe table success\n");
 
     if (user_level_table)
     {
@@ -2222,33 +1655,15 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
         put_user_pages(user_level_pages, npages);
         kfree(user_level_pages);
     }
-    for (i = 0; i < MAX_USER_THREADS_NUM; i++)
-    {
-        for (j = 0; j < NUM_SCHED; j++)
-        {
-            if (user_idx_table[i][j])
-            {
-                npages = ((num_idx_table_entry * sizeof(struct idx_table_entry)) + PAGE_SIZE - 1) / PAGE_SIZE;
-                vunmap(user_idx_table[i][j]);
-                put_user_pages(user_idx_pages[i][j], npages);
-                kfree(user_idx_pages[i][j]);
-            }
-        }
-    }
+    pr_info("clean level table success\n");
 
-    for (i = 0; i < MAX_USER_THREADS_NUM; i++)
-    {
-        for (j = 0; j < NUM_SCHED; j++)
-        {
-            if (user_idx_table[i][j])
-            {
-                npages = ((num_hash_table_entry * sizeof(struct hash_table_entry)) + PAGE_SIZE - 1) / PAGE_SIZE;
-                vunmap(user_hash_table[i][j]);
-                put_user_pages(user_hash_pages[i][j], npages);
-                kfree(user_hash_pages[i][j]);
-            }
-        }
+    if(user_xrc_table){
+        npages = ((num_xrc_qp * sizeof(user_xrc_table[0][0][0])) + PAGE_SIZE - 1) / PAGE_SIZE;
+        vunmap(user_xrc_table[0][0]);
+        put_user_pages(user_xrc_pages, npages);
+        kfree(user_xrc_pages);
     }
+    pr_info("clean table success\n");
 
     // cleanup srm qp
     mutex_lock(&sched_group->sq_lock);
@@ -2260,30 +1675,26 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
             continue;
         vunmap(sqb->buf);
         npages = (sqb->sq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        for (i = 0; i < npages; i++)
-            put_page(sqb->pages[i]);
+        for (j = 0; j < npages; j++)
+            put_page(sqb->pages[j]);
         kfree(sqb->pages);
         kfree(sqb);
     }
     mutex_unlock(&sched_group->sq_lock);
-    DEBUG_LOG("clean sqb success\n");
+    pr_info("clean sqb success\n");
 
-    mutex_lock(&sched_group->cq_lock);
-    for (i = 0; i < sched_group->cqb_cnt; i++)
-    {
-        cqb = sched_group->cqb_arr[i];
-        sched_group->cqb_arr[i] = NULL;
-        if (cqb == NULL)
+
+    struct xrc_bf_entry *bf;
+    for(i = 0;i<sched_group->xrc_bf_cnt;i++){
+        bf = sched_group->xrc_bf_arr[i];
+        if(bf == NULL){
             continue;
-        vunmap(cqb->buf);
-        npages = (cqb->cq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        for (i = 0; i < npages; i++)
-            put_page(cqb->pages[i]);
-        kfree(cqb->pages);
-        kfree(cqb);
+        }
+        iounmap(bf->uar_page_vaddr);
+        kfree(bf);
     }
-    mutex_unlock(&sched_group->cq_lock);
-    DEBUG_LOG("clean cqb success\n");
+
+   
 
     kfree(sched_group->scheds);
 
@@ -3484,8 +2895,7 @@ int sched_hash_ip(char addr[4], int n)
 }
 
 int mlx5_ib_register_external_table(void *table, size_t size, struct page **pages, void *level_table, size_t level_size, struct page **level_pages,
-                                    void *idx_table[][NUM_SCHED], size_t idx_size, struct page **idx_pages[][NUM_SCHED],
-                                    void *hash_table[][NUM_SCHED], size_t hash_size, struct page **hash_pages[][NUM_SCHED], int hash_table_entry_num_per_bucket)
+                                           void *xrc_table, size_t xrc_size, struct page **xrc_pages, int xrc_qp_num_per_srm)
 {
     user_wqe_table = (uint32_t *)table;
     user_wqe_pages = pages;
@@ -3506,30 +2916,31 @@ int mlx5_ib_register_external_table(void *table, size_t size, struct page **page
     pr_info("level数量：%d\n", num_table_level);
 
     int i, j;
-    for (i = 0; i < MAX_USER_THREADS_NUM; i++)
-    {
-        for (j = 0; j < NUM_SCHED; j++)
-        {
-            user_idx_table[i][j] = (struct idx_table_entry *)idx_table[i][j];
-            user_idx_pages[i][j] = idx_pages[i][j];
+
+    num_user_threads = num_table_qp / (4*NUM_SCHED);
+
+    user_xrc_table = kmalloc(sizeof(struct xrc_table_entry**) * num_user_threads, GFP_KERNEL);
+    for(i = 0;i<num_user_threads;i++){
+        user_xrc_table[i] = kmalloc(sizeof(struct xrc_table_entry*) * (NUM_SCHED), GFP_KERNEL);
+        for(j=0;j<NUM_SCHED;j++){
+            user_xrc_table[i][j] = (struct xrc_table_entry *)xrc_table + i*(NUM_SCHED)*xrc_qp_num_per_srm + j*xrc_qp_num_per_srm;
         }
     }
-    num_idx_table_entry = idx_size / sizeof(struct idx_table_entry);
 
-    for (i = 0; i < MAX_USER_THREADS_NUM; i++)
-    {
-        for (j = 0; j < NUM_SCHED; j++)
-        {
-            user_hash_table[i][j] = (struct hash_table_entry *)hash_table[i][j];
-            user_hash_pages[i][j] = hash_pages[i][j];
-        }
-    }
-    num_hash_table_entry = hash_size / sizeof(struct hash_table_entry);
-    hash_entry_num_pb = hash_table_entry_num_per_bucket;
-    num_hash_table_key = num_hash_table_entry / hash_entry_num_pb;
+    user_xrc_pages = xrc_pages;
 
-    pr_info("sizeof idx_table_entry:%d, sizeof hash_table_entry:%d\n", sizeof(struct idx_table_entry), sizeof(struct hash_table_entry));
-    pr_info("hash table entry num:%d,hash table key num:%d,idx table entry num:%d\n", num_hash_table_entry, num_hash_table_key, num_idx_table_entry);
+    num_xrc_per_srm = xrc_qp_num_per_srm;
+
+    num_xrc_qp = num_user_threads * NUM_SCHED * num_xrc_per_srm;
+
+    pr_info("num_xrc_per_srm:%d,num_xr c_qp:%d,num_user_threads:%d\n",num_xrc_per_srm,num_xrc_qp,num_user_threads);
+
+    
+
+
+    
+    
+   
     return 0;
 }
 EXPORT_SYMBOL_GPL(mlx5_ib_register_external_table);

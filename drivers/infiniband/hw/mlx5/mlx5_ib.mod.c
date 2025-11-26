@@ -54,6 +54,7 @@ __used __section(__versions) = {
 	{ 0x40e30d71, "debugfs_create_dir" },
 	{ 0x2309058b, "mlx5_cmd_cleanup_async_ctx" },
 	{ 0x922378d2, "mlx5_eq_disable" },
+	{ 0xfd93ee35, "ioremap_wc" },
 	{ 0x50c1938, "rdma_restrack_put" },
 	{ 0x2d229a14, "mlx5_qp_debugfs_cleanup" },
 	{ 0x7aa1756e, "kvfree" },
@@ -88,6 +89,7 @@ __used __section(__versions) = {
 	{ 0xca9beaa4, "__xa_store" },
 	{ 0xd4c14632, "system_unbound_wq" },
 	{ 0x868d21d4, "uverbs_copy_to" },
+	{ 0xce1cdb23, "mlx5_get_uars_page_by_index" },
 	{ 0x445a81ce, "boot_cpu_data" },
 	{ 0xd057ca9a, "ib_create_qp_kernel" },
 	{ 0xf38a3177, "pci_disable_device" },
@@ -411,6 +413,7 @@ __used __section(__versions) = {
 	{ 0x60fb5a2e, "uverbs_uobject_fd_release" },
 	{ 0x482d4f47, "mlx5_create_flow_group" },
 	{ 0x61492bb7, "mlx5_rl_are_equal" },
+	{ 0xedc03953, "iounmap" },
 	{ 0xcf2a6966, "up" },
 	{ 0xb4da8414, "mlx5_nic_vport_update_local_lb" },
 	{ 0x6d2e97da, "dma_direct_sync_single_for_device" },
@@ -474,4 +477,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "C54FAC6956D2DC4979D64A9");
+MODULE_INFO(srcversion, "8CEBEC9A773210A68516381");

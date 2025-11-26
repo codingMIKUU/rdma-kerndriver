@@ -5,6 +5,8 @@
 #include <linux/mutex.h>
 #include <linux/types.h>
 #include <rdma/rdma_cm.h>
+#include <rdma/mlx5-abi.h>
+#include "mlx5_ib.h"
 #define SQ_DEPTH 8192
 static int debug = 0;
 #define NUM_SRMC 8192
@@ -14,8 +16,8 @@ static int debug = 0;
 #define IP_ADDR "192.168.1.5"
 #define PORT_NUM 12345
 #define SRMC_POLLING_CNT 8192
-#define WQES_ARR_SZ 8
-#define NUM_SCHED 4
+#define WQES_ARR_SZ 31
+#define NUM_SCHED 1
 
 // 2. 位运算替代取模（需确保CQ_NUM是2的幂，如16、32）
 #define CQ_NUM_POWER 0 // 示例：CQ_NUM=2^4=16
@@ -29,6 +31,8 @@ static int debug = 0;
     ((k) / (num_thread_qps_per_sched) + (level) * (num_user_threads) + (id_per_thread_qp_nums))
 
 #define MAX_USER_THREADS_NUM 17
+#define MAX_USER_XRC_QP_PER_SRM 1024
+
 
 static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 // const size_t MESSAGE_SIZE_THRESHOLD = 1e9;
@@ -43,6 +47,13 @@ static const size_t SCHED_SIZE_LIMIT = 8 * 1024;
 #define CACHELINE_ALIGNED __cacheline_aligned
 #define CACHELINE_ALIGNED_USER __attribute__((__aligned__(64)))
 
+
+struct srm_qp_entry{
+	uint32_t qp_idx;
+	uint32_t valid;
+    uint64_t ctrl;
+    uint64_t bytes;
+}CACHELINE_ALIGNED_USER;
 struct mlx5_ib_cqbuf
 {
     void *buf;
@@ -57,7 +68,7 @@ struct mlx5_ib_cqbuf
 } CACHELINE_ALIGNED;
 struct mlx5_ib_sqbuf
 {
-    void *buf;
+    struct srm_qp_entry *buf;
     struct page **pages;
     size_t sq_size;
     uint32_t wqe_cnt;
@@ -154,15 +165,32 @@ struct mlx5_ib_sched_id
     struct mlx5_ib_sched *sched;
     int id;
 };
+
+struct xrc_table_entry {
+  uint64_t ctrl;
+  uint64_t tot_bytes;
+} CACHELINE_ALIGNED_USER; // 对齐到多少字节？
+
+
+
+struct xrc_bf_entry{
+    u64 bf_addr;
+    u32 bf_size;
+    u32 bf_offset;
+    u64 uar_page_vaddr;
+};
+
 struct mlx5_ib_sched_group
 {
     struct mutex sq_lock;
 
     uint32_t sqb_cnt;
     uint32_t cqb_cnt;
+    uint32_t xrc_bf_cnt;
     struct mlx5_ib_sqbuf *sqb_arr[NUM_SQB];
     struct mutex cq_lock;
     struct mlx5_ib_cqbuf *cqb_arr[NUM_SQB];
+    struct xrc_bf_entry *xrc_bf_arr[MAX_USER_THREADS_NUM*NUM_SCHED*4*MAX_USER_XRC_QP_PER_SRM];
 
     int num_sched;
     struct mlx5_ib_sched *scheds;
@@ -180,19 +208,7 @@ enum srmc_create_flag
     SRMC_CREATE_FLAG_TGT_QP = 2,
 };
 
-struct idx_table_entry
-{
-    uint32_t valid;
-    uint32_t wqe_idx;
-    uint32_t hash_table_idx;
-} CACHELINE_ALIGNED_USER; // 对齐到多少字节？
 
-struct hash_table_entry
-{
-    uint32_t idx_table_idx;
-    uint32_t valid;
-    uint8_t gid[16];
-} CACHELINE_ALIGNED_USER;
 
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx);
 int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int cqn);
@@ -216,9 +232,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group);
 int mlx5_ib_server_init(struct mlx5_ib_server *server);
 int polling_cqe(void *data);
 int mlx5_ib_register_external_table(void *table, size_t size, struct page **pages, void *level_table, size_t level_size, struct page **level_pages,
-                                    void *idx_table[][NUM_SCHED], size_t idx_size, struct page **idx_pages[][NUM_SCHED],
-                                    void *hash_table[][NUM_SCHED], size_t hash_size, struct page **hash_pages[][NUM_SCHED],
-                                    int hash_table_entry_num_per_bucket);
-
+                                           void *xrc_table, size_t xrc_size, struct page **xrc_pages, int xrc_qp_num_per_srm);
+int srm_map_bf(struct mlx5_ib_sched_group *sched_group,struct mlx5_ib_create_qp *ucmd,struct mlx5_ib_dev *dev);
 #endif /* _MLX5_IB_SCHEDULER_H */
 
