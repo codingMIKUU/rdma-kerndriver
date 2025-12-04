@@ -5,8 +5,7 @@
 #include <linux/mutex.h>
 #include <linux/types.h>
 #include <rdma/rdma_cm.h>
-#include <rdma/mlx5-abi.h>
-#include "mlx5_ib.h"
+
 #define SQ_DEPTH 8192
 static int debug = 0;
 #define NUM_SRMC 8192
@@ -53,6 +52,7 @@ struct srm_qp_entry{
 	uint32_t valid;
     uint64_t ctrl;
     uint64_t bytes;
+    //uint64_t cycles;
 }CACHELINE_ALIGNED_USER;
 struct mlx5_ib_cqbuf
 {
@@ -171,13 +171,18 @@ struct xrc_table_entry {
   uint64_t tot_bytes;
 } CACHELINE_ALIGNED_USER; // 对齐到多少字节？
 
-
+struct db_rc{
+    uint64_t vaddr;
+    struct page *page;
+    uint32_t *kaddr;
+};
 
 struct xrc_bf_entry{
     u64 bf_addr;
     u32 bf_size;
     u32 bf_offset;
     u64 uar_page_vaddr;
+    //struct db_rc db;
 };
 
 struct mlx5_ib_sched_group

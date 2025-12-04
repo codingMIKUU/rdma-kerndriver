@@ -471,25 +471,14 @@ scheduler.o: \
  /root/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_verbs.h \
  /root/zxm/rdma-kerndriver/include/rdma/ib_verbs_nvmf_def.h \
  /root/zxm/rdma-kerndriver/include/rdma/ib_verbs_nvmf.h \
- /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/scheduler.h \
- /root/zxm/rdma-kerndriver/include/rdma/rdma_cm.h \
- /root/zxm/rdma-kerndriver/include/rdma/ib_addr.h \
- /root/zxm/rdma-kerndriver/include/linux/inetdevice.h \
- include/linux/inetdevice.h \
- /root/zxm/rdma-kerndriver/include/rdma/ib_pack.h \
- /root/zxm/rdma-kerndriver/include/rdma/ib_sa.h \
- /root/zxm/rdma-kerndriver/include/rdma/ib_mad.h \
- /root/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_mad.h \
- /root/zxm/rdma-kerndriver/include/rdma/opa_addr.h \
- /root/zxm/rdma-kerndriver/include/rdma/opa_smi.h \
- /root/zxm/rdma-kerndriver/include/rdma/ib_smi.h \
- /root/zxm/rdma-kerndriver/include/uapi/rdma/rdma_user_cm.h \
- /root/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_sa.h \
  /root/zxm/rdma-kerndriver/include/uapi/rdma/mlx5-abi.h \
  /root/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_ioctl_verbs.h \
  /root/zxm/rdma-kerndriver/include/uapi/rdma/mlx5_user_ioctl_verbs.h \
  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/mlx5_ib.h \
  /root/zxm/rdma-kerndriver/include/rdma/ib_umem.h \
+ /root/zxm/rdma-kerndriver/include/rdma/ib_smi.h \
+ /root/zxm/rdma-kerndriver/include/rdma/ib_mad.h \
+ /root/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_mad.h \
  /root/zxm/rdma-kerndriver/include/linux/mlx5/driver.h \
  /root/zxm/rdma-kerndriver/include/linux/mlx5/../../../compat/config.h \
  include/linux/irq.h include/linux/irqhandler.h \
@@ -527,6 +516,17 @@ scheduler.o: \
  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/macsec.h \
  /root/zxm/rdma-kerndriver/include/net/macsec.h \
  /root/zxm/rdma-kerndriver/include/rdma/ib_cache.h \
+ /root/zxm/rdma-kerndriver/include/rdma/ib_addr.h \
+ /root/zxm/rdma-kerndriver/include/linux/inetdevice.h \
+ include/linux/inetdevice.h \
+ /root/zxm/rdma-kerndriver/include/rdma/ib_pack.h \
+ /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/scheduler.h \
+ /root/zxm/rdma-kerndriver/include/rdma/rdma_cm.h \
+ /root/zxm/rdma-kerndriver/include/rdma/ib_sa.h \
+ /root/zxm/rdma-kerndriver/include/rdma/opa_addr.h \
+ /root/zxm/rdma-kerndriver/include/rdma/opa_smi.h \
+ /root/zxm/rdma-kerndriver/include/uapi/rdma/rdma_user_cm.h \
+ /root/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_sa.h \
  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/wr.h \
  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/user_verbs.h \
  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/conn.h \
