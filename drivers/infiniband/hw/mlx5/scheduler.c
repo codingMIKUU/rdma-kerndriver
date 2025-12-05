@@ -1266,7 +1266,7 @@ int scheduler_polling(void *sched_data)
 
             // // 插入获取屏障：确保读取b后，c的最新值已可见
             // smp_rmb();  // 读内存屏障，阻止读重排
-            //user_thread_idx = srm_fastrand(&polling_seed) % num_user_threads;
+            user_thread_idx = srm_fastrand(&polling_seed) % num_user_threads;
             k = level * sched_group.num_sched + id + user_thread_idx * num_thread_qps;
 
             for (m = 0; m < num_user_threads;
