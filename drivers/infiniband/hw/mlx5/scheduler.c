@@ -1171,6 +1171,7 @@ int scheduler_polling(void *sched_data)
 
     const int aggr_limit = 1; // 单次聚合的qp数量上限
     int t_cnt_idx,t_cnt_hash = 0;
+    uint64_t roll_cnt = 0;
     while (!kthread_should_stop())
     {
         // for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++){
@@ -1180,7 +1181,7 @@ int scheduler_polling(void *sched_data)
         //     printk(KERN_INFO "用户态sq切换开销elapsed_time0 = %llu ns\n", elapsed_time0);
         // }
 
-        target_sz = wqes_limit_sz - wqe_ewma_sz;
+        target_sz = 0;
         //target_sz = wqes_limit_sz - (wqe_tot_sz - cur_wqes[wqe_cur_idx]);
         if (target_sz <= 0)
         {
@@ -1266,7 +1267,7 @@ int scheduler_polling(void *sched_data)
 
             // // 插入获取屏障：确保读取b后，c的最新值已可见
             // smp_rmb();  // 读内存屏障，阻止读重排
-            user_thread_idx = srm_fastrand(&polling_seed) % num_user_threads;
+            user_thread_idx = 16;
             //user_thread_idx = 0 / 16;
             k = level * sched_group.num_sched + id + user_thread_idx * num_thread_qps;
 
@@ -1441,7 +1442,14 @@ int scheduler_polling(void *sched_data)
                         
                         send_ok = 1;
                         // uint32_t delay_time = srm_fastrand(&srm_seed) % 200 ;
-                        //ndelay(150);
+                        roll_cnt++;
+                        if(roll_cnt % 1 == 0){
+                            ndelay(175);
+                        }
+                        // while(roll_cnt % 10000 != 0){
+                        //     roll_cnt++;
+                        // }
+                        
                         break;
                         
                     }
@@ -1493,7 +1501,14 @@ int scheduler_polling(void *sched_data)
                     //          id, (uint32_t)cur_bytes, user_thread_idx, xrc_qp_idx,xrc_ctrl);
                     send_ok = 1;
                     // uint32_t delay_time = srm_fastrand(&srm_seed) % 200 ;
-                    //ndelay(150);
+                    roll_cnt++;
+                    if(roll_cnt % 1 == 0){
+                        ndelay(175);
+                    }
+
+                    // while(roll_cnt % 10000 != 0){
+                    //     roll_cnt++;
+                    // }
                 }
 
                 //pr_info("DEBUG:post send finished\n");
