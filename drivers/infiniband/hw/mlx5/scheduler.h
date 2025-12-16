@@ -38,6 +38,8 @@ static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 static const size_t QUEUE_LIMIT = 256 * 1024;
 static const size_t SCHED_SIZE_LIMIT = 8 * 1024;
 
+static const int LIMIT_BATCHING =100;
+
 #define DEBUG_LOG \
     if (debug)    \
     printk
@@ -169,6 +171,7 @@ struct mlx5_ib_sched_id
 struct xrc_table_entry {
   uint64_t ctrl;
   uint64_t tot_bytes;
+  uint64_t tot_recv_cqes;
 } CACHELINE_ALIGNED_USER; // 对齐到多少字节？
 
 struct db_rc{

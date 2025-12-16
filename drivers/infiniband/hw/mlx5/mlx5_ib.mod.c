@@ -130,7 +130,6 @@ __used __section(__versions) = {
 	{ 0x8fa25c24, "xa_find" },
 	{ 0xd9491c14, "xa_destroy" },
 	{ 0x7ba1167d, "mlx5_query_hca_vport_pkey" },
-	{ 0xeae3dfd6, "__const_udelay" },
 	{ 0xf7761f32, "mlx5_query_port_vl_hw_cap" },
 	{ 0x2f7a9799, "rdma_destroy_id" },
 	{ 0x14dfd31, "mlx5_comp_eqn_get" },
@@ -478,4 +477,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "A7174A7967B6594688E95EB");
+MODULE_INFO(srcversion, "42F927F8CAC58A32BA525A2");

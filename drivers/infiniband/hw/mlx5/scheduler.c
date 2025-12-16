@@ -48,7 +48,7 @@ uint16_t tot_xrc_sended_wqes[MAX_USER_THREADS_NUM][NUM_SCHED*4][MAX_USER_XRC_QP_
 uint64_t lst_xrc_bytes[MAX_USER_THREADS_NUM][NUM_SCHED][MAX_USER_XRC_QP_PER_SRM]; // 0~4KB,记录上次统计时每个xrc qp发送的总字节数
 extern struct mlx5_uars_page *mlx5_get_uars_page_by_index(struct mlx5_core_dev *mdev,
                                                    int uar_index);
- 
+
 
                                                    
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx)
@@ -980,6 +980,15 @@ void srm_doorbell(struct xrc_bf_entry *bf, uint64_t ctrl,uint16_t cur_post){
     bf->bf_offset ^= bf->bf_size;
     wmb();
 }
+
+static inline uint64_t calc_tot_cqes(int num_user_threads){
+    int i;
+    uint64_t res = 0;
+    for(i = 0;i<num_user_threads;i++){
+        res += smp_load_acquire(&user_xrc_table[i][0][0].tot_recv_cqes);
+    }
+    return res;
+}
 int scheduler_polling(void *sched_data)
 {
     extern struct mlx5_ib_sched_group sched_group;
@@ -1172,6 +1181,11 @@ int scheduler_polling(void *sched_data)
     const int aggr_limit = 1; // 单次聚合的qp数量上限
     int t_cnt_idx,t_cnt_hash = 0;
     uint64_t roll_cnt = 0;
+
+    uint64_t kernel_tot_db = 0, user_tot_cqes = 0;
+    uint64_t tot_cqes_delta = 0;
+    
+    uint32_t stuck_cnt = 0;
     while (!kthread_should_stop())
     {
         // for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++){
@@ -1181,8 +1195,8 @@ int scheduler_polling(void *sched_data)
         //     printk(KERN_INFO "用户态sq切换开销elapsed_time0 = %llu ns\n", elapsed_time0);
         // }
 
-        target_sz = 0;
-        //target_sz = wqes_limit_sz - (wqe_tot_sz - cur_wqes[wqe_cur_idx]);
+        //target_sz = 0;
+        target_sz = wqes_limit_sz - wqe_ewma_sz;
         if (target_sz <= 0)
         {
             order_idx = 0;
@@ -1206,7 +1220,7 @@ int scheduler_polling(void *sched_data)
         }
         send_ok = 0;
         tfree = 1;
-        for (l = 0; l < 4; l++)
+        for (l =  0; l < 4; l++)
         {
            
             level = polling_order[order_idx][l];
@@ -1267,7 +1281,7 @@ int scheduler_polling(void *sched_data)
 
             // // 插入获取屏障：确保读取b后，c的最新值已可见
             // smp_rmb();  // 读内存屏障，阻止读重排
-            user_thread_idx = 16;
+            user_thread_idx = srm_fastrand(&polling_seed) % num_user_threads;
             //user_thread_idx = 0 / 16;
             k = level * sched_group.num_sched + id + user_thread_idx * num_thread_qps;
 
@@ -1362,7 +1376,27 @@ int scheduler_polling(void *sched_data)
                 idx_queue_cnt = 0;
                 //uint64_t elapsed_ns0,elapsed_ns1,elapsed_ns2,elapsed_ns3,elapsed_ns4,elapsed_ns5;
 
-
+                stuck_cnt = 0 ;       
+                while((kernel_tot_db > user_tot_cqes + LIMIT_BATCHING && !(user_tot_cqes + LIMIT_BATCHING < user_tot_cqes)) && !kthread_should_stop()){
+                    user_tot_cqes = calc_tot_cqes(num_user_threads);
+                    user_tot_cqes -= tot_cqes_delta;
+                    if(kernel_tot_db < user_tot_cqes){
+                        kernel_tot_db -= user_tot_cqes;
+                        tot_cqes_delta += user_tot_cqes;
+                        user_tot_cqes = 0;
+                    }
+                    //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu\n",kernel_tot_db,user_tot_cqes);
+                    // if(kernel_tot_db > user_tot_cqes + LIMIT_BATCHING){
+                    //     //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu, wait...\n",kernel_tot_db,user_tot_cqes);
+                    //     msleep(0);
+                    // }      
+                    stuck_cnt++;
+                    if(stuck_cnt % 100000000 == 0){
+                        msleep(0);
+                    }
+                    cpu_relax();
+                }
+             
                 
                 if (level == 0)
                 {
@@ -1385,14 +1419,16 @@ int scheduler_polling(void *sched_data)
                             //pr_info("sended wqe,skip\n");
                             kernel_wqe_table[n]++;
                             kernel_level_table[level + level_table_bias]++;
+
+                            cpu_relax();
                             continue;
                         }
 
 
 
                         //接下来一次doorbell xrc qp中的多个wqe
-                        uint64_t xrc_ctrl = smp_load_acquire(&user_xrc_table[user_thread_idx][id][xrc_qp_idx].ctrl);
-                        uint64_t xrc_tot_bytes = smp_load_acquire(&user_xrc_table[user_thread_idx][id][xrc_qp_idx].tot_bytes) - lst_xrc_bytes[user_thread_idx][id][xrc_qp_idx];
+                        uint64_t xrc_ctrl = smp_load_acquire(&user_xrc_table[user_thread_idx][NUM_SCHED*level + id][xrc_qp_idx].ctrl);
+                        uint64_t xrc_tot_bytes = smp_load_acquire(&user_xrc_table[user_thread_idx][NUM_SCHED*level + id][xrc_qp_idx].tot_bytes) - lst_xrc_bytes[user_thread_idx][id][xrc_qp_idx];
                         
                         lst_xrc_bytes[user_thread_idx][id][xrc_qp_idx] += xrc_tot_bytes;
 
@@ -1442,13 +1478,21 @@ int scheduler_polling(void *sched_data)
                         
                         send_ok = 1;
                         // uint32_t delay_time = srm_fastrand(&srm_seed) % 200 ;
-                        roll_cnt++;
-                        if(roll_cnt % 1 == 0){
-                            ndelay(175);
-                        }
+                        // roll_cnt++;
+                        // if(roll_cnt % 1 == 0){
+                        //     ndelay(175);
+                        // }
                         // while(roll_cnt % 10000 != 0){
                         //     roll_cnt++;
                         // }
+
+                        if(kernel_tot_db + delta < kernel_tot_db){
+                            //防止溢出
+                            kernel_tot_db -= user_tot_cqes;
+                            tot_cqes_delta += user_tot_cqes;
+                            user_tot_cqes = 0;
+                        }
+                        kernel_tot_db += delta;
                         
                         break;
                         
@@ -1471,7 +1515,7 @@ int scheduler_polling(void *sched_data)
                     sqb->cur_post++;
 
                     // //文件
-                    db_st_cycles = rdtsc();
+                    //db_st_cycles = rdtsc();
                     srm_doorbell(sched_group.xrc_bf_arr[user_thread_idx*NUM_SCHED*4*num_xrc_per_srm
                                     + (level*NUM_SCHED + id)*num_xrc_per_srm + xrc_qp_idx],
                                 xrc_ctrl,tot_xrc_sended_wqes[user_thread_idx][level*NUM_SCHED + id][xrc_qp_idx]);
@@ -1500,11 +1544,21 @@ int scheduler_polling(void *sched_data)
                     // pr_info("DEBUG: sched_idx:%d,cur_bytes %d,user_thread_idx %d, xrc_qp_idx %d, xrc_ctrl:%llu\n",
                     //          id, (uint32_t)cur_bytes, user_thread_idx, xrc_qp_idx,xrc_ctrl);
                     send_ok = 1;
+
+
                     // uint32_t delay_time = srm_fastrand(&srm_seed) % 200 ;
-                    roll_cnt++;
-                    if(roll_cnt % 1 == 0){
-                        ndelay(175);
+                    // roll_cnt++;
+                    // if(roll_cnt % 1 == 0){
+                    //     ndelay(175);
+                    // }
+
+                    if(kernel_tot_db + 1 < kernel_tot_db){
+                        //防止溢出
+                        kernel_tot_db -= user_tot_cqes;
+                        tot_cqes_delta += user_tot_cqes;
+                        user_tot_cqes = 0;
                     }
+                    kernel_tot_db++;
 
                     // while(roll_cnt % 10000 != 0){
                     //     roll_cnt++;
@@ -3032,9 +3086,9 @@ int mlx5_ib_register_external_table(void *table, size_t size, struct page **page
 
     user_xrc_table = kmalloc(sizeof(struct xrc_table_entry**) * num_user_threads, GFP_KERNEL);
     for(i = 0;i<num_user_threads;i++){
-        user_xrc_table[i] = kmalloc(sizeof(struct xrc_table_entry*) * (NUM_SCHED), GFP_KERNEL);
-        for(j=0;j<NUM_SCHED;j++){
-            user_xrc_table[i][j] = (struct xrc_table_entry *)xrc_table + i*(NUM_SCHED)*xrc_qp_num_per_srm + j*xrc_qp_num_per_srm;
+        user_xrc_table[i] = kmalloc(sizeof(struct xrc_table_entry*) * (4*NUM_SCHED), GFP_KERNEL);
+        for(j=0;j<4*NUM_SCHED;j++){
+            user_xrc_table[i][j] = (struct xrc_table_entry *)xrc_table + i*(4*NUM_SCHED)*xrc_qp_num_per_srm + j*xrc_qp_num_per_srm;
         }
     }
 
