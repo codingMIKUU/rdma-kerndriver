@@ -11,6 +11,7 @@ static int debug = 0;
 #define NUM_SRMC 8192
 // 对于接收端，NUM_SRMC等于num_kqps*2才行（因为只有一个调度器，发送端两个调度器全发往它了）
 #define NUM_SQB 1024
+#define NUM_LEVEL 2
 
 #define IP_ADDR "192.168.1.5"
 #define PORT_NUM 12345
@@ -24,8 +25,8 @@ static int debug = 0;
 #define CQ_MOD(srmc_idx) ((srmc_idx) & (CQ_NUM - 1)) // 位运算替代取模
 
 // 3. 提前计算索引宏（减少循环内重复计算）
-#define LEVEL_TABLE_IDX(level, id) ((level) + (4) * (id))       // level_table索引
-#define NUM_THREAD_QPS_PER_SCHED(num_sched) ((4) * (num_sched)) // 每个调度器的线程QP数
+#define LEVEL_TABLE_IDX(level, id) ((level) + (NUM_LEVEL) * (id))       // level_table索引
+#define NUM_THREAD_QPS_PER_SCHED(num_sched) ((NUM_LEVEL) * (num_sched)) // 每个调度器的线程QP数
 #define CALC_N(k, num_thread_qps_per_sched, level, num_user_threads, id_per_thread_qp_nums) \
     ((k) / (num_thread_qps_per_sched) + (level) * (num_user_threads) + (id_per_thread_qp_nums))
 
@@ -38,7 +39,7 @@ static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 static const size_t QUEUE_LIMIT = 256 * 1024;
 static const size_t SCHED_SIZE_LIMIT = 8 * 1024;
 
-static const int LIMIT_BATCHING =100;
+static const int LIMIT_BATCHING =50;
 
 #define DEBUG_LOG \
     if (debug)    \
@@ -198,7 +199,7 @@ struct mlx5_ib_sched_group
     struct mlx5_ib_sqbuf *sqb_arr[NUM_SQB];
     struct mutex cq_lock;
     struct mlx5_ib_cqbuf *cqb_arr[NUM_SQB];
-    struct xrc_bf_entry *xrc_bf_arr[MAX_USER_THREADS_NUM*NUM_SCHED*4*MAX_USER_XRC_QP_PER_SRM];
+    struct xrc_bf_entry *xrc_bf_arr[MAX_USER_THREADS_NUM*NUM_SCHED*NUM_LEVEL*MAX_USER_XRC_QP_PER_SRM];
 
     int num_sched;
     struct mlx5_ib_sched *scheds;
