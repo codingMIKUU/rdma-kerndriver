@@ -1270,39 +1270,39 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
         mutex_unlock(&sched->srmc_lock);
         DEBUG_LOG("clean thread %d srmc success\n", i);
     }
-    // cleanup scheduler
-    mutex_lock(&sched_group->sq_lock);
-    for (i = 0; i < sched_group->sqb_cnt; i++)
-    {
-        sqb = sched_group->sqb_arr[i];
-        sched_group->sqb_arr[i] = NULL;
-        if (sqb == NULL)
-            continue;
-        vunmap(sqb->buf);
-        npages = (sqb->sq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        for (i = 0; i < npages; i++)
-            put_page(sqb->pages[i]);
-        kfree(sqb->pages);
-        kfree(sqb);
-    }
-    mutex_unlock(&sched_group->sq_lock);
-    DEBUG_LOG("clean sqb success\n");
+    // // cleanup scheduler
+    // mutex_lock(&sched_group->sq_lock);
+    // for (i = 0; i < sched_group->sqb_cnt; i++)
+    // {
+    //     sqb = sched_group->sqb_arr[i];
+    //     sched_group->sqb_arr[i] = NULL;
+    //     if (sqb == NULL)
+    //         continue;
+    //     vunmap(sqb->buf);
+    //     npages = (sqb->sq_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    //     for (i = 0; i < npages; i++)
+    //         put_page(sqb->pages[i]);
+    //     kfree(sqb->pages);
+    //     kfree(sqb);
+    // }
+    // mutex_unlock(&sched_group->sq_lock);
+    // DEBUG_LOG("clean sqb success\n");
 
-    mutex_lock(&sched_group->cq_lock);
-    for (i = 0; i < sched_group->cqb_cnt; i++)
-    {
-        cqb = sched_group->cqb_arr[i];
-        sched_group->cqb_arr[i] = NULL;
-        if (cqb == NULL)
-            continue;
-        vunmap(cqb->buf);
-        npages = (cqb->cq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        for (i = 0; i < npages; i++)
-            put_page(cqb->pages[i]);
-        kfree(cqb->pages);
-        kfree(cqb);
-    }
-    mutex_unlock(&sched_group->cq_lock);
+    // mutex_lock(&sched_group->cq_lock);
+    // for (i = 0; i < sched_group->cqb_cnt; i++)
+    // {
+    //     cqb = sched_group->cqb_arr[i];
+    //     sched_group->cqb_arr[i] = NULL;
+    //     if (cqb == NULL)
+    //         continue;
+    //     vunmap(cqb->buf);
+    //     npages = (cqb->cq_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    //     for (i = 0; i < npages; i++)
+    //         put_page(cqb->pages[i]);
+    //     kfree(cqb->pages);
+    //     kfree(cqb);
+    // }
+    // mutex_unlock(&sched_group->cq_lock);
     DEBUG_LOG("clean cqb success\n");
 
     pr_info("mlx5_sched_exit success\n");
