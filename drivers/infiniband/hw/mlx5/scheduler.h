@@ -39,7 +39,7 @@ static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 static const size_t QUEUE_LIMIT = 256 * 1024;
 static const size_t SCHED_SIZE_LIMIT = 8 * 1024;
 
-static const int LIMIT_BATCHING =50;
+static int LIMIT_BATCHING =1000;
 
 #define DEBUG_LOG \
     if (debug)    \
@@ -162,6 +162,8 @@ struct mlx5_ib_sched
     struct mlx5_ib_srmc *srmc_large_tb[NUM_SRMC]; // for large flows
     size_t srmc_cnt[2];
     int id;
+
+    
 };
 struct mlx5_ib_sched_id
 {
@@ -173,6 +175,9 @@ struct xrc_table_entry {
   uint64_t ctrl;
   uint64_t tot_bytes;
   uint64_t tot_recv_cqes;
+
+//   uint64_t cur_Gbps;
+//   uint64_t cur_lat_us;
 } CACHELINE_ALIGNED_USER; // 对齐到多少字节？
 
 struct db_rc{
