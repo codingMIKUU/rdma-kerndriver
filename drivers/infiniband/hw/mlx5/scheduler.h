@@ -30,7 +30,7 @@ static int debug = 0;
 #define CALC_N(k, num_thread_qps_per_sched, level, num_user_threads, id_per_thread_qp_nums) \
     ((k) / (num_thread_qps_per_sched) + (level) * (num_user_threads) + (id_per_thread_qp_nums))
 
-#define MAX_USER_THREADS_NUM 17
+#define MAX_USER_THREADS_NUM 513
 #define MAX_USER_XRC_QP_PER_SRM 1024
 
 
@@ -39,7 +39,7 @@ static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 static const size_t QUEUE_LIMIT = 256 * 1024;
 static const size_t SCHED_SIZE_LIMIT = 8 * 1024;
 
-static int LIMIT_BATCHING =1000;
+static int LIMIT_BATCHING =100;
 
 #define DEBUG_LOG \
     if (debug)    \
@@ -176,9 +176,13 @@ struct xrc_table_entry {
   uint64_t tot_bytes;
   uint64_t tot_recv_cqes;
 
-//   uint64_t cur_Gbps;
-//   uint64_t cur_lat_us;
+  uint64_t cur_Gbps;
+  uint64_t cur_lat_us;
 } CACHELINE_ALIGNED_USER; // 对齐到多少字节？
+
+struct aligned_u32 {
+    uint32_t val;
+} CACHELINE_ALIGNED_USER;
 
 struct db_rc{
     uint64_t vaddr;
