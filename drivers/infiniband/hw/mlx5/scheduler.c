@@ -871,32 +871,12 @@ void srm_doorbell(struct xrc_bf_entry *bf, uint64_t ctrl,uint16_t cur_post){
     wmb();
 }
 
-
-int uthread_arr[MAX_USER_THREADS_NUM];
-int uthread_head = 0, uthread_tail = 0;
-int in_uthread_arr[MAX_USER_THREADS_NUM];
-
-uint64_t kdb_cqes_arr[MAX_USER_THREADS_NUM] = {0};
-static inline uint64_t calc_rem_cqes(){
+static inline uint64_t calc_tot_cqes(int num_user_threads){
     int i;
     uint64_t res = 0;
-    uint64_t rem_cqe;
-    int uthread_cnt = (uthread_tail - uthread_head + MAX_USER_THREADS_NUM) % MAX_USER_THREADS_NUM;
-    for(i = 0;i<uthread_cnt;i++){
-        rem_cqe = kdb_cqes_arr[uthread_arr[uthread_head]] - smp_load_acquire(&user_xrc_table[uthread_arr[uthread_head]][0][0].tot_recv_cqes);
-        res += rem_cqe;
-        if(rem_cqe == 0){
-            in_uthread_arr[uthread_arr[uthread_head]] = 0;
-            uthread_head = (uthread_head + 1) % MAX_USER_THREADS_NUM;
-        }
-        else{
-            uthread_arr[uthread_tail] = uthread_arr[uthread_head];
-            uthread_tail = (uthread_tail + 1) % MAX_USER_THREADS_NUM;
-            uthread_head = (uthread_head + 1) % MAX_USER_THREADS_NUM;
-        }
+    for(i = 0;i<num_user_threads;i++){
+        res += smp_load_acquire(&user_xrc_table[i][0][0].tot_recv_cqes);
     }
-
-
     return res;
 }
 static inline void update_limit_batch(struct mlx5_ib_sched *sched){
@@ -929,17 +909,14 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
 
     /* 聚合当前吞吐和时延：取每个 (user_thread, level*sched) 的第 0 个 xrc qp 作为代表 */
     {
-        static int opt_cnt =0,prev_opt_batch = 0,prev_opt_dir = 1,prev_opt_step = 0,is_trying = 0,has_try = 0;
-        const int opt_target = 10;
-        static u64 prev_opt_util, prev_opt_lat;
 
         int i, l;
 
 
         /* 计算平均值，单位仍保持为 Gbps 与 us */
         {
-            u64 avg_gbps = smp_load_acquire(&user_xrc_table[0][0][0].cur_Gbps);
-            u64 avg_lat =  smp_load_acquire(&user_xrc_table[num_user_threads-1][0][0].cur_lat_us);
+            u64 avg_gbps = user_xrc_table[0][0][0].cur_Gbps;
+            u64 avg_lat =  user_xrc_table[num_user_threads-1][0][0].cur_lat_us;
 
             /* 计算综合效用：吞吐优先，在保证时延不过度恶化的前提下尽量拉高吞吐 */
             const u32 throughput_weight = 1000; /* Gbps 权重，可根据实验调优 */
@@ -958,70 +935,21 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
                 static u64 prev_lat;
                 static int init_done;
                 static int dir = 1;  /* 当前调整方向：1 表示增大 LIMIT_BATCHING，-1 表示减小 */
-                const int init_step = 32;
-                static int step = init_step; /* 当前步长 */
+                static int step = 4; /* 当前步长 */
 
-                const int min_step = 4;
+                const int min_step = 1;
                 const int max_step = 64;
                 const int min_batch = 8;
                 const int max_batch = 2048;
 
                 //如果吞吐和时延没有都更新，则等待
-                if ((!init_done|| prev_gbps == avg_gbps || prev_lat == avg_lat)) {
-                    if(!(avg_gbps >0 && avg_lat > 0)){
-                        return; 
-                    }
-
-                    if(!init_done){
-                        prev_util = util;
-                        prev_gbps = avg_gbps;
-                        prev_lat = avg_lat;
-                        init_done = 1;
-                    }
-                    else{
-                        //相等或者保持一段时间后，计数并尝试新值
-                        opt_cnt++;
-                        if(opt_cnt == opt_target){
-                            if(is_trying){
-                                //*2之后的尝试
-                                if(util > prev_opt_util || util == prev_opt_util && avg_lat <= prev_opt_lat){
-                                    //说明当前成为最优
-                                    is_trying = 0;
-                                    has_try = 0;
-                                }
-                                else{
-                                    //前面最优，回退
-                                    has_try = 1;
-                                    is_trying = 0;
-                                    LIMIT_BATCHING = prev_opt_batch ;
-                                    dir = prev_opt_dir;
-                                    step = prev_opt_step;
-                                }
-                            }
-                            else{
-                                //收敛完成，进行尝试
-                                if(!has_try){
-                                    is_trying = 1;
-                                    prev_opt_batch = LIMIT_BATCHING;
-                                    prev_opt_dir = dir;
-                                    prev_opt_step = step;
-                                    prev_opt_util = util;
-                                    prev_opt_lat = avg_lat;
-                                    LIMIT_BATCHING *=2 ;
-                                    if(LIMIT_BATCHING > max_batch)
-                                        LIMIT_BATCHING = max_batch;
-                                    dir = 1;
-                                    step = init_step;
-                                }
-                            }
-                            opt_cnt = 0;
-                        }
-                         printk("limit_batch %d, avg_gbps:%llu, avg_lat:%llu\n",LIMIT_BATCHING, avg_gbps, avg_lat);
-                    }
-                    //printk("update_limit_batch returned, avg_gbps:%llu, avg_lat:%llu\n", avg_gbps, avg_lat);
+                if (!init_done || prev_gbps == avg_gbps || prev_lat == avg_lat) {
+                    prev_util = util;
+                    prev_gbps = avg_gbps;
+                    prev_lat = avg_lat;
+                    init_done = 1;
                     return;
                 }
-                //printk("in update_limit_batch\n");
 
                 /*
                  * 设置一些容差，避免因为微小抖动频繁调整：
@@ -1029,13 +957,13 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
                  * - lat_tol：时延小于 5us 或 5% 变化时视为无显著变化。
                  */
                 {
-                    u64 util_eps = 0; /* ~1% */
-                    u64 lat_tol = 0;    /* ~5% */
+                    u64 util_eps = prev_util / 100; /* ~1% */
+                    u64 lat_tol = prev_lat / 20;    /* ~5% */
 
-                    // if (util_eps == 0)
-                    //     util_eps = 1;
-                    // if (lat_tol < 5)
-                    //     lat_tol = 5;
+                    if (util_eps == 0)
+                        util_eps = 1;
+                    if (lat_tol < 5)
+                        lat_tol = 5;
 
                     /*
                      * 核心决策：
@@ -1045,22 +973,14 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
                      */
                     if (util + util_eps < prev_util && avg_lat > prev_lat + lat_tol) {
                         /* 效用降低且时延明显变差：批次太大，收缩窗口 */
-                        if(dir ==1 && step > min_step)
-                            step >>= 1; /* 如果之前是增大批次的，且步长较大，则先减小步长 */
-                        else if (step < max_step)
-                            step <<= 1; /* 更激进地减小 */
                         dir = -1;
-                        opt_cnt = 0;
+                        if (step < max_step)
+                            step <<= 1; /* 更激进地减小 */
                     } else if (util > prev_util + util_eps && avg_lat <= prev_lat + lat_tol) {
-                        
                         /* 效用提高且时延未显著恶化：可以适当增大批次以追求更高吞吐 */
-
-                        if(dir == -1 && step > min_step)
-                            step >>= 1; /* 如果之前是减小批次的，且步长较大，则先减小步长 */
-                        else if (step < max_step)
-                            step <<= 1; /* 稍微加大步长，加快收敛到高吞吐点 */
                         dir = 1;
-                        opt_cnt = 0;
+                        if (step < max_step)
+                            step <<= 1; /* 稍微加大步长，加快收敛到高吞吐点 */
                     } else {
                         // /* 处于权衡区间：更偏向保障时延，步长减小，微调方向由时延决定 */
                         // if (avg_lat > prev_lat + lat_tol)
@@ -1075,43 +995,6 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
                         
                         if (step > min_step)
                             step >>= 1; /* 减小步长，避免在平衡点附近震荡过大 */
-
-                        opt_cnt++;
-                        if(opt_cnt == opt_target){
-                            if(is_trying){
-                                //*2之后的尝试
-                                if(util > prev_opt_util || util == prev_opt_util && avg_lat <= prev_opt_lat){
-                                    //说明当前成为最优
-                                    is_trying = 0;
-                                    has_try = 0;
-                                }
-                                else{
-                                    //前面最优，回退
-                                    has_try = 1;
-                                    is_trying = 0;
-                                    LIMIT_BATCHING = prev_opt_batch ;
-                                    dir = prev_opt_dir;
-                                    step = prev_opt_step;
-                                }
-                            }
-                            else{
-                                //收敛完成，进行尝试
-                                if(!has_try){
-                                    is_trying = 1;
-                                    prev_opt_batch = LIMIT_BATCHING;
-                                    prev_opt_dir = dir;
-                                    prev_opt_step = step;
-                                    prev_opt_util = util;
-                                    prev_opt_lat = avg_lat;
-                                    LIMIT_BATCHING *=2 ;
-                                    if(LIMIT_BATCHING > max_batch)
-                                        LIMIT_BATCHING = max_batch;
-                                    dir = 1;
-                                    step = init_step;
-                                }
-                            }
-                            opt_cnt = 0;
-                        }
                     }
 
                     /* 根据当前方向与步长更新 LIMIT_BATCHING，并限制在合法范围内 */
@@ -1130,8 +1013,6 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
                     prev_util = util;
                     prev_gbps = avg_gbps;
                     prev_lat = avg_lat;
-
-                    printk("update limit_batch %d, step %d\n",LIMIT_BATCHING,step);
                 }
             }
         }
@@ -1287,9 +1168,10 @@ int scheduler_polling(void *sched_data)
         {1, 0}
     };
     int order_idx, l, m, n;
-    uint64_t polling_seed,level_seed;
+    uint64_t polling_seed,level_seed,target_seed;
     polling_seed = 0xdeadbeef;
     level_seed = 0xdeadbeef;
+    target_seed = 0xdeadbeef;
     uint32_t user_table_val, kernel_table_val, user_level_val;
     int num_thread_qps, per_thread_qp_nums;
 
@@ -1305,8 +1187,6 @@ int scheduler_polling(void *sched_data)
     {
         free_cqe_idx[i] = i;
     }
-
-
 
     uint32_t level_wqe_cnt, wqe_cnt, user_threads_idx;
     int sending_case; // 对应新的wqe个数和旧的wqe个数的几种情况,0~2代表三种情况，3代表应该break了
@@ -1347,14 +1227,15 @@ int scheduler_polling(void *sched_data)
     int t_cnt_idx,t_cnt_hash = 0;
     uint64_t roll_cnt = 0;
 
-    uint64_t rem_cqes = 0;
+    uint64_t kernel_tot_db = 0, user_tot_cqes = 0;
+    uint64_t tot_cqes_delta = 0;
     
     uint32_t stuck_cnt = 0;
     uint32_t lat_cnt = 0;
     while (!kthread_should_stop())
     {
         /* 根据当前端到端吞吐与时延，自适应更新 LIMIT_BATCHING */
-        //update_limit_batch(sched);
+        update_limit_batch(sched);
         // for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++){
         //     end_time0 = rdtsc();
         //     elapsed_time0 = (end_time0 - start_time0)*1000000000 / cpu_frequency_hz;
@@ -1362,7 +1243,7 @@ int scheduler_polling(void *sched_data)
         //     printk(KERN_INFO "用 户态sq切换开销elapsed_time0 = %llu ns\n", elapsed_time0);
         // }
 
-        //target_sz = 0;
+        //target_sz = srm_fastrand(&target_seed) % NUM_LEVEL;
         target_sz = wqes_limit_sz - wqe_ewma_sz;
         if (target_sz <= 10240)
         {
@@ -1373,6 +1254,8 @@ int scheduler_polling(void *sched_data)
             // 这里开始取同等级的
             order_idx = 1;
         }
+
+        
         send_ok = 0;
         tfree = 1;
 
@@ -1703,7 +1586,7 @@ int scheduler_polling(void *sched_data)
                 user_table_val = smp_load_acquire(&user_wqe_table[n].val);
                 kernel_table_val = kernel_wqe_table[n];
 
-                if (user_table_val== kernel_table_val)
+                if (user_table_val == kernel_table_val)
                 {
                     // 此时该qp中没有wqe
 
@@ -1787,9 +1670,20 @@ int scheduler_polling(void *sched_data)
 
                 stuck_cnt = 0 ;    
                 //limit_batch controlling   
-                while(rem_cqes > LIMIT_BATCHING && !kthread_should_stop()){
-                    rem_cqes = calc_rem_cqes();
-                        
+                while((kernel_tot_db > user_tot_cqes + LIMIT_BATCHING && !(user_tot_cqes + LIMIT_BATCHING < user_tot_cqes)) && !kthread_should_stop()){
+                    user_tot_cqes = calc_tot_cqes(num_user_threads);
+                    user_tot_cqes -= tot_cqes_delta;
+                    if(kernel_tot_db < user_tot_cqes){
+                        kernel_tot_db -= user_tot_cqes;
+                        tot_cqes_delta += user_tot_cqes;
+                        user_tot_cqes = 0;
+                    }
+                    //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu\n",kernel_tot_db,user_tot_cqes);
+                    // if(kernel_tot_db > user_tot_cqes + LIMIT_BATCHING){
+
+                    //     //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu, wait...\n",kernel_tot_db,user_tot_cqes);
+                    //     msleep(0);
+                    // }      
                     stuck_cnt++;
                     if(stuck_cnt % 100000000 == 0){
                         msleep(0);
@@ -1888,8 +1782,6 @@ int scheduler_polling(void *sched_data)
                         smp_store_release(&qp_entry->valid, 0); // 置0表示该wqe已被调度器取走
 
 
-
-
                         // pr_info("DEBUG: sched_idx:%d,xrc_tot_bytes %d, new_tot_wqes %d, user_thread_idx %d, xrc_qp_idx %d, xrc_ctrl:%llu， cur_xrc_sended_wqes:%hu," 
                         //         "k:%d,sqb->cur_post:%d\n",
                         //         id,
@@ -1906,15 +1798,14 @@ int scheduler_polling(void *sched_data)
                         //     roll_cnt++;
                         // }
 
-                        if(!in_uthread_arr[user_thread_idx]){
-                            in_uthread_arr[user_thread_idx] = 1;
-                            uthread_arr[uthread_tail] = user_thread_idx;
-                            uthread_tail = (uthread_tail + 1) % MAX_USER_THREADS_NUM;
+                        if(kernel_tot_db + delta < kernel_tot_db){
+                            //防止溢出
+                            kernel_tot_db -= user_tot_cqes;
+                            tot_cqes_delta += user_tot_cqes;
+                            user_tot_cqes = 0;
                         }
-                        kdb_cqes_arr[user_thread_idx]+= delta;
-                        rem_cqes+= delta;
-
-
+                        kernel_tot_db += delta;
+                        
                         break;
                         
                     }
@@ -1988,18 +1879,17 @@ int scheduler_polling(void *sched_data)
                     //     ndelay(175);
                     // }
 
+                    if(kernel_tot_db + 1 < kernel_tot_db){
+                        //防止溢出
+                        kernel_tot_db -= user_tot_cqes;
+                        tot_cqes_delta += user_tot_cqes;
+                        user_tot_cqes = 0;
+                    }
+                    kernel_tot_db++;
 
                     // while(roll_cnt % 10000 != 0){
                     //     roll_cnt++;
                     // }
-
-                    if(!in_uthread_arr[user_thread_idx]){
-                        in_uthread_arr[user_thread_idx] = 1;
-                        uthread_arr[uthread_tail] = user_thread_idx;
-                        uthread_tail = (uthread_tail + 1) % MAX_USER_THREADS_NUM;
-                    }
-                    kdb_cqes_arr[user_thread_idx]++;
-                    rem_cqes++;
                 }
 
                 //pr_info("DEBUG:post send finished\n");
@@ -2009,9 +1899,8 @@ int scheduler_polling(void *sched_data)
 
                 
                 
-                if(send_ok){
+                if(send_ok)
                     break;
-                }
                 user_thread_idx++;
                 if (user_thread_idx >= num_user_threads)
                     user_thread_idx = 0;

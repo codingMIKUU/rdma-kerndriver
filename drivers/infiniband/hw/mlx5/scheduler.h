@@ -10,7 +10,7 @@
 static int debug = 0;
 #define NUM_SRMC 8192
 // 对于接收端，NUM_SRMC等于num_kqps*2才行（因为只有一个调度器，发送端两个调度器全发往它了）
-#define NUM_SQB 1024
+#define NUM_SQB 1026
 #define NUM_LEVEL 2
 
 #define IP_ADDR "192.168.1.5"
@@ -178,6 +178,7 @@ struct xrc_table_entry {
 
   uint64_t cur_Gbps;
   uint64_t cur_lat_us;
+  uint64_t update_cnt;
 } CACHELINE_ALIGNED_USER; // 对齐到多少字节？
 
 struct aligned_u32 {
