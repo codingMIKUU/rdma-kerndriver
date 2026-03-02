@@ -30,7 +30,7 @@ static int debug = 0;
 #define CALC_N(k, num_thread_qps_per_sched, level, num_user_threads, id_per_thread_qp_nums) \
     ((k) / (num_thread_qps_per_sched) + (level) * (num_user_threads) + (id_per_thread_qp_nums))
 
-#define MAX_USER_THREADS_NUM 513
+#define MAX_USER_THREADS_NUM 17
 #define MAX_USER_XRC_QP_PER_SRM 1024
 
 
