@@ -106,6 +106,7 @@ int mlx5_ib_create_ah(struct ib_ah *ibah, struct rdma_ah_init_attr *init_attr,
 		      struct ib_udata *udata)
 
 {
+	int i;
 	DEBUG_LOG("in mlx5_ib_create_ah\n");
 	struct rdma_ah_attr *ah_attr = init_attr->ah_attr;
 	struct mlx5_ib_ah *ah = to_mah(ibah);
@@ -147,8 +148,9 @@ int mlx5_ib_create_ah(struct ib_ah *ibah, struct rdma_ah_init_attr *init_attr,
 	{
 		// int idx = sched_hash_ip(grh->dgid.raw+12,sched_group.num_sched);
 		// ibah->srmc_flags = is_xrc_exists(&sched_group.scheds[idx],ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
-		ibah->srmc_flags = is_xrc_exists(&sched_group.scheds[0],ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
-		is_xrc_exists(&sched_group.scheds[1],ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
+		for(i = 0; i < sched_group.num_sched; i++){
+			ibah->srmc_flags = is_xrc_exists(&sched_group.scheds[i],ibah->pd, &grh->dgid,ah_attr->xrc_flags,ah_attr->dqpn);
+		}
 		DEBUG_LOG("内核srmc_flags: %u\n", ibah->srmc_flags);
 	}
 	create_ib_ah(dev, ah, init_attr);
