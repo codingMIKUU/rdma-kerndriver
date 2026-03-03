@@ -326,6 +326,7 @@ __used __section(__versions) = {
 	{ 0x27353696, "ib_register_device" },
 	{ 0x1ef1e99b, "mlx5_wc_support_get" },
 	{ 0x1000e51, "schedule" },
+	{ 0x1d24c881, "___ratelimit" },
 	{ 0xb8b9f817, "kmalloc_order_trace" },
 	{ 0x4f536e99, "memtrack_free" },
 	{ 0xac5fcec0, "in4_pton" },
@@ -477,4 +478,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "D1936867B58A0258009E066");
+MODULE_INFO(srcversion, "6D1ABA78028C4CA4E80B98F");

@@ -41,6 +41,7 @@ struct xrc_table_entry ***user_xrc_table;//三维数组
 static struct page **user_wqe_pages, **user_level_pages, **user_xrc_pages;
 uint32_t kernel_wqe_table[NUM_SQB], kernel_level_table[NUM_LEVEL * NUM_SCHED]; // 内核态表，表示当前srm qp中内核已发送多少个wqe
 int num_table_qp, num_table_level,num_xrc_per_srm,num_user_threads, num_xrc_qp;
+int num_table_apps;
 
 struct ib_cq *shared_cq[NUM_SCHED][CQ_NUM]; // 每个内核线程一个cq,大小srmc各CQ_NUM个cq
 
@@ -49,6 +50,25 @@ uint16_t tot_xrc_sended_wqes[MAX_USER_THREADS_NUM][NUM_SCHED*NUM_LEVEL][MAX_USER
 uint64_t lst_xrc_bytes[MAX_USER_THREADS_NUM][NUM_SCHED][MAX_USER_XRC_QP_PER_SRM]; // 0~4KB,记录上次统计时每个xrc qp发送的总字节数
 extern struct mlx5_uars_page *mlx5_get_uars_page_by_index(struct mlx5_core_dev *mdev,
                                                    int uar_index);
+
+static inline uint32_t srm_load_level_total(int level, int level_table_bias)
+{
+    uint32_t sum = 0;
+    int app;
+
+    if (!user_level_table)
+        return 0;
+
+    if (num_table_apps <= 1)
+        return smp_load_acquire(&user_level_table[level + level_table_bias].val);
+
+    for (app = 0; app < num_table_apps; app++) {
+        int idx = app * NUM_LEVEL * NUM_SCHED + level + level_table_bias;
+        sum += smp_load_acquire(&user_level_table[idx].val);
+    }
+
+    return sum;
+}
 
 
                                                    
@@ -1287,7 +1307,9 @@ int scheduler_polling(void *sched_data)
     polling_seed = 0xdeadbeef;
     level_seed = 0xdeadbeef;
     uint32_t user_table_val, kernel_table_val, user_level_val;
-    int num_thread_qps, per_thread_qp_nums;
+    int num_thread_qps;
+    int current_table_qp, current_num_user_threads;
+    int current_per_thread_qp_nums, current_id_mul_per_thread_qp_nums;
 
 
     int level;
@@ -1309,16 +1331,18 @@ int scheduler_polling(void *sched_data)
 
     while (!kthread_should_stop())
     {
-        if (num_table_qp != sched_group.sqb_cnt || !num_table_qp)
+        current_table_qp = READ_ONCE(num_table_qp);
+        current_num_user_threads = READ_ONCE(num_user_threads);
+        if (!current_table_qp || sched_group.num_sched <= 0 || !current_num_user_threads)
         {
             msleep(0);
             continue;
         }
 
-        
-        num_thread_qps = NUM_LEVEL * sched_group.num_sched;                       // 用户态每个线程有多少个qp
-        per_thread_qp_nums = sched_group.sqb_cnt / sched_group.num_sched; // 内核态每个调度器有多少个qp
-        // pr_info("num_user_threads:%d\n", num_user_threads);
+        num_thread_qps = NUM_LEVEL * sched_group.num_sched;
+
+        current_per_thread_qp_nums = current_table_qp / sched_group.num_sched;
+        current_id_mul_per_thread_qp_nums = id * current_per_thread_qp_nums;
         break;
     }
 
@@ -1333,7 +1357,6 @@ int scheduler_polling(void *sched_data)
 
     int level_table_bias = NUM_LEVEL * id;
     int user_thread_idx;
-    int id_mul_per_thread_qp_nums = id * per_thread_qp_nums;
     int cq_idx;
 
     int wqe_idx_queue[1024]; // TODO:需要根据用户态传下来的bucket大小信息动态分配
@@ -1350,6 +1373,19 @@ int scheduler_polling(void *sched_data)
     uint32_t lat_cnt = 0;
     while (!kthread_should_stop())
     {
+        if (unlikely(!READ_ONCE(user_wqe_table) || !READ_ONCE(user_level_table) ||
+                     !READ_ONCE(user_xrc_table))) {
+            msleep(1);
+            continue;
+        }
+
+      
+
+
+
+
+
+
         /* 根据当前端到端吞吐与时延，自适应更新 LIMIT_BATCHING */
         update_limit_batch(sched);
         // for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++){
@@ -1651,7 +1687,11 @@ int scheduler_polling(void *sched_data)
             level = polling_order[order_idx][l];
             // }
 
-            user_level_val = smp_load_acquire(&user_level_table[level + level_table_bias].val);
+            user_level_val = srm_load_level_total(level, level_table_bias);
+            if (unlikely(user_level_val < kernel_level_table[level + level_table_bias])) {
+                kernel_level_table[level + level_table_bias] = user_level_val;
+                continue;
+            }
             level_wqe_cnt = user_level_val - kernel_level_table[level + level_table_bias];
             if (!level_wqe_cnt)
             {
@@ -1678,10 +1718,10 @@ int scheduler_polling(void *sched_data)
 
 
             if(level != 0 || lat_cnt % 2 != 0){
-                user_thread_idx = srm_fastrand(&polling_seed) % num_user_threads;
+                user_thread_idx = srm_fastrand(&polling_seed) % current_num_user_threads;
             }
             else{
-                user_thread_idx = num_user_threads - 1;
+                user_thread_idx = current_num_user_threads - 1;
                 //user_thread_idx = srm_fastrand(&polling_seed) % num_user_threads;
             }
             
@@ -1694,14 +1734,23 @@ int scheduler_polling(void *sched_data)
             //user_thread_idx = 0 / 16;
             k = level * sched_group.num_sched + id + user_thread_idx * num_thread_qps;
 
-            for (m = 0; m < num_user_threads;
-                 m++, k = (k + num_thread_qps) % (sched_group.sqb_cnt))//时延线程需改
+            for (m = 0; m < current_num_user_threads;
+                m++, k = (k + num_thread_qps) % current_table_qp)//时延线程需改
             {
 
-                n = user_thread_idx + level * num_user_threads + id_mul_per_thread_qp_nums;
+                n = user_thread_idx * NUM_LEVEL * NUM_SCHED + level * NUM_SCHED + id;
+                //n = user_thread_idx + level * current_num_user_threads + current_id_mul_per_thread_qp_nums;
 
                 user_table_val = smp_load_acquire(&user_wqe_table[n].val);
                 kernel_table_val = kernel_wqe_table[n];
+
+                if (unlikely(user_table_val < kernel_table_val)) {
+                    kernel_wqe_table[n] = user_table_val;
+                    user_thread_idx++;
+                    if (user_thread_idx >= current_num_user_threads)
+                        user_thread_idx = 0;
+                    continue;
+                }
 
                 if (user_table_val == kernel_table_val)
                 {
@@ -1768,7 +1817,7 @@ int scheduler_polling(void *sched_data)
                     // }
 
                     user_thread_idx++;
-                    if (user_thread_idx >= num_user_threads)//如果时延线程提前,需改
+                    if (user_thread_idx >= current_num_user_threads)//如果时延线程提前,需改
                     {
                         user_thread_idx = 0;
                     }
@@ -1778,8 +1827,10 @@ int scheduler_polling(void *sched_data)
                 sqb = sched_group.sqb_arr[k];
                 if (sqb == NULL)
                 {
-                    pr_err("sqb %d is NULL\n", k);
-                    goto err;
+                    user_thread_idx++;
+                    if (user_thread_idx >= current_num_user_threads)
+                        user_thread_idx = 0;
+                    continue;
                 }
 
                 idx_queue_cnt = 0;
@@ -1789,7 +1840,7 @@ int scheduler_polling(void *sched_data)
                 //limit_batch controlling   
                 while((kernel_tot_db > user_tot_cqes + LIMIT_BATCHING && !(user_tot_cqes + LIMIT_BATCHING < user_tot_cqes)) && !kthread_should_stop()){
                     //uint64_t t_st = rdtsc();
-                    user_tot_cqes = calc_tot_cqes(num_user_threads);
+                    user_tot_cqes = calc_tot_cqes(current_num_user_threads);
                     //uint64_t t_ed = rdtsc();
                     
                     user_tot_cqes -= tot_cqes_delta;
@@ -1822,8 +1873,11 @@ int scheduler_polling(void *sched_data)
                         struct srm_qp_entry *qp_entry = (struct srm_qp_entry *)sqb->buf + (sqb->cur_post & (sqb->wqe_cnt - 1));
                         uint32_t srm_qp_valid = smp_load_acquire(&qp_entry->valid);
                         if(!srm_qp_valid){
-                            pr_err("level = 0,qp entry is invalid. k:%d, sqb->cur_post:%u,user_thread_idx:%d, user_wqe_table:%u, user_kernel_table:%u\n",k, sqb->cur_post, user_thread_idx,user_wqe_table[n].val, kernel_wqe_table[n]);
-                            goto err;
+                            pr_warn_ratelimited("level=0 qp entry invalid, resync k:%d user_thread_idx:%d user_wqe:%u kernel_wqe:%u\n",
+                                                k, user_thread_idx, user_wqe_table[n].val, kernel_wqe_table[n]);
+                            kernel_wqe_table[n] = user_table_val;
+                            kernel_level_table[level + level_table_bias] = user_level_val;
+                            break;
                         }
                         int xrc_qp_idx = qp_entry->qp_idx;
                         
@@ -1938,8 +1992,11 @@ int scheduler_polling(void *sched_data)
                     struct srm_qp_entry *qp_entry = (struct srm_qp_entry *)sqb->buf + (sqb->cur_post & (sqb->wqe_cnt - 1));
                     uint32_t srm_qp_valid = smp_load_acquire(&qp_entry->valid);
                     if(!srm_qp_valid){
-                        pr_err("level > 0, qp entry is invalid\n");
-                        goto err;
+                        pr_warn_ratelimited("level>0 qp entry invalid, resync k:%d user_thread_idx:%d user_wqe:%u kernel_wqe:%u\n",
+                                            k, user_thread_idx, user_wqe_table[n].val, kernel_wqe_table[n]);
+                        kernel_wqe_table[n] = user_table_val;
+                        kernel_level_table[level + level_table_bias] = user_level_val;
+                        break;
                     }
                     int xrc_qp_idx = qp_entry->qp_idx;
                     smp_store_release(&qp_entry->valid, 0); // 置0表示该wqe已被调度器取走
@@ -2025,7 +2082,7 @@ int scheduler_polling(void *sched_data)
                     break;
                 }
                 user_thread_idx++;
-                if (user_thread_idx >= num_user_threads)
+                if (user_thread_idx >= current_num_user_threads)
                     user_thread_idx = 0;
             }
             if (send_ok)
@@ -2072,7 +2129,6 @@ out:
     kfree(in_queue);
     kfree(free_cqe_idx);
     kfree(level_qp_st_arr);
-    sched->task = NULL;
 
     // // 文件
     // filp_close(filp, NULL);
@@ -2086,7 +2142,6 @@ err:
     kfree(in_queue);
     kfree(free_cqe_idx);
     kfree(level_qp_st_arr);
-    sched->task = NULL;
 
     // // 文件
     // filp_close(filp, NULL);
@@ -2176,13 +2231,22 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
     int npages;
     int i, j,k;
 
+    if (!sched_group || !sched_group->scheds || sched_group->num_sched <= 0) {
+        pr_warn("mlx5_sched_exit: already cleaned or uninitialized\n");
+        return;
+    }
+
     for (i = 0; i < sched_group->num_sched; i++)
     {
         DEBUG_LOG("Ready to stop sched->task %d\n", i);
         sched = &sched_group->scheds[i];
-        if (sched->task)
+        if (sched->task && !IS_ERR(sched->task) && pid_alive(sched->task))
         {
             kthread_stop(sched->task);
+            sched->task = NULL;
+        }
+        else
+        {
             sched->task = NULL;
         }
     }
@@ -2253,27 +2317,39 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
     // clean up srm qp table
     if (user_wqe_table)
     {
-        npages = ((num_table_qp * sizeof(user_wqe_table[0])) + PAGE_SIZE - 1) / PAGE_SIZE;
-        vunmap(user_wqe_table);
-        put_user_pages(user_wqe_pages, npages);
-        kfree(user_wqe_pages);
+        if (user_wqe_pages) {
+            npages = ((num_table_qp * sizeof(user_wqe_table[0])) + PAGE_SIZE - 1) / PAGE_SIZE;
+            vunmap(user_wqe_table);
+            put_user_pages(user_wqe_pages, npages);
+            kfree(user_wqe_pages);
+            user_wqe_pages = NULL;
+        }
+        user_wqe_table = NULL;
     }
     pr_info("clean wqe table success\n");
 
     if (user_level_table)
     {
-        npages = ((num_table_level * sizeof(user_level_table[0])) + PAGE_SIZE - 1) / PAGE_SIZE;
-        vunmap(user_level_table);
-        put_user_pages(user_level_pages, npages);
-        kfree(user_level_pages);
+        if (user_level_pages) {
+            npages = ((num_table_level * sizeof(user_level_table[0])) + PAGE_SIZE - 1) / PAGE_SIZE;
+            vunmap(user_level_table);
+            put_user_pages(user_level_pages, npages);
+            kfree(user_level_pages);
+            user_level_pages = NULL;
+        }
+        user_level_table = NULL;
     }
     pr_info("clean level table success\n");
 
     if(user_xrc_table){
-        npages = ((num_xrc_qp * sizeof(user_xrc_table[0][0][0])) + PAGE_SIZE - 1) / PAGE_SIZE;
-        vunmap(user_xrc_table[0][0]);
-        put_user_pages(user_xrc_pages, npages);
-        kfree(user_xrc_pages);
+        if (user_xrc_pages) {
+            npages = ((num_xrc_qp * sizeof(user_xrc_table[0][0][0])) + PAGE_SIZE - 1) / PAGE_SIZE;
+            vunmap(user_xrc_table[0][0]);
+            put_user_pages(user_xrc_pages, npages);
+            kfree(user_xrc_pages);
+            user_xrc_pages = NULL;
+        }
+        user_xrc_table = NULL;
     }
     pr_info("clean xrc table success\n");
 
@@ -2293,9 +2369,11 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
         kfree(bf);
     }
 
-   
+    sched_group->xrc_bf_cnt = 0;
 
     kfree(sched_group->scheds);
+    sched_group->scheds = NULL;
+    sched_group->num_sched = 0;
 
     pr_info("mlx5_sched_exit success\n");
     // mlx5_ib_unmap_ubuf(sched,0);
@@ -3164,6 +3242,7 @@ int sched_hash_ip(char addr[4], int n)
 int mlx5_ib_register_external_table(void *table, size_t size, struct page **pages, void *level_table, size_t level_size, struct page **level_pages,
                                            void *xrc_table, size_t xrc_size, struct page **xrc_pages, int xrc_qp_num_per_srm)
 {
+    int prev_num_user_threads = num_user_threads;
     user_wqe_table = (struct aligned_u32*)table;
     user_wqe_pages = pages;
     if (size % sizeof(struct aligned_u32) != 0)
@@ -3182,13 +3261,41 @@ int mlx5_ib_register_external_table(void *table, size_t size, struct page **page
     num_table_level = level_size / sizeof(struct aligned_u32);
     pr_info("level数量：%d\n", num_table_level);
 
+    num_table_apps = num_table_level / (NUM_LEVEL * NUM_SCHED);
+    if (num_table_apps <= 0)
+        num_table_apps = 1;
+
     int i, j;
 
     num_user_threads = num_table_qp / (NUM_LEVEL*NUM_SCHED);
 
+    if (num_user_threads > MAX_USER_THREADS_NUM) {
+        pr_err("num_user_threads(%d) exceeds MAX_USER_THREADS_NUM(%d)\n",
+               num_user_threads, MAX_USER_THREADS_NUM);
+        return -EINVAL;
+    }
+
+    if (user_xrc_table) {
+        for (i = 0; i < prev_num_user_threads; i++) {
+            if (user_xrc_table[i])
+                kfree(user_xrc_table[i]);
+        }
+        kfree(user_xrc_table);
+        user_xrc_table = NULL;
+    }
+
     user_xrc_table = kmalloc(sizeof(struct xrc_table_entry**) * num_user_threads, GFP_KERNEL);
+    if (!user_xrc_table)
+        return -ENOMEM;
     for(i = 0;i<num_user_threads;i++){
         user_xrc_table[i] = kmalloc(sizeof(struct xrc_table_entry*) * (NUM_LEVEL*NUM_SCHED), GFP_KERNEL);
+        if (!user_xrc_table[i]) {
+            while (--i >= 0)
+                kfree(user_xrc_table[i]);
+            kfree(user_xrc_table);
+            user_xrc_table = NULL;
+            return -ENOMEM;
+        }
         for(j=0;j<NUM_LEVEL*NUM_SCHED;j++){
             user_xrc_table[i][j] = (struct xrc_table_entry *)xrc_table + i*(NUM_LEVEL*NUM_SCHED)*xrc_qp_num_per_srm + j*xrc_qp_num_per_srm;
         }
