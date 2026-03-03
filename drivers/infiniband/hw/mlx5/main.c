@@ -93,7 +93,7 @@ static LIST_HEAD(mlx5_ib_dev_list);
  */
 static DEFINE_MUTEX(mlx5_ib_multiport_mutex);
 
-static const int num_sched = 2;
+static const int num_sched = 1;
 struct mlx5_ib_sched_group sched_group;
 
 
