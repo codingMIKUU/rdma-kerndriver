@@ -877,6 +877,11 @@ static inline uint64_t calc_time(uint64_t start_cycles, uint64_t end_cycles){
 }
 
 void srm_doorbell(struct xrc_bf_entry *bf, uint64_t ctrl,uint16_t cur_post){
+    if (unlikely(!bf)) {
+        pr_warn_ratelimited("srm_doorbell: bf is NULL, ctrl=%llx cur_post=%u\n",
+            (unsigned long long)ctrl, cur_post);
+        return;
+    }
     //pr_info("in srm_doorbell\n");
     //wmb();
     //pr_info("bf->db.kaddr:%px\n",bf->db.kaddr);
@@ -940,8 +945,40 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
 
         /* 计算平均值，单位仍保持为 Gbps 与 us */
         {
-            u64 avg_gbps = smp_load_acquire(&user_xrc_table[0][0][0].cur_Gbps);
-            u64 avg_lat =  smp_load_acquire(&user_xrc_table[num_user_threads-1][0][0].cur_lat_us);
+            u64 sum_gbps = 0, sum_lat = 0;
+            u64 valid_gbps_cnt = 0, valid_lat_cnt = 0;
+            u64 avg_gbps, avg_lat;
+            int t;
+
+            gbps_update_cnt = 0;
+            lat_update_cnt = 0;
+
+            for (t = 0; t < num_user_threads; t++) {
+                u64 cur_gbps = smp_load_acquire(&user_xrc_table[t][0][0].cur_Gbps);
+                u64 cur_upd = smp_load_acquire(&user_xrc_table[t][0][0].update_cnt);
+
+                if (!cur_gbps)
+                    continue;
+
+                sum_gbps += cur_gbps;
+                valid_gbps_cnt++;
+                gbps_update_cnt += cur_upd;
+            }
+
+            for (t = 0; t < num_user_threads; t++) {
+                u64 cur_lat = smp_load_acquire(&user_xrc_table[t][0][0].cur_lat_us);
+                u64 cur_upd = smp_load_acquire(&user_xrc_table[t][0][0].update_cnt);
+
+                if (!cur_lat)
+                    continue;
+
+                sum_lat += cur_lat;
+                valid_lat_cnt++;
+                lat_update_cnt += cur_upd;
+            }
+
+            avg_gbps = valid_gbps_cnt ? (sum_gbps / valid_gbps_cnt) : 0;
+            avg_lat = valid_lat_cnt ? (sum_lat / valid_lat_cnt) : 0;
 
             /* 计算综合效用：吞吐优先，在保证时延不过度恶化的前提下尽量拉高吞吐 */
             const u32 throughput_weight = 1000; /* Gbps 权重，可根据实验调优 */
@@ -965,8 +1002,6 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
                 const int init_step = 1;
                 static int step = init_step; /* 当前步长 */
                 
-                static int gbps_update_cnt = 0;
-
                 const int min_step = 1;
                 const int max_step = 512;
                 const int min_batch = 8;
@@ -974,14 +1009,10 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
 
                 u64 util_eps = prev_util / 40; /* ~2.5% */
                 u64 lat_tol = prev_lat / 5 ;   /* ~20% */
-
-
-                gbps_update_cnt = smp_load_acquire(&user_xrc_table[0][0][0].update_cnt);
-                lat_update_cnt = smp_load_acquire(&user_xrc_table[num_user_threads-1][0][0].update_cnt);
                 //如果吞吐和时延没有都更新，则等待
                 if (!init_done || prev_gbps_update_cnt == gbps_update_cnt || prev_lat_update_cnt == lat_update_cnt) {
                     opt_cnt++;
-                    if(opt_cnt == opt_target){
+                    if(!init_done && opt_cnt == opt_target){
                         if(is_trying){
                             //*2之后的尝试
                             if(util > prev_opt_util + util_eps || util >= prev_opt_util-util_eps && avg_lat + lat_tol <= prev_opt_lat || !init_done){
@@ -1146,8 +1177,8 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
 
                     printk("update limit_batch %d, step %d, avg_gbps: %llu, avg_lat: %llu\n",LIMIT_BATCHING,step,avg_gbps,avg_lat);
 
-                    prev_gbps_update_cnt = smp_load_acquire(&user_xrc_table[0][0][0].update_cnt);
-                    prev_lat_update_cnt = smp_load_acquire(&user_xrc_table[num_user_threads-1][0][0].update_cnt);
+                    prev_gbps_update_cnt = gbps_update_cnt;
+                    prev_lat_update_cnt = lat_update_cnt;
                 }
             }
         }
@@ -1827,6 +1858,10 @@ int scheduler_polling(void *sched_data)
                 sqb = sched_group.sqb_arr[k];
                 if (sqb == NULL)
                 {
+				if (unlikely(k >= sched_group.sqb_cnt)) {
+					pr_warn_ratelimited("sched idx mismatch: k=%d sqb_cnt=%u n=%d user_thread_idx=%d level=%d id=%d\n",
+						k, sched_group.sqb_cnt, n, user_thread_idx, level, id);
+				}
                     user_thread_idx++;
                     if (user_thread_idx >= current_num_user_threads)
                         user_thread_idx = 0;
@@ -1875,11 +1910,23 @@ int scheduler_polling(void *sched_data)
                         if(!srm_qp_valid){
                             pr_warn_ratelimited("level=0 qp entry invalid, resync k:%d user_thread_idx:%d user_wqe:%u kernel_wqe:%u\n",
                                                 k, user_thread_idx, user_wqe_table[n].val, kernel_wqe_table[n]);
+						pr_warn_ratelimited("invalid detail: n=%d sqb_idx=%d qpn=%d cur_post=%u wqe_cnt=%u level=%d sched=%d\n",
+							n, sqb->idx, sqb->qpn, sqb->cur_post, sqb->wqe_cnt, level, id);
                             kernel_wqe_table[n] = user_table_val;
                             kernel_level_table[level + level_table_bias] = user_level_val;
+                            if (likely(sqb->wqe_cnt))
+                                sqb->cur_post = user_table_val & (sqb->wqe_cnt - 1);
                             break;
                         }
                         int xrc_qp_idx = qp_entry->qp_idx;
+					if (unlikely(xrc_qp_idx < 0 || xrc_qp_idx >= num_xrc_per_srm)) {
+						pr_warn_ratelimited("xrc_qp_idx OOB: idx=%d num_xrc_per_srm=%d n=%d k=%d user_thread_idx=%d\n",
+							xrc_qp_idx, num_xrc_per_srm, n, k, user_thread_idx);
+						kernel_wqe_table[n] = user_table_val;
+						if (likely(sqb->wqe_cnt))
+							sqb->cur_post = user_table_val & (sqb->wqe_cnt - 1);
+						break;
+					}
                         
                         if(tot_xrc_sended_wqes[user_thread_idx][NUM_SCHED*level + id][xrc_qp_idx] != cur_xrc_sended_wqes[user_thread_idx][id][xrc_qp_idx]){
                             //代表当前的srm qp entry对应的wqe已经doorbell了，直接++
@@ -1994,11 +2041,23 @@ int scheduler_polling(void *sched_data)
                     if(!srm_qp_valid){
                         pr_warn_ratelimited("level>0 qp entry invalid, resync k:%d user_thread_idx:%d user_wqe:%u kernel_wqe:%u\n",
                                             k, user_thread_idx, user_wqe_table[n].val, kernel_wqe_table[n]);
+					pr_warn_ratelimited("invalid detail: n=%d sqb_idx=%d qpn=%d cur_post=%u wqe_cnt=%u level=%d sched=%d\n",
+						n, sqb->idx, sqb->qpn, sqb->cur_post, sqb->wqe_cnt, level, id);
                         kernel_wqe_table[n] = user_table_val;
                         kernel_level_table[level + level_table_bias] = user_level_val;
+                        if (likely(sqb->wqe_cnt))
+                            sqb->cur_post = user_table_val & (sqb->wqe_cnt - 1);
                         break;
                     }
                     int xrc_qp_idx = qp_entry->qp_idx;
+				if (unlikely(xrc_qp_idx < 0 || xrc_qp_idx >= num_xrc_per_srm)) {
+					pr_warn_ratelimited("xrc_qp_idx OOB: idx=%d num_xrc_per_srm=%d n=%d k=%d user_thread_idx=%d\n",
+						xrc_qp_idx, num_xrc_per_srm, n, k, user_thread_idx);
+					kernel_wqe_table[n] = user_table_val;
+					if (likely(sqb->wqe_cnt))
+						sqb->cur_post = user_table_val & (sqb->wqe_cnt - 1);
+					break;
+				}
                     smp_store_release(&qp_entry->valid, 0); // 置0表示该wqe已被调度器取走
                     
                     uint64_t xrc_ctrl = qp_entry->ctrl;
@@ -2160,6 +2219,14 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
 
     mutex_init(&sched_group->sq_lock);
     mutex_init(&sched_group->cq_lock);
+
+    /* Fresh scheduler lifecycle state */
+    sched_group->sqb_cnt = 0;
+    sched_group->cqb_cnt = 0;
+    sched_group->xrc_bf_cnt = 0;
+    memset(sched_group->sqb_arr, 0, sizeof(sched_group->sqb_arr));
+    memset(sched_group->cqb_arr, 0, sizeof(sched_group->cqb_arr));
+    memset(sched_group->xrc_bf_arr, 0, sizeof(sched_group->xrc_bf_arr));
 
     sched_group->num_sched = num;
     sched_group->scheds = kzalloc(num * sizeof(struct mlx5_ib_sched), GFP_KERNEL);
@@ -3308,6 +3375,13 @@ int mlx5_ib_register_external_table(void *table, size_t size, struct page **page
     num_xrc_qp = num_user_threads * NUM_SCHED * num_xrc_per_srm;
 
     pr_info("num_xrc_per_srm:%d,num_xrc_qp:%d,num_user_threads:%d\n",num_xrc_per_srm,num_xrc_qp,num_user_threads);
+
+    /* Clear stale accounting carried across previous runs/sessions. */
+    memset(kernel_wqe_table, 0, sizeof(kernel_wqe_table));
+    memset(kernel_level_table, 0, sizeof(kernel_level_table));
+    memset(tot_xrc_sended_wqes, 0, sizeof(tot_xrc_sended_wqes));
+    memset(cur_xrc_sended_wqes, 0, sizeof(cur_xrc_sended_wqes));
+    memset(lst_xrc_bytes, 0, sizeof(lst_xrc_bytes));
 
     
 

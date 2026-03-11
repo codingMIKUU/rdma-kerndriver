@@ -2599,12 +2599,13 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 		}
 	}
 
-	if(init_attr->qp_type == IB_QPT_XRC_INI){
+	if (init_attr->qp_type == IB_QPT_RC &&
+	    (qp->flags_en & MLX5_QP_FLAG_SRM_SENDER)) {
 		if(srm_map_bf(&sched_group,ucmd,dev)){
 			pr_err("map bf failed\n");
 		}
 		else 
-			pr_info("map bf for xrc ini qp success\n");
+			pr_info("map bf for rc qp success\n");
 	}
 	kvfree(in);
 	if (err)
@@ -3178,6 +3179,7 @@ static int process_vendor_flags(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 
 	process_vendor_flag(dev, &flags, MLX5_QP_FLAG_BFREG_INDEX, true, qp);
 	process_vendor_flag(dev, &flags, MLX5_QP_FLAG_UAR_PAGE_INDEX, true, qp);
+	process_vendor_flag(dev, &flags, MLX5_QP_FLAG_SRM_SENDER, true, qp);
 
 	cond = qp->flags_en & ~(MLX5_QP_FLAG_TUNNEL_OFFLOADS |
 				MLX5_QP_FLAG_TIR_ALLOW_SELF_LB_UC |
