@@ -1919,14 +1919,14 @@ int scheduler_polling(void *sched_data)
                             break;
                         }
                         int xrc_qp_idx = qp_entry->qp_idx;
-					if (unlikely(xrc_qp_idx < 0 || xrc_qp_idx >= num_xrc_per_srm)) {
-						pr_warn_ratelimited("xrc_qp_idx OOB: idx=%d num_xrc_per_srm=%d n=%d k=%d user_thread_idx=%d\n",
-							xrc_qp_idx, num_xrc_per_srm, n, k, user_thread_idx);
-						kernel_wqe_table[n] = user_table_val;
-						if (likely(sqb->wqe_cnt))
-							sqb->cur_post = user_table_val & (sqb->wqe_cnt - 1);
-						break;
-					}
+                        if (unlikely(xrc_qp_idx < 0 || xrc_qp_idx >= num_xrc_per_srm)) {
+                            pr_warn_ratelimited("xrc_qp_idx OOB: idx=%d num_xrc_per_srm=%d n=%d k=%d user_thread_idx=%d\n",
+                                xrc_qp_idx, num_xrc_per_srm, n, k, user_thread_idx);
+                            kernel_wqe_table[n] = user_table_val;
+                            if (likely(sqb->wqe_cnt))
+                                sqb->cur_post = user_table_val & (sqb->wqe_cnt - 1);
+                            break;
+                        }
                         
                         if(tot_xrc_sended_wqes[user_thread_idx][NUM_SCHED*level + id][xrc_qp_idx] != cur_xrc_sended_wqes[user_thread_idx][id][xrc_qp_idx]){
                             //代表当前的srm qp entry对应的wqe已经doorbell了，直接++
@@ -1962,9 +1962,12 @@ int scheduler_polling(void *sched_data)
                         // db_st_cycles = rdtsc();
 
 
-                        srm_doorbell(sched_group.xrc_bf_arr[user_thread_idx*NUM_SCHED*NUM_LEVEL*num_xrc_per_srm
-                                        + (level*NUM_SCHED + id)*num_xrc_per_srm + xrc_qp_idx],
+                        int bf_idx = user_thread_idx * NUM_SCHED * NUM_LEVEL * num_xrc_per_srm +
+                                     (level * NUM_SCHED + id) * num_xrc_per_srm +
+                                     xrc_qp_idx;
+                        srm_doorbell(sched_group.xrc_bf_arr[bf_idx],
                                     xrc_ctrl,new_tot_wqes-1);
+
 
                         // // //smp_store_release(&qp_entry->cycles,rdtsc());
                         // db_ed_cycles = rdtsc();
@@ -2029,6 +2032,11 @@ int scheduler_polling(void *sched_data)
                         }
                         kernel_tot_db += delta;
                         
+                        // pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d xrc_ctrl=%llu\n",
+                        //     xrc_qp_idx, bf_idx, num_xrc_per_srm, level, id, n, k,
+                        //     user_thread_idx, xrc_ctrl);
+
+
                         break;
                         
                     }
@@ -2050,14 +2058,14 @@ int scheduler_polling(void *sched_data)
                         break;
                     }
                     int xrc_qp_idx = qp_entry->qp_idx;
-				if (unlikely(xrc_qp_idx < 0 || xrc_qp_idx >= num_xrc_per_srm)) {
-					pr_warn_ratelimited("xrc_qp_idx OOB: idx=%d num_xrc_per_srm=%d n=%d k=%d user_thread_idx=%d\n",
-						xrc_qp_idx, num_xrc_per_srm, n, k, user_thread_idx);
-					kernel_wqe_table[n] = user_table_val;
-					if (likely(sqb->wqe_cnt))
-						sqb->cur_post = user_table_val & (sqb->wqe_cnt - 1);
-					break;
-				}
+                    if (unlikely(xrc_qp_idx < 0 || xrc_qp_idx >= num_xrc_per_srm)) {
+                        pr_warn_ratelimited("xrc_qp_idx OOB: idx=%d num_xrc_per_srm=%d n=%d k=%d user_thread_idx=%d\n",
+                            xrc_qp_idx, num_xrc_per_srm, n, k, user_thread_idx);
+                        kernel_wqe_table[n] = user_table_val;
+                        if (likely(sqb->wqe_cnt))
+                            sqb->cur_post = user_table_val & (sqb->wqe_cnt - 1);
+                        break;
+                    }
                     smp_store_release(&qp_entry->valid, 0); // 置0表示该wqe已被调度器取走
                     
                     uint64_t xrc_ctrl = qp_entry->ctrl;
@@ -2067,8 +2075,10 @@ int scheduler_polling(void *sched_data)
                     //  // //文件
                     // db_st_cycles = rdtsc();
 
-                    srm_doorbell(sched_group.xrc_bf_arr[user_thread_idx*NUM_SCHED*NUM_LEVEL*num_xrc_per_srm
-                                    + (level*NUM_SCHED + id)*num_xrc_per_srm + xrc_qp_idx],
+                    int bf_idx = user_thread_idx * NUM_SCHED * NUM_LEVEL * num_xrc_per_srm +
+                                 (level * NUM_SCHED + id) * num_xrc_per_srm +
+                                 xrc_qp_idx;
+                    srm_doorbell(sched_group.xrc_bf_arr[bf_idx],
                                 xrc_ctrl,tot_xrc_sended_wqes[user_thread_idx][level*NUM_SCHED + id][xrc_qp_idx]);
 
 
@@ -2125,6 +2135,11 @@ int scheduler_polling(void *sched_data)
                     }
                     kernel_tot_db++;
 
+                    // pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d\n",
+                    //     xrc_qp_idx, bf_idx, num_xrc_per_srm, level, id, n, k,
+                    //     user_thread_idx);
+
+
                     // while(roll_cnt % 10000 != 0){
                     //     roll_cnt++;
                     // }
@@ -2144,8 +2159,10 @@ int scheduler_polling(void *sched_data)
                 if (user_thread_idx >= current_num_user_threads)
                     user_thread_idx = 0;
             }
-            if (send_ok)
+            if (send_ok){
+
                 break;
+            }
 
             // pr_err("shouldn't find no wqe to send\n");
             //  // 该等级空转，上升skip level，最多退避256次
@@ -3364,7 +3381,7 @@ int mlx5_ib_register_external_table(void *table, size_t size, struct page **page
             return -ENOMEM;
         }
         for(j=0;j<NUM_LEVEL*NUM_SCHED;j++){
-            user_xrc_table[i][j] = (struct xrc_table_entry *)xrc_table + i*(NUM_LEVEL*NUM_SCHED)*xrc_qp_num_per_srm + j*xrc_qp_num_per_srm;
+            user_xrc_table[i][j] = (struct xrc_table_entry *)xrc_table + i*(NUM_LEVEL*NUM_SCHED)*MAX_USER_XRC_QP_PER_SRM + j*MAX_USER_XRC_QP_PER_SRM;
         }
     }
 
