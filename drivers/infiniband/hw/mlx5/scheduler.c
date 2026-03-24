@@ -1898,7 +1898,7 @@ int scheduler_polling(void *sched_data)
                     }
                     cpu_relax();
                 }
-             
+                //pr_info("user_tot_cqes:%llu\n", calc_tot_cqes(current_num_user_threads));
                 
                 if (level == 0)
                 {
@@ -1936,6 +1936,9 @@ int scheduler_polling(void *sched_data)
                             //pr_info("sended wqe,skip\n");
                             kernel_wqe_table[n]++;
                             kernel_level_table[level + level_table_bias]++;
+
+                            pr_info_ratelimited("user_level_val=%llu kernel_level_val=%llu\n",
+                                user_level_val, kernel_level_table[level + level_table_bias]);
 
                             cpu_relax();
                             continue;
@@ -2032,9 +2035,9 @@ int scheduler_polling(void *sched_data)
                         }
                         kernel_tot_db += delta;
                         
-                        // pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d xrc_ctrl=%llu\n",
-                        //     xrc_qp_idx, bf_idx, num_xrc_per_srm, level, id, n, k,
-                        //     user_thread_idx, xrc_ctrl);
+                        pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d user_level_val=%llu kernel_level_val=%llu xrc_ctrl=%llu\n",
+                            xrc_qp_idx, bf_idx, num_xrc_per_srm, level, id, n, k,
+                            user_thread_idx,user_level_val,kernel_level_table[level + level_table_bias], xrc_ctrl);
 
 
                         break;
@@ -2135,9 +2138,9 @@ int scheduler_polling(void *sched_data)
                     }
                     kernel_tot_db++;
 
-                    // pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d\n",
-                    //     xrc_qp_idx, bf_idx, num_xrc_per_srm, level, id, n, k,
-                    //     user_thread_idx);
+                    pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d\n",
+                        xrc_qp_idx, bf_idx, num_xrc_per_srm, level, id, n, k,
+                        user_thread_idx);
 
 
                     // while(roll_cnt % 10000 != 0){
