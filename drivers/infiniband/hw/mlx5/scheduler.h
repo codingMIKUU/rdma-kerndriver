@@ -56,7 +56,7 @@ struct srm_qp_entry{
 	uint32_t valid;
     uint64_t ctrl;
     uint64_t bytes;
-    //uint64_t cycles;
+    uint64_t cycles;
 }CACHELINE_ALIGNED_USER;
 struct mlx5_ib_cqbuf
 {

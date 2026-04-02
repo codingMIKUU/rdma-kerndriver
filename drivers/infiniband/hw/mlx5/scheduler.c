@@ -1197,6 +1197,218 @@ static inline uint64_t fc_sum(uint64_t *arr, int n){
     }
     return sum;
 }
+
+/*
+ * 在阻塞等待 inflight 降到阈值期间，执行一次“时延线程”调度。
+ * 该路径复用主调度中的发送与元数据更新逻辑，避免时延线程被纯 cpu_relax 饿死。
+ */
+static __always_inline bool srm_poll_latency_once(
+    struct mlx5_ib_sched_group *sched_group,
+    int id,
+    int current_num_user_threads,
+    int current_table_qp,
+    int num_thread_qps,
+    int level_table_bias,
+    uint32_t real_num_threads,
+    int wqes_limit_sz,
+    uint64_t *wqe_tot_sz,
+    uint64_t *wqe_ewma_sz,
+    uint64_t cur_wqes[WQES_ARR_SZ],
+    int *wqe_cur_idx,
+    uint64_t alpha_a,
+    uint64_t alpha_b)
+{
+    int polling_order[][NUM_LEVEL] = {
+        {0, 1},
+        {1, 0}
+    };
+    int64_t target_sz;
+    int order_idx;
+    int l, n, k;
+    int level;
+    int latency_thread_idx;
+    uint32_t user_level_val;
+    uint32_t level_wqe_cnt;
+    uint32_t user_table_val, kernel_table_val;
+
+    if (!current_num_user_threads)
+        return false;
+
+    latency_thread_idx = (int)real_num_threads - 1;
+    if (latency_thread_idx < 0 || latency_thread_idx >= current_num_user_threads)
+        return false;
+
+    target_sz = wqes_limit_sz - *wqe_ewma_sz;
+    if (target_sz <= 10240)
+        order_idx = 0;
+    else
+        order_idx = 1;
+
+    for (l = 0; l < NUM_LEVEL; l++) {
+        level = polling_order[order_idx][l];
+
+        user_level_val = srm_load_level_total(level, level_table_bias);
+        if (unlikely(user_level_val < kernel_level_table[level + level_table_bias])) {
+            kernel_level_table[level + level_table_bias] = user_level_val;
+            continue;
+        }
+        level_wqe_cnt = user_level_val - kernel_level_table[level + level_table_bias];
+        if (!level_wqe_cnt)
+            continue;
+
+        n = latency_thread_idx * NUM_LEVEL * NUM_SCHED + level * NUM_SCHED + id;
+        user_table_val = smp_load_acquire(&user_wqe_table[n].val);
+        kernel_table_val = kernel_wqe_table[n];
+
+        if (unlikely(user_table_val < kernel_table_val)) {
+            kernel_wqe_table[n] = user_table_val;
+            continue;
+        }
+
+        if (user_table_val == kernel_table_val)
+            continue;
+
+        k = level * sched_group->num_sched + id + latency_thread_idx * num_thread_qps;
+        if (unlikely(k >= current_table_qp))
+            continue;
+
+        struct mlx5_ib_sqbuf *sqb = sched_group->sqb_arr[k];
+        if (!sqb)
+            continue;
+
+        if (level == 0) {
+            for (; !kthread_should_stop();) {
+                if (user_table_val == kernel_wqe_table[n])
+                    break;
+
+                struct srm_qp_entry *qp_entry =
+                    (struct srm_qp_entry *)sqb->buf + (sqb->cur_post & (sqb->wqe_cnt - 1));
+                uint32_t srm_qp_valid = smp_load_acquire(&qp_entry->valid);
+                if (!srm_qp_valid) {
+                    pr_warn_ratelimited("latency poll: level=0 qp entry invalid, resync k:%d n:%d user_wqe:%u kernel_wqe:%u\n",
+                                        k, n, user_wqe_table[n].val, kernel_wqe_table[n]);
+                    kernel_wqe_table[n] = user_table_val;
+                    kernel_level_table[level + level_table_bias] = user_level_val;
+                    if (likely(sqb->wqe_cnt))
+                        sqb->cur_post = user_table_val & (sqb->wqe_cnt - 1);
+                    break;
+                }
+
+                int xrc_qp_idx = qp_entry->qp_idx;
+                if (unlikely(xrc_qp_idx < 0 || xrc_qp_idx >= num_xrc_per_srm)) {
+                    pr_warn_ratelimited("latency poll: xrc_qp_idx OOB idx=%d num_xrc_per_srm=%d n=%d k=%d\n",
+                                        xrc_qp_idx, num_xrc_per_srm, n, k);
+                    kernel_wqe_table[n] = user_table_val;
+                    if (likely(sqb->wqe_cnt))
+                        sqb->cur_post = user_table_val & (sqb->wqe_cnt - 1);
+                    break;
+                }
+
+                if (tot_xrc_sended_wqes[latency_thread_idx][NUM_SCHED * level + id][xrc_qp_idx] !=
+                    cur_xrc_sended_wqes[latency_thread_idx][id][xrc_qp_idx]) {
+                    cur_xrc_sended_wqes[latency_thread_idx][id][xrc_qp_idx]++;
+                    sqb->cur_post++;
+                    smp_store_release(&qp_entry->valid, 0);
+                    kernel_wqe_table[n]++;
+                    kernel_level_table[level + level_table_bias]++;
+                    cpu_relax();
+                    continue;
+                }
+
+                uint64_t xrc_ctrl = smp_load_acquire(
+                    &user_xrc_table[latency_thread_idx][NUM_SCHED * level + id][xrc_qp_idx].ctrl);
+                uint64_t xrc_tot_bytes = smp_load_acquire(
+                    &user_xrc_table[latency_thread_idx][NUM_SCHED * level + id][xrc_qp_idx].tot_bytes) -
+                    lst_xrc_bytes[latency_thread_idx][id][xrc_qp_idx];
+
+                lst_xrc_bytes[latency_thread_idx][id][xrc_qp_idx] += xrc_tot_bytes;
+
+                uint32_t opmod_idx_opcode = be32_to_cpu((uint32_t)xrc_ctrl);
+                uint16_t new_tot_wqes = ((opmod_idx_opcode >> 8) & 0xffff) + 1;
+                kernel_wqe_table[n]++;
+                kernel_level_table[level + level_table_bias]++;
+                tot_xrc_sended_wqes[latency_thread_idx][level * NUM_SCHED + id][xrc_qp_idx] = new_tot_wqes;
+                cur_xrc_sended_wqes[latency_thread_idx][id][xrc_qp_idx]++;
+                sqb->cur_post++;
+
+                {
+                    int bf_idx = latency_thread_idx * NUM_SCHED * NUM_LEVEL * num_xrc_per_srm +
+                                 NUM_LEVEL * NUM_SCHED * xrc_qp_idx + level * NUM_SCHED + id;
+                    srm_doorbell(sched_group->xrc_bf_arr[bf_idx], xrc_ctrl, new_tot_wqes - 1);
+                }
+
+                smp_store_release(&qp_entry->cycles, rdtsc());
+
+                *wqe_tot_sz -= cur_wqes[*wqe_cur_idx];
+                *wqe_tot_sz += xrc_tot_bytes;
+                cur_wqes[*wqe_cur_idx] = xrc_tot_bytes;
+                *wqe_cur_idx = (*wqe_cur_idx + 1) % WQES_ARR_SZ;
+                *wqe_ewma_sz = ((alpha_b - alpha_a) * (*wqe_ewma_sz) + alpha_a * (*wqe_tot_sz)) / alpha_b;
+
+                smp_store_release(&qp_entry->valid, 0);
+
+                return true;
+            }
+        } else {
+            struct srm_qp_entry *qp_entry =
+                (struct srm_qp_entry *)sqb->buf + (sqb->cur_post & (sqb->wqe_cnt - 1));
+            uint32_t srm_qp_valid = smp_load_acquire(&qp_entry->valid);
+            if (!srm_qp_valid) {
+                pr_warn_ratelimited("latency poll: level>0 qp entry invalid, resync k:%d n:%d user_wqe:%u kernel_wqe:%u\n",
+                                    k, n, user_wqe_table[n].val, kernel_wqe_table[n]);
+                kernel_wqe_table[n] = user_table_val;
+                kernel_level_table[level + level_table_bias] = user_level_val;
+                if (likely(sqb->wqe_cnt))
+                    sqb->cur_post = user_table_val & (sqb->wqe_cnt - 1);
+                continue;
+            }
+
+            int xrc_qp_idx = qp_entry->qp_idx;
+            if (unlikely(xrc_qp_idx < 0 || xrc_qp_idx >= num_xrc_per_srm)) {
+                pr_warn_ratelimited("latency poll: xrc_qp_idx OOB idx=%d num_xrc_per_srm=%d n=%d k=%d\n",
+                                    xrc_qp_idx, num_xrc_per_srm, n, k);
+                kernel_wqe_table[n] = user_table_val;
+                if (likely(sqb->wqe_cnt))
+                    sqb->cur_post = user_table_val & (sqb->wqe_cnt - 1);
+                continue;
+            }
+
+            smp_store_release(&qp_entry->valid, 0);
+
+            {
+                uint64_t xrc_ctrl = qp_entry->ctrl;
+                uint64_t cur_bytes = qp_entry->bytes;
+
+                sqb->cur_post++;
+
+                {
+                    int bf_idx = latency_thread_idx * NUM_SCHED * NUM_LEVEL * num_xrc_per_srm +
+                                 NUM_LEVEL * NUM_SCHED * xrc_qp_idx + level * NUM_SCHED + id;
+                    srm_doorbell(sched_group->xrc_bf_arr[bf_idx],
+                                 xrc_ctrl,
+                                 tot_xrc_sended_wqes[latency_thread_idx][level * NUM_SCHED + id][xrc_qp_idx]);
+                }
+
+                smp_store_release(&qp_entry->cycles, rdtsc());
+
+                *wqe_tot_sz -= cur_wqes[*wqe_cur_idx];
+                *wqe_tot_sz += cur_bytes;
+                cur_wqes[*wqe_cur_idx] = cur_bytes;
+                *wqe_cur_idx = (*wqe_cur_idx + 1) % WQES_ARR_SZ;
+
+                kernel_wqe_table[n]++;
+                kernel_level_table[level + level_table_bias]++;
+                tot_xrc_sended_wqes[latency_thread_idx][level * NUM_SCHED + id][xrc_qp_idx]++;
+                *wqe_ewma_sz = ((alpha_b - alpha_a) * (*wqe_ewma_sz) + alpha_a * (*wqe_tot_sz)) / alpha_b;
+
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 int scheduler_polling(void *sched_data)
 {
     extern struct mlx5_ib_sched_group sched_group;
@@ -1402,6 +1614,8 @@ int scheduler_polling(void *sched_data)
     
     uint32_t stuck_cnt = 0;
     uint32_t lat_cnt = 0;
+
+    uint32_t real_num_threads = 17; 
     while (!kthread_should_stop())
     {
         if (unlikely(!READ_ONCE(user_wqe_table) || !READ_ONCE(user_level_table) ||
@@ -1418,7 +1632,7 @@ int scheduler_polling(void *sched_data)
 
 
         /* 根据当前端到端吞吐与时延，自适应更新 LIMIT_BATCHING */
-        update_limit_batch(sched);
+        //update_limit_batch(sched);
         // for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++){
         //     end_time0 = rdtsc();
         //     elapsed_time0 = (end_time0 - start_time0)*1000000000 / cpu_frequency_hz;
@@ -1752,8 +1966,8 @@ int scheduler_polling(void *sched_data)
                 user_thread_idx = srm_fastrand(&polling_seed) % current_num_user_threads;
             }
             else{
-                user_thread_idx = current_num_user_threads - 1;
-                //user_thread_idx = srm_fastrand(&polling_seed) % num_user_threads;
+                //user_thread_idx = current_num_user_threads - 1;
+                user_thread_idx = real_num_threads - 1;
             }
             
             //user_thread_idx = srm_fastrand(&polling_seed) % num_user_threads;
@@ -1896,7 +2110,21 @@ int scheduler_polling(void *sched_data)
                     if(stuck_cnt % 100000000 == 0){
                         msleep(0);
                     }
-                    cpu_relax();
+                    // if (!srm_poll_latency_once(&sched_group,
+                    //                            id,
+                    //                            current_num_user_threads,
+                    //                            current_table_qp,
+                    //                            num_thread_qps,
+                    //                            level_table_bias,
+                    //                            real_num_threads,
+                    //                            wqes_limit_sz,
+                    //                            &wqe_tot_sz,
+                    //                            &wqe_ewma_sz,
+                    //                            cur_wqes,
+                    //                            &wqe_cur_idx,
+                    //                            alpha_a,
+                    //                                alpha_b))
+                        cpu_relax();
                 }
                 //pr_info("user_tot_cqes:%llu\n", calc_tot_cqes(current_num_user_threads));
                 
@@ -1937,8 +2165,8 @@ int scheduler_polling(void *sched_data)
                             kernel_wqe_table[n]++;
                             kernel_level_table[level + level_table_bias]++;
 
-                            pr_info_ratelimited("user_level_val=%llu kernel_level_val=%llu\n",
-                                user_level_val, kernel_level_table[level + level_table_bias]);
+                            // pr_info_ratelimited("user_level_val=%llu kernel_level_val=%llu\n",
+                            //     user_level_val, kernel_level_table[level + level_table_bias]);
 
                             cpu_relax();
                             continue;
@@ -1965,14 +2193,19 @@ int scheduler_polling(void *sched_data)
                         // db_st_cycles = rdtsc();
 
 
+                        // int bf_idx = user_thread_idx * NUM_SCHED * NUM_LEVEL * num_xrc_per_srm +
+                        //              (level * NUM_SCHED + id) * num_xrc_per_srm +
+                        //              xrc_qp_idx;
                         int bf_idx = user_thread_idx * NUM_SCHED * NUM_LEVEL * num_xrc_per_srm +
-                                     (level * NUM_SCHED + id) * num_xrc_per_srm +
-                                     xrc_qp_idx;
+                                     NUM_LEVEL*NUM_SCHED*xrc_qp_idx + level*NUM_SCHED + id;  
                         srm_doorbell(sched_group.xrc_bf_arr[bf_idx],
                                     xrc_ctrl,new_tot_wqes-1);
 
 
-                        // // //smp_store_release(&qp_entry->cycles,rdtsc());
+                        smp_store_release(&qp_entry->cycles,rdtsc());
+                        //pr_info("store cycles:%llu\n", qp_entry->cycles);
+
+
                         // db_ed_cycles = rdtsc();
                         // db_cpu_cycles[db_cycles_cnt++] = db_ed_cycles - db_st_cycles;
                         // // db_elapsed_cycles = db_ed_cycles - db_st_cycles;
@@ -2027,17 +2260,19 @@ int scheduler_polling(void *sched_data)
                         //     roll_cnt++;
                         // }
 
-                        if(kernel_tot_db + delta < kernel_tot_db){
-                            //防止溢出
-                            kernel_tot_db -= user_tot_cqes;
-                            tot_cqes_delta += user_tot_cqes;
-                            user_tot_cqes = 0;
+                        if(1){
+                            if(kernel_tot_db + delta < kernel_tot_db){
+                                //防止溢出
+                                kernel_tot_db -= user_tot_cqes;
+                                tot_cqes_delta += user_tot_cqes;
+                                user_tot_cqes = 0;
+                            }
+                            kernel_tot_db += delta;
                         }
-                        kernel_tot_db += delta;
                         
-                        pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d user_level_val=%llu kernel_level_val=%llu xrc_ctrl=%llu\n",
-                            xrc_qp_idx, bf_idx, num_xrc_per_srm, level, id, n, k,
-                            user_thread_idx,user_level_val,kernel_level_table[level + level_table_bias], xrc_ctrl);
+                        // pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d user_level_val=%llu kernel_level_val=%llu xrc_ctrl=%llu\n",
+                        //     xrc_qp_idx, bf_idx, num_xrc_per_srm, level, id, n, k,
+                        //     user_thread_idx,user_level_val,kernel_level_table[level + level_table_bias], xrc_ctrl);
 
 
                         break;
@@ -2078,14 +2313,19 @@ int scheduler_polling(void *sched_data)
                     //  // //文件
                     // db_st_cycles = rdtsc();
 
+                    // int bf_idx = user_thread_idx * NUM_SCHED * NUM_LEVEL * num_xrc_per_srm +
+                    //              (level * NUM_SCHED + id) * num_xrc_per_srm +
+                    //              xrc_qp_idx;
                     int bf_idx = user_thread_idx * NUM_SCHED * NUM_LEVEL * num_xrc_per_srm +
-                                 (level * NUM_SCHED + id) * num_xrc_per_srm +
-                                 xrc_qp_idx;
+                                     NUM_LEVEL*NUM_SCHED*xrc_qp_idx + level*NUM_SCHED + id;  
                     srm_doorbell(sched_group.xrc_bf_arr[bf_idx],
                                 xrc_ctrl,tot_xrc_sended_wqes[user_thread_idx][level*NUM_SCHED + id][xrc_qp_idx]);
 
 
-                    // // //smp_store_release(&qp_entry->cycles,rdtsc());
+                    //输出内核doorbell时间到用户态
+                    smp_store_release(&qp_entry->cycles,rdtsc());
+
+
                     // db_ed_cycles = rdtsc();
                     // db_cpu_cycles[db_cycles_cnt++] = db_ed_cycles - db_st_cycles;
                     // // db_elapsed_cycles = db_ed_cycles - db_st_cycles;
@@ -2130,17 +2370,19 @@ int scheduler_polling(void *sched_data)
                     //     ndelay(175);
                     // }
 
-                    if(kernel_tot_db + 1 < kernel_tot_db){
-                        //防止溢出
-                        kernel_tot_db -= user_tot_cqes;
-                        tot_cqes_delta += user_tot_cqes;
-                        user_tot_cqes = 0;
+                    if(1){
+                        if(kernel_tot_db + 1 < kernel_tot_db){
+                            //防止溢出
+                            kernel_tot_db -= user_tot_cqes;
+                            tot_cqes_delta += user_tot_cqes;
+                            user_tot_cqes = 0;
+                        }
+                        kernel_tot_db++;
                     }
-                    kernel_tot_db++;
 
-                    pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d\n",
-                        xrc_qp_idx, bf_idx, num_xrc_per_srm, level, id, n, k,
-                        user_thread_idx);
+                    // pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d\n",
+                    //     xrc_qp_idx, bf_idx, num_xrc_per_srm, level, id, n, k,
+                    //     user_thread_idx);
 
 
                     // while(roll_cnt % 10000 != 0){
