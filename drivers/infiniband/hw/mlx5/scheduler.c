@@ -1610,7 +1610,7 @@ int scheduler_polling(void *sched_data)
     uint64_t roll_cnt = 0;
 
     uint64_t kernel_tot_db = 0, user_tot_cqes = 0;
-    uint64_t tot_cqes_delta = 0;
+    uint64_t inflight = 0;
     
     uint32_t stuck_cnt = 0;
     uint32_t lat_cnt = 0;
@@ -2087,19 +2087,14 @@ int scheduler_polling(void *sched_data)
 
                 stuck_cnt = 0 ;    
                 //limit_batch controlling   
-                while((kernel_tot_db > user_tot_cqes + LIMIT_BATCHING && !(user_tot_cqes + LIMIT_BATCHING < user_tot_cqes)) && !kthread_should_stop()){
+                while (user_thread_idx != real_num_threads-1 && kernel_tot_db - user_tot_cqes > LIMIT_BATCHING && !kthread_should_stop()) {
                     //uint64_t t_st = rdtsc();
                     user_tot_cqes = calc_tot_cqes(current_num_user_threads);
                     //uint64_t t_ed = rdtsc();
-                    
-                    user_tot_cqes -= tot_cqes_delta;
 
-                    //printk("calc_tot_cqe cycles:%llu, outstanding wqe nums:%llu\n",t_ed-t_st,kernel_tot_db - user_tot_cqes);
-                    if(kernel_tot_db < user_tot_cqes){
-                        kernel_tot_db -= user_tot_cqes;
-                        tot_cqes_delta += user_tot_cqes;
-                        user_tot_cqes = 0;
-                    }
+                    inflight = kernel_tot_db - user_tot_cqes;
+                    if (inflight <= LIMIT_BATCHING)
+                        break;
                     //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu\n",kernel_tot_db,user_tot_cqes);
                     // if(kernel_tot_db > user_tot_cqes + LIMIT_BATCHING){
 
@@ -2110,20 +2105,20 @@ int scheduler_polling(void *sched_data)
                     if(stuck_cnt % 100000000 == 0){
                         msleep(0);
                     }
-                    // if (!srm_poll_latency_once(&sched_group,
-                    //                            id,
-                    //                            current_num_user_threads,
-                    //                            current_table_qp,
-                    //                            num_thread_qps,
-                    //                            level_table_bias,
-                    //                            real_num_threads,
-                    //                            wqes_limit_sz,
-                    //                            &wqe_tot_sz,
-                    //                            &wqe_ewma_sz,
-                    //                            cur_wqes,
-                    //                            &wqe_cur_idx,
-                    //                            alpha_a,
-                    //                                alpha_b))
+                    if (!srm_poll_latency_once(&sched_group,
+                                               id,
+                                               current_num_user_threads,
+                                               current_table_qp,
+                                               num_thread_qps,
+                                               level_table_bias,
+                                               real_num_threads,
+                                               wqes_limit_sz,
+                                               &wqe_tot_sz,
+                                               &wqe_ewma_sz,
+                                               cur_wqes,
+                                               &wqe_cur_idx,
+                                               alpha_a,
+                                                   alpha_b))
                         cpu_relax();
                 }
                 //pr_info("user_tot_cqes:%llu\n", calc_tot_cqes(current_num_user_threads));
@@ -2260,15 +2255,8 @@ int scheduler_polling(void *sched_data)
                         //     roll_cnt++;
                         // }
 
-                        if(1){
-                            if(kernel_tot_db + delta < kernel_tot_db){
-                                //防止溢出
-                                kernel_tot_db -= user_tot_cqes;
-                                tot_cqes_delta += user_tot_cqes;
-                                user_tot_cqes = 0;
-                            }
+                        if(user_thread_idx != real_num_threads-1)
                             kernel_tot_db += delta;
-                        }
                         
                         // pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d user_level_val=%llu kernel_level_val=%llu xrc_ctrl=%llu\n",
                         //     xrc_qp_idx, bf_idx, num_xrc_per_srm, level, id, n, k,
@@ -2370,15 +2358,8 @@ int scheduler_polling(void *sched_data)
                     //     ndelay(175);
                     // }
 
-                    if(1){
-                        if(kernel_tot_db + 1 < kernel_tot_db){
-                            //防止溢出
-                            kernel_tot_db -= user_tot_cqes;
-                            tot_cqes_delta += user_tot_cqes;
-                            user_tot_cqes = 0;
-                        }
+                    if(user_thread_idx != real_num_threads-1)
                         kernel_tot_db++;
-                    }
 
                     // pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d\n",
                     //     xrc_qp_idx, bf_idx, num_xrc_per_srm, level, id, n, k,
