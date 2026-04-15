@@ -32,7 +32,7 @@ static int debug = 0;
 
 #define MAX_USER_THREADS_NUM 17
 #define MAX_SRM_APPS_NUM 4
-#define MAX_USER_XRC_QP_PER_SRM 1024
+#define MAX_USER_XRC_QP_PER_SRM 2048
 
 
 static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
@@ -40,7 +40,7 @@ static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 static const size_t QUEUE_LIMIT = 256 * 1024;
 static const size_t SCHED_SIZE_LIMIT = 8 * 1024;
 
-static int LIMIT_BATCHING =1;
+static int LIMIT_BATCHING =10;
 
 #define DEBUG_LOG \
     if (debug)    \

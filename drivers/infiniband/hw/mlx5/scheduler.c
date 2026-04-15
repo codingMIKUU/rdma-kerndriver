@@ -904,15 +904,73 @@ static inline uint64_t calc_tot_cqes(int num_user_threads){
     }
     return res;
 }
+static inline void log_limit_batch_update(const char *phase,
+                                          int old_limit,
+                                          int new_limit,
+                                          u64 prev_bw,
+                                          u64 prev_lat,
+                                          u64 cur_bw,
+                                          u64 cur_lat)
+{
+    pr_info("limit_batch %s: limit %d->%d, bw %llu->%llu Gbps, lat %llu->%llu us\n",
+            phase,
+            old_limit,
+            new_limit,
+            (unsigned long long)prev_bw,
+            (unsigned long long)cur_bw,
+            (unsigned long long)prev_lat,
+            (unsigned long long)cur_lat);
+}
 static inline void update_limit_batch(struct mlx5_ib_sched *sched){
-    /*
-     * 自适应调整 LIMIT_BATCHING：
-     * - 通过 user_xrc_table 中的 cur_Gbps / cur_lat_us 统计当前平均吞吐和时延
-     * - 计算一个综合效用 util = throughput_weight * tput - latency_weight * latency
-     * - 采用简单的爬坡 + 方向反转策略：
-     *   如果效用在不显著增加时延的情况下变好，则继续沿当前方向调整；
-     *   否则反向并缩小步长，从而在高吞吐与低时延之间寻找平衡点。
-     */
+    enum {
+        STATE_STARTUP = 0,
+        STATE_SEARCH = 1,
+    };
+    enum {
+        PROBE_NONE = 0,
+        PROBE_UP = 1,
+        PROBE_DOWN = 2,
+    };
+    struct srm_sample {
+        u64 bw;
+        u64 lat;
+        int valid;
+    };
+
+    static int state = STATE_STARTUP;
+    static int probe_state = PROBE_NONE;
+    static int search_base_limit;
+    static int search_step;
+    static struct srm_sample upper_sample;
+    static struct srm_sample lower_sample;
+    static u64 pre_bw;
+    static u64 pre_lat;
+
+    static u64 last_bw_val[MAX_USER_THREADS_NUM];
+    static u64 last_lat_val[MAX_USER_THREADS_NUM];
+    static u64 last_bw_cnt[MAX_USER_THREADS_NUM];
+    static u64 last_lat_cnt[MAX_USER_THREADS_NUM];
+    static u64 pending_bw;
+    static u64 pending_lat;
+    static int pending_bw_valid;
+    static int pending_lat_valid;
+    static u64 last_applied_bw;
+    static u64 last_applied_lat;
+
+    static u64 startup_updates_seen;
+    static unsigned long startup_ignore_until;
+    const int min_batch = 1;
+    const int max_batch = 100000;
+    const u32 bw_eps_pct = 1;  /* 2% */
+    const u32 lat_eps_pct = 5; /* 5% */
+
+    const u32 startup_ignore_updates = 3;
+    const unsigned long startup_ignore_secs = 10;
+    const u64 startup_lat_target_us = 5;
+    int t;
+    int step;
+    int limit;
+    u64 avg_gbps, avg_lat;
 
     /* 只在一个调度线程中执行自适应逻辑，避免多线程竞争 */
     if (!sched || sched->id != 0)
@@ -922,268 +980,245 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
     if (!user_xrc_table || !num_user_threads || !num_xrc_per_srm)
         return;
 
+    if (num_user_threads > MAX_USER_THREADS_NUM)
+        return;
+
     /* 控制调整频率，避免过于频繁地读取共享表 */
     {
         static unsigned long last_jiffies;
-        const unsigned long interval = HZ*10; /* 每 ~100ms 调整一次 */
+        const unsigned long interval = HZ * 10;
 
         if (time_before(jiffies, last_jiffies + interval))
             return;
         last_jiffies = jiffies;
     }
 
-    /* 聚合当前吞吐和时延：取每个 (user_thread, level*sched) 的第 0 个 xrc qp 作为代表 */
-    {
-        static int opt_cnt =0,prev_opt_batch = 0,prev_opt_dir = 1,prev_opt_step = 0,is_trying = 0,has_try = 0;
-        const int opt_target = 3;
-        static u64 prev_opt_util, prev_opt_lat;
-        static u64 prev_gbps_update_cnt = 0, prev_lat_update_cnt = 0;
-        u64 gbps_update_cnt, lat_update_cnt;
+    /*
+     * 吞吐和时延由不同线程更新：分别捕获“新吞吐”和“新时延”。
+     * 条件：update_cnt 稳定 + 该指标值发生变化。
+     */
+    for (t = 0; t < num_user_threads; t++) {
+        u64 cnt1, cnt2;
+        u64 bw, lat;
 
-        int i, l;
+        cnt1 = smp_load_acquire(&user_xrc_table[t][0][0].update_cnt);
+        bw = smp_load_acquire(&user_xrc_table[t][0][0].cur_Gbps);
+        lat = smp_load_acquire(&user_xrc_table[t][0][0].cur_lat_us);
 
+        if (!cnt1)
+            continue;
 
-        /* 计算平均值，单位仍保持为 Gbps 与 us */
-        {
-            u64 sum_gbps = 0, sum_lat = 0;
-            u64 valid_gbps_cnt = 0, valid_lat_cnt = 0;
-            u64 avg_gbps, avg_lat;
-            int t;
+        if (bw && cnt1 != last_bw_cnt[t] ) {
+            last_bw_cnt[t] = cnt1;
+            last_bw_val[t] = bw;
+            pending_bw = bw;
+            pending_bw_valid = 1;
+        }
 
-            gbps_update_cnt = 0;
-            lat_update_cnt = 0;
+        if (lat && cnt1 != last_lat_cnt[t] ) {
+            last_lat_cnt[t] = cnt1;
+            last_lat_val[t] = lat;
+            pending_lat = lat;
+            pending_lat_valid = 1;
+        }
+    }
 
-            for (t = 0; t < num_user_threads; t++) {
-                u64 cur_gbps = smp_load_acquire(&user_xrc_table[t][0][0].cur_Gbps);
-                u64 cur_upd = smp_load_acquire(&user_xrc_table[t][0][0].update_cnt);
+    if (!pending_bw_valid || !pending_lat_valid){
+        pr_info_ratelimited("pending_bw_valid:%d,pending_lat_valid:%d\n", pending_bw_valid, pending_lat_valid);
+        return ;
+    }
 
-                if (!cur_gbps)
-                    continue;
+    avg_gbps = pending_bw;
+    avg_lat = pending_lat;
+    pending_bw_valid = 0;
+    pending_lat_valid = 0;
 
-                sum_gbps += cur_gbps;
-                valid_gbps_cnt++;
-                gbps_update_cnt += cur_upd;
+    if (state == STATE_STARTUP) {
+        if (startup_ignore_updates || startup_ignore_secs) {
+            if (!startup_ignore_until && startup_ignore_secs)
+                startup_ignore_until = jiffies + startup_ignore_secs * HZ;
+
+            startup_updates_seen++;
+
+            if ((startup_ignore_updates && startup_updates_seen <= startup_ignore_updates) ||
+                (startup_ignore_secs && time_before(jiffies, startup_ignore_until)))
+                return;
+        }
+    }
+
+    limit = LIMIT_BATCHING;
+    if (limit < min_batch)
+        limit = min_batch;
+    if (limit > max_batch)
+        limit = max_batch;
+
+    step = limit / 20;
+    if (step < 1)
+        step = 1;
+
+    if (state == STATE_STARTUP) {
+        if (!pre_bw || !pre_lat) {
+            pre_bw = avg_gbps;
+            pre_lat = avg_lat;
+            limit = min(limit * 2, max_batch);
+            log_limit_batch_update("startup-init",
+                                   LIMIT_BATCHING,
+                                   limit,
+                                   last_applied_bw,
+                                   last_applied_lat,
+                                   avg_gbps,
+                                   avg_lat);
+            LIMIT_BATCHING = limit;
+            last_applied_bw = avg_gbps;
+            last_applied_lat = avg_lat;
+            return;
+        }
+
+        if (avg_gbps * 100 > pre_bw * (100 + bw_eps_pct) &&
+            avg_lat <= startup_lat_target_us) {
+            limit = min(limit * 2, max_batch);
+        } else {
+            limit = max(limit / 2, min_batch);
+            state = STATE_SEARCH;
+            probe_state = PROBE_NONE;
+            search_base_limit = limit;
+            upper_sample.valid = 0;
+            lower_sample.valid = 0;
+        }
+
+        pre_bw = avg_gbps;
+        pre_lat = avg_lat;
+        log_limit_batch_update("startup",
+                               LIMIT_BATCHING,
+                               limit,
+                               last_applied_bw,
+                               last_applied_lat,
+                               avg_gbps,
+                               avg_lat);
+        LIMIT_BATCHING = limit;
+        last_applied_bw = avg_gbps;
+        last_applied_lat = avg_lat;
+        return;
+    }
+
+    /* SEARCH: 轮流探测 upper / lower，并比较选择更优 */
+    if (state == STATE_SEARCH) {
+        int upper_limit;
+        int lower_limit;
+
+        if (probe_state == PROBE_NONE) {
+            search_base_limit = limit;
+            search_step = step;
+            upper_sample.valid = 0;
+            lower_sample.valid = 0;
+        }
+
+        upper_limit = min(search_base_limit + search_step, max_batch);
+        lower_limit = max(search_base_limit - search_step, min_batch);
+
+        if (probe_state == PROBE_NONE) {
+            if (upper_limit != search_base_limit) {
+                probe_state = PROBE_UP;
+                log_limit_batch_update("search-probe-up",
+                                       LIMIT_BATCHING,
+                                       upper_limit,
+                                       last_applied_bw,
+                                       last_applied_lat,
+                                       avg_gbps,
+                                       avg_lat);
+                LIMIT_BATCHING = upper_limit;
+                last_applied_bw = avg_gbps;
+                last_applied_lat = avg_lat;
+                return;
+            }
+            if (lower_limit != search_base_limit) {
+                probe_state = PROBE_DOWN;
+                log_limit_batch_update("search-probe-down",
+                                       LIMIT_BATCHING,
+                                       lower_limit,
+                                       last_applied_bw,
+                                       last_applied_lat,
+                                       avg_gbps,
+                                       avg_lat);
+                LIMIT_BATCHING = lower_limit;
+                last_applied_bw = avg_gbps;
+                last_applied_lat = avg_lat;
+                return;
+            }
+            return;
+        }
+
+        if (probe_state == PROBE_UP) {
+            upper_sample.bw = avg_gbps;
+            upper_sample.lat = avg_lat;
+            upper_sample.valid = 1;
+
+            if (lower_limit != search_base_limit) {
+                probe_state = PROBE_DOWN;
+                log_limit_batch_update("search-probe-down",
+                                       LIMIT_BATCHING,
+                                       lower_limit,
+                                       last_applied_bw,
+                                       last_applied_lat,
+                                       avg_gbps,
+                                       avg_lat);
+                LIMIT_BATCHING = lower_limit;
+                last_applied_bw = avg_gbps;
+                last_applied_lat = avg_lat;
+                return;
             }
 
-            for (t = 0; t < num_user_threads; t++) {
-                u64 cur_lat = smp_load_acquire(&user_xrc_table[t][0][0].cur_lat_us);
-                u64 cur_upd = smp_load_acquire(&user_xrc_table[t][0][0].update_cnt);
+            limit = upper_limit;
+            probe_state = PROBE_NONE;
+            log_limit_batch_update("search-commit-up",
+                                   LIMIT_BATCHING,
+                                   limit,
+                                   last_applied_bw,
+                                   last_applied_lat,
+                                   avg_gbps,
+                                   avg_lat);
+            LIMIT_BATCHING = limit;
+            last_applied_bw = avg_gbps;
+            last_applied_lat = avg_lat;
+            return;
+        }
 
-                if (!cur_lat)
-                    continue;
+        if (probe_state == PROBE_DOWN) {
+            lower_sample.bw = avg_gbps;
+            lower_sample.lat = avg_lat;
+            lower_sample.valid = 1;
 
-                sum_lat += cur_lat;
-                valid_lat_cnt++;
-                lat_update_cnt += cur_upd;
-            }
-
-            avg_gbps = valid_gbps_cnt ? (sum_gbps / valid_gbps_cnt) : 0;
-            avg_lat = valid_lat_cnt ? (sum_lat / valid_lat_cnt) : 0;
-
-            /* 计算综合效用：吞吐优先，在保证时延不过度恶化的前提下尽量拉高吞吐 */
-            const u32 throughput_weight = 1000; /* Gbps 权重，可根据实验调优 */
-            const u32 latency_weight = 100;       /* 时延惩罚系数，可根据实验调优 */
-            u64 util;
-
-            /* 防止乘法溢出：avg_gbps 和 throughput_weight 的数量级在当前场景下安全 */
-            //util = avg_gbps * throughput_weight;
-            //util -= avg_lat * latency_weight;
-            util = avg_gbps;
-
-
-
-            /* 使用静态状态记录上一次的观测与调整方向 */
-            {
-                static u64 prev_util = 0;
-                static u64 prev_gbps = 0;
-                static u64 prev_lat = 10000000000;
-                static int init_done;
-                static int dir = 1;  /* 当前调整方向：1 表示增大 LIMIT_BATCHING，-1 表示减小 */
-                const int init_step = 1;
-                static int step = init_step; /* 当前步长 */
-                
-                const int min_step = 1;
-                const int max_step = 512;
-                const int min_batch = 8;
-                const int max_batch = 8191;
-
-                u64 util_eps = prev_util / 40; /* ~2.5% */
-                u64 lat_tol = prev_lat / 5 ;   /* ~20% */
-                //如果吞吐和时延没有都更新，则等待
-                if (!init_done || prev_gbps_update_cnt == gbps_update_cnt || prev_lat_update_cnt == lat_update_cnt) {
-                    opt_cnt++;
-                    if(!init_done && opt_cnt == opt_target){
-                        if(is_trying){
-                            //*2之后的尝试
-                            if(util > prev_opt_util + util_eps || util >= prev_opt_util-util_eps && avg_lat + lat_tol <= prev_opt_lat || !init_done){
-                                //说明当前成为最优
-                                is_trying = 0;
-                                has_try = 0;
-                            }
-                            else{
-                                //前面最优，回退
-                                has_try = 1;
-                                is_trying = 0;
-                                LIMIT_BATCHING = prev_opt_batch ;
-                                dir = prev_opt_dir;
-                                step = prev_opt_step;
-                            }
-                        }
-                        else{
-                            //收敛完成，进行尝试
-                            if(!has_try){
-                                is_trying = 1;
-                                prev_opt_batch = LIMIT_BATCHING;
-                                prev_opt_dir = dir;
-                                prev_opt_step = step;
-                                prev_opt_util = util;
-                                prev_opt_lat = avg_lat;
-                                LIMIT_BATCHING *=2 ;
-                                if(LIMIT_BATCHING > max_batch)
-                                    LIMIT_BATCHING = max_batch;
-                                dir = 1;
-                                step = init_step;
-                            }
-                        }
-                        opt_cnt = 0;
-                    }
-
-                    printk("update_limit_batch returned, avg_gbps:%llu, avg_lat:%llu\n", avg_gbps, avg_lat);
-                    if(!(avg_gbps >0 && avg_lat > 0)){
-                        return; 
-                    }
-
-
-                    if(!init_done){
-                        prev_util = util;
-                        prev_gbps = avg_gbps;
-                        prev_lat = avg_lat;
-                        init_done = 1;
-                    }
-                    
-                    
-                    
-                    return;
+            if (upper_sample.valid && lower_sample.valid) {
+                if (upper_sample.bw * 100 > lower_sample.bw * (100 + bw_eps_pct)) {
+                    limit = upper_limit;
+                } else if (lower_sample.bw * 100 > upper_sample.bw * (100 + bw_eps_pct)) {
+                    limit = lower_limit;
+                } else if (upper_sample.lat * 100 <
+                           lower_sample.lat * (100 - lat_eps_pct)) {
+                    limit = upper_limit;
+                } else {
+                    limit = lower_limit;
                 }
-                //printk("in update_limit_batch\n");
-
-                /*
-                 * 设置一些容差，避免因为微小抖动频繁调整：
-                 * - util_eps：效用变化不到 1% 时视为无显著变化；
-                 * - lat_tol：时延小于 5us 或 5% 变化时视为无显著变化。
-                 */
-                {
-
-
-                    if (util_eps == 0)
-                        util_eps = 2;
-                    if (lat_tol < 2)
-                        lat_tol = 2;
-
-                    /*
-                     * 核心决策：
-                     * 1) 如果效用明显下降且时延明显上升 -> 批次过大，快速减小 LIMIT_BATCHING；
-                     * 2) 如果效用明显上升且时延没有明显变差 -> 说明更大批次带来更高吞吐且时延可接受，继续放大；
-                     * 3) 其他情况（权衡区间） -> 以时延为主导，适度向减小时延方向微调。
-                     */
-                    if (util + util_eps < prev_util && avg_lat > prev_lat + lat_tol) {
-                        /* 效用降低且时延明显变差：批次太大，收缩窗口 */
-                        if(dir ==1 && step > min_step)
-                            step >>= 1; /* 如果之前是增大批次的，且步长较大，则先减小步长 */
-                        else if (step < max_step)
-                            step <<= 1; /* 更激进地减小 */
-                        dir = -1;
-                    } else if (util > prev_util + util_eps && avg_lat <= prev_lat + lat_tol) {
-                        
-                        /* 效用提高且时延未显著恶化：可以适当增大批次以追求更高吞吐 */
-
-                        if(dir == -1 && step > min_step)
-                            step >>= 1; /* 如果之前是减小批次的，且步长较大，则先减小步长 */
-                        else if (step < max_step)
-                            step <<= 1; /* 稍微加大步长，加快收敛到高吞吐点 */
-                        dir = 1;
-                    } else {
-                        // /* 处于权衡区间：更偏向保障时延，步长减小，微调方向由时延决定 */
-                        // if (avg_lat > prev_lat + lat_tol)
-                        //     dir = -1; /* 时延明显增大，优先降低批次 */
-                        // else if (avg_lat + lat_tol < prev_lat)
-                        //     dir = 1;  /* 时延明显降低，可以尝试稍微增大批次换取吞吐 */
-                        
-                        dir = 0;
-                        if(util > prev_util + util_eps || util + util_eps < prev_util)
-                            dir = 1;
-                        
-                        if (step > min_step)
-                            step >>= 1; /* 减小步长，避免在平衡点附近震荡过大 */
-
-                        opt_cnt++;
-                        if(opt_cnt == opt_target){
-                            if(is_trying){
-                                //*2之后的尝试
-                                if(util > prev_opt_util + util_eps || util >= prev_opt_util -util_eps && avg_lat + lat_tol <= prev_opt_lat){
-                                    //说明当前成为最优
-                                    is_trying = 0;
-                                    has_try = 0;
-                                }
-                                else{
-                                    //前面最优，回退
-                                    has_try = 1;
-                                    is_trying = 0;
-                                    LIMIT_BATCHING = prev_opt_batch ;
-                                    dir = prev_opt_dir;
-                                    step = prev_opt_step;
-                                }
-                            }
-                            else{
-                                //收敛完成，进行尝试
-                                if(!has_try){
-                                    is_trying = 1;
-                                    prev_opt_batch = LIMIT_BATCHING;
-                                    prev_opt_dir = dir;
-                                    prev_opt_step = step;
-                                    prev_opt_util = util;
-                                    prev_opt_lat = avg_lat;
-                                    LIMIT_BATCHING *=2 ;
-                                    if(LIMIT_BATCHING > max_batch)
-                                        LIMIT_BATCHING = max_batch;
-                                    dir = 1;
-                                    step = init_step;
-                                }
-                            }
-                            opt_cnt = 0;
-                        }
-                    
-                        
-                    }
-
-                    /* 根据当前方向与步长更新 LIMIT_BATCHING，并限制在合法范围内 */
-                    {
-                        int new_batch = LIMIT_BATCHING + dir * step;
-
-                        if (new_batch < min_batch)
-                            new_batch = min_batch;
-                        else if (new_batch > max_batch)
-                            new_batch = max_batch;
-
-                        LIMIT_BATCHING = new_batch;
-                    }
-
-                    /* 记录本次观测，便于下次比较 */
-                    if(prev_util + util_eps < util ){
-                        prev_util = util;
-                        prev_gbps = avg_gbps;
-                        prev_lat = avg_lat;
-                    }
-
-                    printk("update limit_batch %d, step %d, avg_gbps: %llu, avg_lat: %llu\n",LIMIT_BATCHING,step,avg_gbps,avg_lat);
-
-                    prev_gbps_update_cnt = gbps_update_cnt;
-                    prev_lat_update_cnt = lat_update_cnt;
-                }
+            } else if (lower_sample.valid) {
+                limit = lower_limit;
             }
+
+            probe_state = PROBE_NONE;
+            log_limit_batch_update("search-commit",
+                                   LIMIT_BATCHING,
+                                   limit,
+                                   last_applied_bw,
+                                   last_applied_lat,
+                                   avg_gbps,
+                                   avg_lat);
+            LIMIT_BATCHING = limit;
+            last_applied_bw = avg_gbps;
+            last_applied_lat = avg_lat;
+            return;
         }
     }
 }
+
 
 // //文件，记录db_cycles数据
 // uint64_t db_cpu_cycles[5000000],polling_cpu_cycles[5000000];
@@ -2087,40 +2122,40 @@ int scheduler_polling(void *sched_data)
 
                 stuck_cnt = 0 ;    
                 //limit_batch controlling   
-                while (user_thread_idx != real_num_threads-1 && kernel_tot_db - user_tot_cqes > LIMIT_BATCHING && !kthread_should_stop()) {
-                    //uint64_t t_st = rdtsc();
-                    user_tot_cqes = calc_tot_cqes(current_num_user_threads);
-                    //uint64_t t_ed = rdtsc();
+                // while (user_thread_idx != real_num_threads-1 && kernel_tot_db - user_tot_cqes > LIMIT_BATCHING && !kthread_should_stop()) {
+                //     //uint64_t t_st = rdtsc();
+                //     user_tot_cqes = calc_tot_cqes(current_num_user_threads);
+                //     //uint64_t t_ed = rdtsc();
 
-                    inflight = kernel_tot_db - user_tot_cqes;
-                    if (inflight <= LIMIT_BATCHING)
-                        break;
-                    //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu\n",kernel_tot_db,user_tot_cqes);
-                    // if(kernel_tot_db > user_tot_cqes + LIMIT_BATCHING){
+                //     inflight = kernel_tot_db - user_tot_cqes;
+                //     if (inflight <= LIMIT_BATCHING)
+                //         break;
+                //     //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu\n",kernel_tot_db,user_tot_cqes);
+                //     // if(kernel_tot_db > user_tot_cqes + LIMIT_BATCHING){
 
-                    //     //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu, wait...\n",kernel_tot_db,user_tot_cqes);
-                    //     msleep(0);
-                    // }      
-                    stuck_cnt++;
-                    if(stuck_cnt % 100000000 == 0){
-                        msleep(0);
-                    }
-                    if (!srm_poll_latency_once(&sched_group,
-                                               id,
-                                               current_num_user_threads,
-                                               current_table_qp,
-                                               num_thread_qps,
-                                               level_table_bias,
-                                               real_num_threads,
-                                               wqes_limit_sz,
-                                               &wqe_tot_sz,
-                                               &wqe_ewma_sz,
-                                               cur_wqes,
-                                               &wqe_cur_idx,
-                                               alpha_a,
-                                                   alpha_b))
-                        cpu_relax();
-                }
+                //     //     //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu, wait...\n",kernel_tot_db,user_tot_cqes);
+                //     //     msleep(0);
+                //     // }      
+                //     stuck_cnt++;
+                //     if(stuck_cnt % 100000000 == 0){
+                //         msleep(0);
+                //     }
+                //     if (!srm_poll_latency_once(&sched_group,
+                //                                id,
+                //                                current_num_user_threads,
+                //                                current_table_qp,
+                //                                num_thread_qps,
+                //                                level_table_bias,
+                //                                real_num_threads,
+                //                                wqes_limit_sz,
+                //                                &wqe_tot_sz,
+                //                                &wqe_ewma_sz,
+                //                                cur_wqes,
+                //                                &wqe_cur_idx,
+                //                                alpha_a,
+                //                                    alpha_b))
+                //         cpu_relax();
+                // }
                 //pr_info("user_tot_cqes:%llu\n", calc_tot_cqes(current_num_user_threads));
                 
                 if (level == 0)
