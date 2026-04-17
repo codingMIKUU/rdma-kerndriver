@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/qib/ib_qib.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/qib/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/qib/ib_qib.mod
+cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/qib/ib_qib.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/qib/main.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/qib/ib_qib.mod

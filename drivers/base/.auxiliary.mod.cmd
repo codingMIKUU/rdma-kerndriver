@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/base/auxiliary.mod := { echo  /root/zxm/rdma-kerndriver/drivers/base/auxiliary_main.o /root/zxm/rdma-kerndriver/drivers/base/auxiliary_sysfs.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/base/auxiliary.mod
+cmd_/home/dell/zxm/rdma-kerndriver/drivers/base/auxiliary.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/base/auxiliary_main.o /home/dell/zxm/rdma-kerndriver/drivers/base/auxiliary_sysfs.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/base/auxiliary.mod

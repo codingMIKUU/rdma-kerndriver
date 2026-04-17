@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/fwctl/main.o
+/home/dell/zxm/rdma-kerndriver/drivers/fwctl/main.o
 

@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/main.o
+/home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/main.o
 

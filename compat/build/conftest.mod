@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/compat/build/conftest.o
+/home/dell/zxm/rdma-kerndriver/compat/build/conftest.o
 

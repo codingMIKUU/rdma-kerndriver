@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/net/smc/smc_diag.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/net/smc/smc_diag.o /root/zxm/rdma-kerndriver/net/smc/smc_diag_dummy.o
+cmd_/home/dell/zxm/rdma-kerndriver/net/smc/smc_diag.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/dell/zxm/rdma-kerndriver/net/smc/smc_diag.o /home/dell/zxm/rdma-kerndriver/net/smc/smc_diag_dummy.o

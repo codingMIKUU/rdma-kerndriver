@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/main.o
+/home/dell/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/main.o
 

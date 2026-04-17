@@ -223,7 +223,7 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
 {
     struct mlx5_ib_sqbuf *sqb;
     struct mlx5_ib_cqbuf *cqb;
-    int cqn;
+    int cqn = -1;
     int npages;
     int i;
     mutex_lock(&sched_group->sq_lock);
@@ -238,11 +238,11 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
         if (sqb->qpn == qpn)
         {
             sched_group->sqb_arr[i] = NULL;
-            cqn = sqb->cqb->cqn;
+            if (sqb->cqb)
+                cqn = sqb->cqb->cqn;
             vunmap(sqb->buf);
             npages = (sqb->sq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-            for (i = 0; i < npages; i++)
-                put_page(sqb->pages[i]);
+            put_user_pages(sqb->pages, npages);
             kfree(sqb->pages);
             kfree(sqb);
 
@@ -251,6 +251,9 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
     }
 
     mutex_unlock(&sched_group->sq_lock);
+
+    if (cqn < 0)
+        return 0;
 
     // Free cq
     mutex_lock(&sched_group->cq_lock);
@@ -266,8 +269,7 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
             sched_group->cqb_arr[i] = NULL;
             vunmap(cqb->buf);
             npages = (cqb->cq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-            for (i = 0; i < npages; i++)
-                put_page(cqb->pages[i]);
+            put_user_pages(cqb->pages, npages);
             kfree(cqb->pages);
             kfree(cqb);
 
@@ -921,6 +923,23 @@ static inline void log_limit_batch_update(const char *phase,
             (unsigned long long)prev_lat,
             (unsigned long long)cur_lat);
 }
+static inline void log_limit_batch_update(const char *phase,
+                                          int old_limit,
+                                          int new_limit,
+                                          u64 prev_bw,
+                                          u64 prev_lat,
+                                          u64 cur_bw,
+                                          u64 cur_lat)
+{
+    pr_info("limit_batch %s: limit %d->%d, bw %llu->%llu Gbps, lat %llu->%llu us\n",
+            phase,
+            old_limit,
+            new_limit,
+            (unsigned long long)prev_bw,
+            (unsigned long long)cur_bw,
+            (unsigned long long)prev_lat,
+            (unsigned long long)cur_lat);
+}
 static inline void update_limit_batch(struct mlx5_ib_sched *sched){
     enum {
         STATE_STARTUP = 0,
@@ -964,8 +983,8 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
     const u32 bw_eps_pct = 1;  /* 2% */
     const u32 lat_eps_pct = 5; /* 5% */
 
-    const u32 startup_ignore_updates = 3;
-    const unsigned long startup_ignore_secs = 10;
+    const u32 startup_ignore_updates = 2;
+    const unsigned long startup_ignore_secs = 5;
     const u64 startup_lat_target_us = 5;
     int t;
     int step;
@@ -983,9 +1002,13 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
     if (num_user_threads > MAX_USER_THREADS_NUM)
         return;
 
+    if (num_user_threads > MAX_USER_THREADS_NUM)
+        return;
+
     /* 控制调整频率，避免过于频繁地读取共享表 */
     {
         static unsigned long last_jiffies;
+        const unsigned long interval = HZ * 10;
         const unsigned long interval = HZ * 10;
 
         if (time_before(jiffies, last_jiffies + interval))
@@ -1004,10 +1027,115 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
         cnt1 = smp_load_acquire(&user_xrc_table[t][0][0].update_cnt);
         bw = smp_load_acquire(&user_xrc_table[t][0][0].cur_Gbps);
         lat = smp_load_acquire(&user_xrc_table[t][0][0].cur_lat_us);
+    /*
+     * 吞吐和时延由不同线程更新：分别捕获“新吞吐”和“新时延”。
+     * 条件：update_cnt 稳定 + 该指标值发生变化。
+     */
+    for (t = 0; t < num_user_threads; t++) {
+        u64 cnt1, cnt2;
+        u64 bw, lat;
+
+        cnt1 = smp_load_acquire(&user_xrc_table[t][0][0].update_cnt);
+        bw = smp_load_acquire(&user_xrc_table[t][0][0].cur_Gbps);
+        lat = smp_load_acquire(&user_xrc_table[t][0][0].cur_lat_us);
 
         if (!cnt1)
             continue;
+        if (!cnt1)
+            continue;
 
+        if (bw && cnt1 != last_bw_cnt[t] ) {
+            last_bw_cnt[t] = cnt1;
+            last_bw_val[t] = bw;
+            pending_bw = bw;
+            pending_bw_valid = 1;
+        }
+
+        if (lat && cnt1 != last_lat_cnt[t] ) {
+            last_lat_cnt[t] = cnt1;
+            last_lat_val[t] = lat;
+            pending_lat = lat;
+            pending_lat_valid = 1;
+        }
+    }
+
+    if (!pending_bw_valid || !pending_lat_valid){
+        pr_info_ratelimited("pending_bw_valid:%d,pending_lat_valid:%d\n", pending_bw_valid, pending_lat_valid);
+        return ;
+    }
+
+    avg_gbps = pending_bw;
+    avg_lat = pending_lat;
+    pending_bw_valid = 0;
+    pending_lat_valid = 0;
+
+    if (state == STATE_STARTUP) {
+        if (startup_ignore_updates || startup_ignore_secs) {
+            if (!startup_ignore_until && startup_ignore_secs)
+                startup_ignore_until = jiffies + startup_ignore_secs * HZ;
+
+            startup_updates_seen++;
+
+            if ((startup_ignore_updates && startup_updates_seen <= startup_ignore_updates) ||
+                (startup_ignore_secs && time_before(jiffies, startup_ignore_until)))
+                return;
+        }
+    }
+
+    limit = LIMIT_BATCHING;
+    if (limit < min_batch)
+        limit = min_batch;
+    if (limit > max_batch)
+        limit = max_batch;
+
+    step = limit / 20;
+    if (step < 1)
+        step = 1;
+
+    if (state == STATE_STARTUP) {
+        if (!pre_bw || !pre_lat) {
+            pre_bw = avg_gbps;
+            pre_lat = avg_lat;
+            limit = min(limit * 2, max_batch);
+            log_limit_batch_update("startup-init",
+                                   LIMIT_BATCHING,
+                                   limit,
+                                   last_applied_bw,
+                                   last_applied_lat,
+                                   avg_gbps,
+                                   avg_lat);
+            LIMIT_BATCHING = limit;
+            last_applied_bw = avg_gbps;
+            last_applied_lat = avg_lat;
+            return;
+        }
+
+        if (avg_gbps * 100 > pre_bw * (100 + bw_eps_pct) &&
+            avg_lat <= startup_lat_target_us) {
+            limit = min(limit * 2, max_batch);
+        } else {
+            limit = max(limit / 2, min_batch);
+            state = STATE_SEARCH;
+            probe_state = PROBE_NONE;
+            search_base_limit = limit;
+            upper_sample.valid = 0;
+            lower_sample.valid = 0;
+        }
+
+        pre_bw = avg_gbps;
+        pre_lat = avg_lat;
+        log_limit_batch_update("startup",
+                               LIMIT_BATCHING,
+                               limit,
+                               last_applied_bw,
+                               last_applied_lat,
+                               avg_gbps,
+                               avg_lat);
+        LIMIT_BATCHING = limit;
+        last_applied_bw = avg_gbps;
+        last_applied_lat = avg_lat;
+        return;
+    }
         if (bw && cnt1 != last_bw_cnt[t] ) {
             last_bw_cnt[t] = cnt1;
             last_bw_val[t] = bw;
@@ -1219,7 +1347,6 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
     }
 }
 
-
 // //文件，记录db_cycles数据
 // uint64_t db_cpu_cycles[5000000],polling_cpu_cycles[5000000];
 // int db_cycles_cnt = 0,polling_cycles_cnt = 0;
@@ -1367,8 +1494,11 @@ static __always_inline bool srm_poll_latency_once(
                 sqb->cur_post++;
 
                 {
+                    // int bf_idx = latency_thread_idx * NUM_SCHED * NUM_LEVEL * num_xrc_per_srm +
+                    //              (level * NUM_SCHED + id) * num_xrc_per_srm +
+                    //              xrc_qp_idx;
                     int bf_idx = latency_thread_idx * NUM_SCHED * NUM_LEVEL * num_xrc_per_srm +
-                                 NUM_LEVEL * NUM_SCHED * xrc_qp_idx + level * NUM_SCHED + id;
+                                  NUM_LEVEL * NUM_SCHED * xrc_qp_idx + level * NUM_SCHED + id;
                     srm_doorbell(sched_group->xrc_bf_arr[bf_idx], xrc_ctrl, new_tot_wqes - 1);
                 }
 
@@ -1417,6 +1547,10 @@ static __always_inline bool srm_poll_latency_once(
                 sqb->cur_post++;
 
                 {
+                                
+                    // int bf_idx = latency_thread_idx * NUM_SCHED * NUM_LEVEL * num_xrc_per_srm +
+                    //              (level * NUM_SCHED + id) * num_xrc_per_srm +
+                    //              xrc_qp_idx;
                     int bf_idx = latency_thread_idx * NUM_SCHED * NUM_LEVEL * num_xrc_per_srm +
                                  NUM_LEVEL * NUM_SCHED * xrc_qp_idx + level * NUM_SCHED + id;
                     srm_doorbell(sched_group->xrc_bf_arr[bf_idx],
@@ -1667,7 +1801,7 @@ int scheduler_polling(void *sched_data)
 
 
         /* 根据当前端到端吞吐与时延，自适应更新 LIMIT_BATCHING */
-        //update_limit_batch(sched);
+        update_limit_batch(sched);
         // for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++){
         //     end_time0 = rdtsc();
         //     elapsed_time0 = (end_time0 - start_time0)*1000000000 / cpu_frequency_hz;
@@ -1965,7 +2099,6 @@ int scheduler_polling(void *sched_data)
         {
            
             level = polling_order[order_idx][l];
-            // }
 
             user_level_val = srm_load_level_total(level, level_table_bias);
             if (unlikely(user_level_val < kernel_level_table[level + level_table_bias])) {
@@ -2594,6 +2727,17 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
         {
             sched->task = NULL;
         }
+    }
+
+    /*
+     * Scheduler threads are stopped; safe to release SQ/CQ buffers pinned
+     * with get_user_pages().
+     */
+    for (i = 0; i < sched_group->sqb_cnt; i++) {
+        sqb = sched_group->sqb_arr[i];
+        if (!sqb)
+            continue;
+        mlx5_ib_unmap_ubuf(sched_group, sqb->qpn);
     }
     //     mutex_lock(&sched->srmc_lock);
     //     for (j = 0; j < NUM_SRMC; j++)

@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/main.o
+/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/main.o
 

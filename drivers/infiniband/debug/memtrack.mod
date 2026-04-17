@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/infiniband/debug/memtrack.o
+/home/dell/zxm/rdma-kerndriver/drivers/infiniband/debug/memtrack.o
 

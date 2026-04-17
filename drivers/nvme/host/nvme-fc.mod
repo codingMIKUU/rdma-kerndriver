@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/nvme/host/fc.o
+/home/dell/zxm/rdma-kerndriver/drivers/nvme/host/fc.o
 

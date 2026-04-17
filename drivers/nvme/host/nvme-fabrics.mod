@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/nvme/host/fabrics.o
+/home/dell/zxm/rdma-kerndriver/drivers/nvme/host/fabrics.o
 

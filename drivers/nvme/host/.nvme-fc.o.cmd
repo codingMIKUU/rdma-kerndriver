@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fc.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fc.o /root/zxm/rdma-kerndriver/drivers/nvme/host/fc.o
+cmd_/home/dell/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fc.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/dell/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fc.o /home/dell/zxm/rdma-kerndriver/drivers/nvme/host/fc.o

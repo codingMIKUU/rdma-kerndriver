@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/nvme/host/tcm_qla2xxx.mod := { echo  /root/zxm/rdma-kerndriver/drivers/nvme/host/tcm_qla2xxx_dummy.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/nvme/host/tcm_qla2xxx.mod
+cmd_/home/dell/zxm/rdma-kerndriver/drivers/nvme/host/tcm_qla2xxx.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/nvme/host/tcm_qla2xxx_dummy.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/nvme/host/tcm_qla2xxx.mod

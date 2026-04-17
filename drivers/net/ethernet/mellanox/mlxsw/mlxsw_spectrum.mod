@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxsw/spectrum_main.o
+/home/dell/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxsw/spectrum_main.o
 

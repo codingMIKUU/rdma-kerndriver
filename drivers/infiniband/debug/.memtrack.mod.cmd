@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/debug/memtrack.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/debug/memtrack.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/debug/memtrack.mod
+cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/debug/memtrack.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/debug/memtrack.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/debug/memtrack.mod

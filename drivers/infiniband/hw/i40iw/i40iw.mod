@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/main.o
+/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/main.o
 

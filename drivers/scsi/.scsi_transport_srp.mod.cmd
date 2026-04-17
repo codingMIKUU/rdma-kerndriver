@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/scsi/scsi_transport_srp.mod := { echo  /root/zxm/rdma-kerndriver/drivers/scsi/scsi_transport_srp.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/scsi/scsi_transport_srp.mod
+cmd_/home/dell/zxm/rdma-kerndriver/drivers/scsi/scsi_transport_srp.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/scsi/scsi_transport_srp.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/scsi/scsi_transport_srp.mod

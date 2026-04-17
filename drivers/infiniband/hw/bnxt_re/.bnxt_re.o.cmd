@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/bnxt_re.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/bnxt_re.o /root/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/main.o
+cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/bnxt_re.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/bnxt_re.o /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/main.o

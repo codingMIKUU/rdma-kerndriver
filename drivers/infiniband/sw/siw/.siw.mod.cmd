@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/siw.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/siw.mod
+cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/siw.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/main.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/siw.mod

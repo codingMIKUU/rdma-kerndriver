@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/base/auxiliary.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/drivers/base/auxiliary.o /root/zxm/rdma-kerndriver/drivers/base/auxiliary_main.o /root/zxm/rdma-kerndriver/drivers/base/auxiliary_sysfs.o
+cmd_/home/dell/zxm/rdma-kerndriver/drivers/base/auxiliary.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/dell/zxm/rdma-kerndriver/drivers/base/auxiliary.o /home/dell/zxm/rdma-kerndriver/drivers/base/auxiliary_main.o /home/dell/zxm/rdma-kerndriver/drivers/base/auxiliary_sysfs.o

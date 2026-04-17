@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod
+cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/main.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod
