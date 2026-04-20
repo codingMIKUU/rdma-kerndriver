@@ -923,23 +923,7 @@ static inline void log_limit_batch_update(const char *phase,
             (unsigned long long)prev_lat,
             (unsigned long long)cur_lat);
 }
-static inline void log_limit_batch_update(const char *phase,
-                                          int old_limit,
-                                          int new_limit,
-                                          u64 prev_bw,
-                                          u64 prev_lat,
-                                          u64 cur_bw,
-                                          u64 cur_lat)
-{
-    pr_info("limit_batch %s: limit %d->%d, bw %llu->%llu Gbps, lat %llu->%llu us\n",
-            phase,
-            old_limit,
-            new_limit,
-            (unsigned long long)prev_bw,
-            (unsigned long long)cur_bw,
-            (unsigned long long)prev_lat,
-            (unsigned long long)cur_lat);
-}
+
 static inline void update_limit_batch(struct mlx5_ib_sched *sched){
     enum {
         STATE_STARTUP = 0,
@@ -985,7 +969,7 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
 
     const u32 startup_ignore_updates = 2;
     const unsigned long startup_ignore_secs = 5;
-    const u64 startup_lat_target_us = 5;
+    const u64 startup_lat_target_us = 50;
     int t;
     int step;
     int limit;
@@ -1002,13 +986,9 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
     if (num_user_threads > MAX_USER_THREADS_NUM)
         return;
 
-    if (num_user_threads > MAX_USER_THREADS_NUM)
-        return;
-
     /* 控制调整频率，避免过于频繁地读取共享表 */
     {
         static unsigned long last_jiffies;
-        const unsigned long interval = HZ * 10;
         const unsigned long interval = HZ * 10;
 
         if (time_before(jiffies, last_jiffies + interval))
@@ -1027,115 +1007,10 @@ static inline void update_limit_batch(struct mlx5_ib_sched *sched){
         cnt1 = smp_load_acquire(&user_xrc_table[t][0][0].update_cnt);
         bw = smp_load_acquire(&user_xrc_table[t][0][0].cur_Gbps);
         lat = smp_load_acquire(&user_xrc_table[t][0][0].cur_lat_us);
-    /*
-     * 吞吐和时延由不同线程更新：分别捕获“新吞吐”和“新时延”。
-     * 条件：update_cnt 稳定 + 该指标值发生变化。
-     */
-    for (t = 0; t < num_user_threads; t++) {
-        u64 cnt1, cnt2;
-        u64 bw, lat;
-
-        cnt1 = smp_load_acquire(&user_xrc_table[t][0][0].update_cnt);
-        bw = smp_load_acquire(&user_xrc_table[t][0][0].cur_Gbps);
-        lat = smp_load_acquire(&user_xrc_table[t][0][0].cur_lat_us);
 
         if (!cnt1)
             continue;
-        if (!cnt1)
-            continue;
 
-        if (bw && cnt1 != last_bw_cnt[t] ) {
-            last_bw_cnt[t] = cnt1;
-            last_bw_val[t] = bw;
-            pending_bw = bw;
-            pending_bw_valid = 1;
-        }
-
-        if (lat && cnt1 != last_lat_cnt[t] ) {
-            last_lat_cnt[t] = cnt1;
-            last_lat_val[t] = lat;
-            pending_lat = lat;
-            pending_lat_valid = 1;
-        }
-    }
-
-    if (!pending_bw_valid || !pending_lat_valid){
-        pr_info_ratelimited("pending_bw_valid:%d,pending_lat_valid:%d\n", pending_bw_valid, pending_lat_valid);
-        return ;
-    }
-
-    avg_gbps = pending_bw;
-    avg_lat = pending_lat;
-    pending_bw_valid = 0;
-    pending_lat_valid = 0;
-
-    if (state == STATE_STARTUP) {
-        if (startup_ignore_updates || startup_ignore_secs) {
-            if (!startup_ignore_until && startup_ignore_secs)
-                startup_ignore_until = jiffies + startup_ignore_secs * HZ;
-
-            startup_updates_seen++;
-
-            if ((startup_ignore_updates && startup_updates_seen <= startup_ignore_updates) ||
-                (startup_ignore_secs && time_before(jiffies, startup_ignore_until)))
-                return;
-        }
-    }
-
-    limit = LIMIT_BATCHING;
-    if (limit < min_batch)
-        limit = min_batch;
-    if (limit > max_batch)
-        limit = max_batch;
-
-    step = limit / 20;
-    if (step < 1)
-        step = 1;
-
-    if (state == STATE_STARTUP) {
-        if (!pre_bw || !pre_lat) {
-            pre_bw = avg_gbps;
-            pre_lat = avg_lat;
-            limit = min(limit * 2, max_batch);
-            log_limit_batch_update("startup-init",
-                                   LIMIT_BATCHING,
-                                   limit,
-                                   last_applied_bw,
-                                   last_applied_lat,
-                                   avg_gbps,
-                                   avg_lat);
-            LIMIT_BATCHING = limit;
-            last_applied_bw = avg_gbps;
-            last_applied_lat = avg_lat;
-            return;
-        }
-
-        if (avg_gbps * 100 > pre_bw * (100 + bw_eps_pct) &&
-            avg_lat <= startup_lat_target_us) {
-            limit = min(limit * 2, max_batch);
-        } else {
-            limit = max(limit / 2, min_batch);
-            state = STATE_SEARCH;
-            probe_state = PROBE_NONE;
-            search_base_limit = limit;
-            upper_sample.valid = 0;
-            lower_sample.valid = 0;
-        }
-
-        pre_bw = avg_gbps;
-        pre_lat = avg_lat;
-        log_limit_batch_update("startup",
-                               LIMIT_BATCHING,
-                               limit,
-                               last_applied_bw,
-                               last_applied_lat,
-                               avg_gbps,
-                               avg_lat);
-        LIMIT_BATCHING = limit;
-        last_applied_bw = avg_gbps;
-        last_applied_lat = avg_lat;
-        return;
-    }
         if (bw && cnt1 != last_bw_cnt[t] ) {
             last_bw_cnt[t] = cnt1;
             last_bw_val[t] = bw;
@@ -1801,7 +1676,7 @@ int scheduler_polling(void *sched_data)
 
 
         /* 根据当前端到端吞吐与时延，自适应更新 LIMIT_BATCHING */
-        update_limit_batch(sched);
+        //update_limit_batch(sched);
         // for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++){
         //     end_time0 = rdtsc();
         //     elapsed_time0 = (end_time0 - start_time0)*1000000000 / cpu_frequency_hz;
@@ -2130,15 +2005,15 @@ int scheduler_polling(void *sched_data)
             // smp_rmb();  // 读内存屏障，阻止读重排
 
 
-            if(level != 0 || lat_cnt % 2 != 0){
-                user_thread_idx = srm_fastrand(&polling_seed) % current_num_user_threads;
-            }
-            else{
-                //user_thread_idx = current_num_user_threads - 1;
-                user_thread_idx = real_num_threads - 1;
-            }
+            // if(level != 0 || lat_cnt % 2 != 0){
+            //     user_thread_idx = srm_fastrand(&polling_seed) % current_num_user_threads;
+            // }
+            // else{
+            //     //user_thread_idx = current_num_user_threads - 1;
+            //     user_thread_idx = real_num_threads - 1;
+            // }
             
-            //user_thread_idx = srm_fastrand(&polling_seed) % num_user_threads;
+            user_thread_idx = srm_fastrand(&polling_seed) % num_user_threads;
 
 
             if(level == 0)
@@ -2255,40 +2130,40 @@ int scheduler_polling(void *sched_data)
 
                 stuck_cnt = 0 ;    
                 //limit_batch controlling   
-                // while (user_thread_idx != real_num_threads-1 && kernel_tot_db - user_tot_cqes > LIMIT_BATCHING && !kthread_should_stop()) {
-                //     //uint64_t t_st = rdtsc();
-                //     user_tot_cqes = calc_tot_cqes(current_num_user_threads);
-                //     //uint64_t t_ed = rdtsc();
+                while (kernel_tot_db - user_tot_cqes > LIMIT_BATCHING && !kthread_should_stop()) {
+                    //uint64_t t_st = rdtsc();
+                    user_tot_cqes = calc_tot_cqes(current_num_user_threads);
+                    //uint64_t t_ed = rdtsc();
 
-                //     inflight = kernel_tot_db - user_tot_cqes;
-                //     if (inflight <= LIMIT_BATCHING)
-                //         break;
-                //     //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu\n",kernel_tot_db,user_tot_cqes);
-                //     // if(kernel_tot_db > user_tot_cqes + LIMIT_BATCHING){
+                    inflight = kernel_tot_db - user_tot_cqes;
+                    if (inflight <= LIMIT_BATCHING)
+                        break;
+                    //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu\n",kernel_tot_db,user_tot_cqes);
+                    // if(kernel_tot_db > user_tot_cqes + LIMIT_BATCHING){
 
-                //     //     //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu, wait...\n",kernel_tot_db,user_tot_cqes);
-                //     //     msleep(0);
-                //     // }      
-                //     stuck_cnt++;
-                //     if(stuck_cnt % 100000000 == 0){
-                //         msleep(0);
-                //     }
-                //     if (!srm_poll_latency_once(&sched_group,
-                //                                id,
-                //                                current_num_user_threads,
-                //                                current_table_qp,
-                //                                num_thread_qps,
-                //                                level_table_bias,
-                //                                real_num_threads,
-                //                                wqes_limit_sz,
-                //                                &wqe_tot_sz,
-                //                                &wqe_ewma_sz,
-                //                                cur_wqes,
-                //                                &wqe_cur_idx,
-                //                                alpha_a,
-                //                                    alpha_b))
-                //         cpu_relax();
-                // }
+                    //     //pr_info("kernel_tot_db:%llu, user_tot_cqes:%llu, wait...\n",kernel_tot_db,user_tot_cqes);
+                    //     msleep(0);
+                    // }      
+                    stuck_cnt++;
+                    if(stuck_cnt % 100000000 == 0){
+                        msleep(0);
+                    }
+                    // if (!srm_poll_latency_once(&sched_group,
+                    //                            id,
+                    //                            current_num_user_threads,
+                    //                            current_table_qp,
+                    //                            num_thread_qps,
+                    //                            level_table_bias,
+                    //                            real_num_threads,
+                    //                            wqes_limit_sz,
+                    //                            &wqe_tot_sz,
+                    //                            &wqe_ewma_sz,
+                    //                            cur_wqes,
+                    //                            &wqe_cur_idx,
+                    //                            alpha_a,
+                    //                                alpha_b))
+                        cpu_relax();
+                }
                 //pr_info("user_tot_cqes:%llu\n", calc_tot_cqes(current_num_user_threads));
                 
                 if (level == 0)
@@ -2423,7 +2298,7 @@ int scheduler_polling(void *sched_data)
                         //     roll_cnt++;
                         // }
 
-                        if(user_thread_idx != real_num_threads-1)
+                        //if(user_thread_idx != real_num_threads-1)
                             kernel_tot_db += delta;
                         
                         // pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d user_level_val=%llu kernel_level_val=%llu xrc_ctrl=%llu\n",
@@ -2526,7 +2401,7 @@ int scheduler_polling(void *sched_data)
                     //     ndelay(175);
                     // }
 
-                    if(user_thread_idx != real_num_threads-1)
+                    //if(user_thread_idx != real_num_threads-1)
                         kernel_tot_db++;
 
                     // pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d\n",
