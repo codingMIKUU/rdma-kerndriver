@@ -30,6 +30,9 @@
 #include "qp.h"
 #include "macsec.h"
 
+struct page;
+struct mlx5_ib_srmc;
+
 #define MLX5_PAS_ALIGN 64
 #define mlx5_ib_dbg(_dev, format, arg...)                                      \
 	dev_dbg(&(_dev)->ib_dev.dev, "%s:%d:(pid %d): " format, __func__,      \
@@ -190,12 +193,20 @@ enum {
 	MLX5_MEMIC_BASE_SIZE	= 1 << MLX5_MEMIC_BASE_ALIGN,
 };
 
+struct mlx5_qp_ctrl_mmap_entry;
+struct mlx5_qp_ready_mmap_entry;
+struct mlx5_qp_usr_rc_mmap_entry;
+
 enum mlx5_ib_mmap_type {
 	MLX5_IB_MMAP_TYPE_MEMIC = 1,
 	MLX5_IB_MMAP_TYPE_VAR = 2,
 	MLX5_IB_MMAP_TYPE_UAR_WC = 3,
 	MLX5_IB_MMAP_TYPE_UAR_NC = 4,
 	MLX5_IB_MMAP_TYPE_MEMIC_OP = 5,
+	MLX5_IB_MMAP_TYPE_QP_SQ = 6,
+	MLX5_IB_MMAP_TYPE_QP_CTRL = 7,
+	MLX5_IB_MMAP_TYPE_QP_READY = 8,
+	MLX5_IB_MMAP_TYPE_QP_USR_RC = 9,
 };
 
 struct mlx5_bfreg_info {
@@ -243,6 +254,9 @@ struct mlx5_ib_pd {
 	struct ib_pd		ibpd;
 	u32			pdn;
 	u16			uid;
+	bool			hollow_rc_shared;
+	u32			hollow_rc_pdn;
+	u16			hollow_rc_uid;
 };
 
 enum {
@@ -551,6 +565,13 @@ struct mlx5_ib_qp {
 	 * we have it from the bf object
 	 */
 	int			bfregn;
+	struct mlx5_qp_sq_mmap_entry *sq_mmap_entry;
+	struct mlx5_qp_ctrl_mmap_entry *sq_ctrl_entry;
+	struct mlx5_qp_ready_mmap_entry *sq_ready_entry;
+	struct mlx5_qp_usr_rc_mmap_entry *sq_usr_rc_entry;
+	u32			sq_ctrl_slot_idx;
+	u8			kernel_db:1;
+    struct mlx5_ib_srmc *srmc_owner;
 
 	struct list_head	qps_list;
 	struct list_head	cq_recv_list;
@@ -652,6 +673,36 @@ struct mlx5_user_mmap_entry {
 	u8 mmap_flag;
 	u64 address;
 	u32 page_idx;
+};
+
+struct mlx5_qp_sq_mmap_entry {
+	struct mlx5_user_mmap_entry mentry;
+	struct page **pages;
+	u32 npages;
+};
+
+struct mlx5_qp_ctrl_pool {
+	struct page		**pages;
+	u32			npages;
+	u32			slot_cnt;
+	u32			slot_stride;
+};
+
+struct mlx5_qp_ctrl_mmap_entry {
+	struct mlx5_user_mmap_entry mentry;
+	struct mlx5_qp_ctrl_pool *pool;
+};
+
+struct mlx5_qp_ready_mmap_entry {
+	struct mlx5_user_mmap_entry mentry;
+	struct page **pages;
+	u32 npages;
+};
+
+struct mlx5_qp_usr_rc_mmap_entry {
+	struct mlx5_user_mmap_entry mentry;
+	struct page **pages;
+	u32 npages;
 };
 
 enum mlx5_mkey_type {
@@ -1207,6 +1258,12 @@ struct mlx5_ib_dev {
 	spinlock_t		reset_flow_resource_lock;
 	struct list_head	qp_list;
 	struct list_head data_direct_mr_list;
+	struct mlx5_qp_ctrl_pool sq_ctrl_pool;
+	struct mutex		hollow_rc_shared_pd_lock;
+	bool			hollow_rc_shared_pd_valid;
+	u32			hollow_rc_shared_pdn;
+	u16			hollow_rc_shared_uid;
+	u32			hollow_rc_shared_refcnt;
 	struct mlx5_dc_tracer   dctr;
 	u32                     num_dc_cnak_qps;
 	u32                     max_dc_cnak_qps;
@@ -1300,6 +1357,23 @@ static inline struct mlx5_ib_pd *to_mpd(struct ib_pd *ibpd)
 {
 	return container_of(ibpd, struct mlx5_ib_pd, ibpd);
 }
+
+static inline u32 mlx5_ib_effective_pdn(struct ib_pd *ibpd)
+{
+	struct mlx5_ib_pd *pd = to_mpd(ibpd);
+
+	return pd->hollow_rc_shared ? pd->hollow_rc_pdn : pd->pdn;
+}
+
+static inline u16 mlx5_ib_effective_uid(struct ib_pd *ibpd)
+{
+	struct mlx5_ib_pd *pd = to_mpd(ibpd);
+
+	return pd->hollow_rc_shared ? pd->hollow_rc_uid : pd->uid;
+}
+
+int mlx5_ib_bind_hollow_rc_shared_pd(struct mlx5_ib_dev *dev, struct ib_pd *ibpd,
+				     struct mlx5_ib_ucontext *context);
 
 static inline struct mlx5_ib_srq *to_msrq(struct ib_srq *ibsrq)
 {

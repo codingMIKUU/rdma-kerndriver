@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/usnic/usnic_verbs.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/usnic/usnic_verbs.o /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/usnic/main.o
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/usnic/usnic_verbs.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/drivers/infiniband/hw/usnic/usnic_verbs.o /root/zxm/rdma-kerndriver/drivers/infiniband/hw/usnic/main.o

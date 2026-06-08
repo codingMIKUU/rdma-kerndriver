@@ -577,7 +577,7 @@ int scheduler_polling(void *sched_data)
                 for (i = 0; i < NUM_SRMC; i++)
                 {
                     j = (i + hash_id) % NUM_SRMC;
-                    srmc = (length > MESSAGE_SIZE_THRESHOLD ? sched->srmc_large_tb[j] : sched->srmc_small_tb[j]);
+                    srmc = sched->srmc_tb[j];
                     if (srmc == NULL)
                     {
                         pr_err("Unexpected:No srmc found for this wr\n");
@@ -593,7 +593,7 @@ int scheduler_polling(void *sched_data)
                         }
                         found = 1;
                         j = (j + rd) % NUM_SRMC; // 随机选择一个srmc
-                        srmc = (length > MESSAGE_SIZE_THRESHOLD ? sched->srmc_large_tb[j] : sched->srmc_small_tb[j]);
+                        srmc = sched->srmc_tb[j];
                         break;
                     }
                 }

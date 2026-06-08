@@ -2363,6 +2363,31 @@ static void mlx5_ib_mmap_free(struct rdma_user_mmap_entry *entry)
 							 context->devx_uid);
 		kfree(mentry);
 		break;
+	case MLX5_IB_MMAP_TYPE_QP_SQ: {
+		struct mlx5_qp_sq_mmap_entry *sqe =
+			container_of(mentry, struct mlx5_qp_sq_mmap_entry, mentry);
+		kfree(sqe->pages);
+		kfree(sqe);
+		break;
+	}
+	case MLX5_IB_MMAP_TYPE_QP_CTRL: {
+		struct mlx5_qp_ctrl_mmap_entry *ctrl =
+			container_of(mentry, struct mlx5_qp_ctrl_mmap_entry, mentry);
+		kfree(ctrl);
+		break;
+	}
+	case MLX5_IB_MMAP_TYPE_QP_READY: {
+		struct mlx5_qp_ready_mmap_entry *ready =
+			container_of(mentry, struct mlx5_qp_ready_mmap_entry, mentry);
+		kfree(ready);
+		break;
+	}
+	case MLX5_IB_MMAP_TYPE_QP_USR_RC: {
+		struct mlx5_qp_usr_rc_mmap_entry *usr_rc =
+			container_of(mentry, struct mlx5_qp_usr_rc_mmap_entry, mentry);
+		kfree(usr_rc);
+		break;
+	}
 	default:
 		WARN_ON(true);
 	}
@@ -2495,6 +2520,27 @@ static unsigned long mlx5_vma_to_pgoff(struct vm_area_struct *vma)
 	return (command << 16 | idx);
 }
 
+static int mlx5_ib_mmap_qp_pages(struct vm_area_struct *vma,
+				 struct page **pages, unsigned long npages)
+{
+	unsigned long addr = vma->vm_start;
+	unsigned long len = vma->vm_end - vma->vm_start;
+	unsigned long i;
+	int ret;
+
+	if (len != npages * PAGE_SIZE)
+		return -EINVAL;
+
+	for (i = 0; i < npages; i++) {
+		ret = vm_insert_page(vma, addr, pages[i]);
+		if (ret)
+			return ret;
+		addr += PAGE_SIZE;
+	}
+
+	return 0;
+}
+
 static int mlx5_ib_mmap_offset(struct mlx5_ib_dev *dev,
 							   struct vm_area_struct *vma,
 							   struct ib_ucontext *ucontext)
@@ -2512,6 +2558,34 @@ static int mlx5_ib_mmap_offset(struct mlx5_ib_dev *dev,
 		return -EINVAL;
 
 	mentry = to_mmmap(entry);
+	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_QP_SQ) {
+		struct mlx5_qp_sq_mmap_entry *sqe =
+			container_of(mentry, struct mlx5_qp_sq_mmap_entry, mentry);
+		ret = mlx5_ib_mmap_qp_pages(vma, sqe->pages, sqe->npages);
+		rdma_user_mmap_entry_put(&mentry->rdma_entry);
+		return ret;
+	}
+	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_QP_CTRL) {
+		struct mlx5_qp_ctrl_mmap_entry *ctrl =
+			container_of(mentry, struct mlx5_qp_ctrl_mmap_entry, mentry);
+		ret = mlx5_ib_mmap_qp_pages(vma, ctrl->pool->pages, ctrl->pool->npages);
+		rdma_user_mmap_entry_put(&mentry->rdma_entry);
+		return ret;
+	}
+	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_QP_READY) {
+		struct mlx5_qp_ready_mmap_entry *ready =
+			container_of(mentry, struct mlx5_qp_ready_mmap_entry, mentry);
+		ret = mlx5_ib_mmap_qp_pages(vma, ready->pages, ready->npages);
+		rdma_user_mmap_entry_put(&mentry->rdma_entry);
+		return ret;
+	}
+	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_QP_USR_RC) {
+		struct mlx5_qp_usr_rc_mmap_entry *usr_rc =
+			container_of(mentry, struct mlx5_qp_usr_rc_mmap_entry, mentry);
+		ret = mlx5_ib_mmap_qp_pages(vma, usr_rc->pages, usr_rc->npages);
+		rdma_user_mmap_entry_put(&mentry->rdma_entry);
+		return ret;
+	}
 	pfn = (mentry->address >> PAGE_SHIFT);
 	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_VAR ||
 		mentry->mmap_flag == MLX5_IB_MMAP_TYPE_UAR_NC)
@@ -2593,6 +2667,73 @@ static int mlx5_ib_mmap(struct ib_ucontext *ibcontext, struct vm_area_struct *vm
 	return 0;
 }
 
+int mlx5_ib_bind_hollow_rc_shared_pd(struct mlx5_ib_dev *dev, struct ib_pd *ibpd,
+				     struct mlx5_ib_ucontext *context)
+{
+	struct mlx5_ib_pd *pd = to_mpd(ibpd);
+	u32 out[MLX5_ST_SZ_DW(alloc_pd_out)] = {};
+	u32 in[MLX5_ST_SZ_DW(alloc_pd_in)] = {};
+	u16 uid = context ? context->devx_uid : pd->uid;
+	int err = 0;
+
+	mutex_lock(&dev->hollow_rc_shared_pd_lock);
+	if (pd->hollow_rc_shared)
+		goto out;
+
+	if (!dev->hollow_rc_shared_pd_valid) {
+		MLX5_SET(alloc_pd_in, in, opcode, MLX5_CMD_OP_ALLOC_PD);
+		MLX5_SET(alloc_pd_in, in, uid, uid);
+		err = mlx5_cmd_exec_inout(dev->mdev, alloc_pd, in, out);
+		if (err)
+			goto out;
+
+		dev->hollow_rc_shared_pdn = MLX5_GET(alloc_pd_out, out, pd);
+		dev->hollow_rc_shared_uid = uid;
+		dev->hollow_rc_shared_pd_valid = true;
+		mlx5_ib_dbg(dev, "allocated hollow RC shared PDN %u uid %u\n",
+			    dev->hollow_rc_shared_pdn,
+			    dev->hollow_rc_shared_uid);
+	}
+
+	pd->hollow_rc_shared = true;
+	pd->hollow_rc_pdn = dev->hollow_rc_shared_pdn;
+	pd->hollow_rc_uid = dev->hollow_rc_shared_uid;
+	dev->hollow_rc_shared_refcnt++;
+
+out:
+	mutex_unlock(&dev->hollow_rc_shared_pd_lock);
+	return err;
+}
+
+static void mlx5_ib_put_hollow_rc_shared_pd(struct mlx5_ib_dev *dev,
+					    struct mlx5_ib_pd *pd)
+{
+	if (!pd->hollow_rc_shared)
+		return;
+
+	mutex_lock(&dev->hollow_rc_shared_pd_lock);
+	if (dev->hollow_rc_shared_refcnt)
+		dev->hollow_rc_shared_refcnt--;
+	pd->hollow_rc_shared = false;
+	pd->hollow_rc_pdn = 0;
+	pd->hollow_rc_uid = 0;
+	mutex_unlock(&dev->hollow_rc_shared_pd_lock);
+}
+
+static void mlx5_ib_cleanup_hollow_rc_shared_pd(struct mlx5_ib_dev *dev)
+{
+	mutex_lock(&dev->hollow_rc_shared_pd_lock);
+	if (dev->hollow_rc_shared_pd_valid) {
+		mlx5_cmd_dealloc_pd(dev->mdev, dev->hollow_rc_shared_pdn,
+				    dev->hollow_rc_shared_uid);
+		dev->hollow_rc_shared_pd_valid = false;
+		dev->hollow_rc_shared_pdn = 0;
+		dev->hollow_rc_shared_uid = 0;
+		dev->hollow_rc_shared_refcnt = 0;
+	}
+	mutex_unlock(&dev->hollow_rc_shared_pd_lock);
+}
+
 static int mlx5_ib_alloc_pd(struct ib_pd *ibpd, struct ib_udata *udata)
 {
 	struct mlx5_ib_pd *pd = to_mpd(ibpd);
@@ -2614,6 +2755,9 @@ static int mlx5_ib_alloc_pd(struct ib_pd *ibpd, struct ib_udata *udata)
 
 	pd->pdn = MLX5_GET(alloc_pd_out, out, pd);
 	pd->uid = uid;
+	pd->hollow_rc_shared = false;
+	pd->hollow_rc_pdn = 0;
+	pd->hollow_rc_uid = 0;
 	if (udata)
 	{
 		resp.pdn = pd->pdn;
@@ -2632,6 +2776,7 @@ static int mlx5_ib_dealloc_pd(struct ib_pd *pd, struct ib_udata *udata)
 	struct mlx5_ib_dev *mdev = to_mdev(pd->device);
 	struct mlx5_ib_pd *mpd = to_mpd(pd);
 
+	mlx5_ib_put_hollow_rc_shared_pd(mdev, mpd);
 	return mlx5_cmd_dealloc_pd(mdev->mdev, mpd->pdn, mpd->uid);
 }
 
@@ -2642,7 +2787,7 @@ static int mlx5_ib_mcg_attach(struct ib_qp *ibqp, union ib_gid *gid, u16 lid)
 	int err;
 	u16 uid;
 
-	uid = ibqp->pd ? to_mpd(ibqp->pd)->uid : 0;
+	uid = ibqp->pd ? mlx5_ib_effective_uid(ibqp->pd) : 0;
 
 	if (mqp->flags & IB_QP_CREATE_SOURCE_QPN)
 	{
@@ -2664,7 +2809,7 @@ static int mlx5_ib_mcg_detach(struct ib_qp *ibqp, union ib_gid *gid, u16 lid)
 	int err;
 	u16 uid;
 
-	uid = ibqp->pd ? to_mpd(ibqp->pd)->uid : 0;
+	uid = ibqp->pd ? mlx5_ib_effective_uid(ibqp->pd) : 0;
 	err = mlx5_cmd_detach_mcg(dev->mdev, gid, ibqp->qp_num, uid);
 	if (err)
 		mlx5_ib_warn(dev, "failed detaching QPN 0x%x, MGID %pI6\n",
@@ -4254,10 +4399,21 @@ static void mlx5_ib_stage_init_cleanup(struct mlx5_ib_dev *dev)
 {
 	mlx5_ib_data_direct_cleanup(dev);
 	mlx5_ib_cleanup_multiport_master(dev);
+	mlx5_ib_cleanup_hollow_rc_shared_pd(dev);
+	if (dev->sq_ctrl_pool.pages) {
+		u32 i;
+
+		for (i = 0; i < dev->sq_ctrl_pool.npages; i++)
+			if (dev->sq_ctrl_pool.pages[i])
+				put_page(dev->sq_ctrl_pool.pages[i]);
+		kfree(dev->sq_ctrl_pool.pages);
+		dev->sq_ctrl_pool.pages = NULL;
+	}
 #ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
 	WARN_ON(!xa_empty(&dev->odp_mkeys));
 #endif
 	mutex_destroy(&dev->cap_mask_mutex);
+	mutex_destroy(&dev->hollow_rc_shared_pd_lock);
 	WARN_ON(!xa_empty(&dev->sig_mrs));
 	WARN_ON(!bitmap_empty(dev->dm.memic_alloc_pages, MLX5_MAX_MEMIC_PAGES));
 	mlx5r_macsec_dealloc_gids(dev);
@@ -4310,19 +4466,53 @@ static int mlx5_ib_stage_init_init(struct mlx5_ib_dev *dev)
 
 	mutex_init(&dev->cap_mask_mutex);
 	mutex_init(&dev->data_direct_lock);
+	mutex_init(&dev->hollow_rc_shared_pd_lock);
+	dev->hollow_rc_shared_pd_valid = false;
+	dev->hollow_rc_shared_pdn = 0;
+	dev->hollow_rc_shared_uid = 0;
+	dev->hollow_rc_shared_refcnt = 0;
 	INIT_LIST_HEAD(&dev->qp_list);
 	spin_lock_init(&dev->reset_flow_resource_lock);
 	xa_init(&dev->odp_mkeys);
 	xa_init(&dev->sig_mrs);
 	atomic_set(&dev->mkey_var, 0);
+	dev->sq_ctrl_pool.slot_cnt = MAX_USER_XRC_QP_PER_SRM;
+	dev->sq_ctrl_pool.slot_stride = sizeof(struct mlx5_sq_ctrl_page);
+	dev->sq_ctrl_pool.npages = DIV_ROUND_UP((u64)dev->sq_ctrl_pool.slot_cnt *
+					       dev->sq_ctrl_pool.slot_stride,
+					       PAGE_SIZE);
+	dev->sq_ctrl_pool.pages = kcalloc(dev->sq_ctrl_pool.npages,
+					  sizeof(*dev->sq_ctrl_pool.pages),
+					  GFP_KERNEL);
+	if (!dev->sq_ctrl_pool.pages) {
+		err = -ENOMEM;
+		goto err_mp;
+	}
+
+	for (i = 0; i < dev->sq_ctrl_pool.npages; i++) {
+		dev->sq_ctrl_pool.pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+		if (!dev->sq_ctrl_pool.pages[i]) {
+			err = -ENOMEM;
+			goto err_ctrl_pool;
+		}
+	}
 
 	spin_lock_init(&dev->dm.lock);
 	dev->dm.dev = mdev;
 	err = mlx5_ib_data_direct_init(dev);
 	if (err)
-		goto err_mp;
+		goto err_ctrl_pool;
 
 	return 0;
+
+err_ctrl_pool:
+	while (i > 0)
+		put_page(dev->sq_ctrl_pool.pages[--i]);
+	kfree(dev->sq_ctrl_pool.pages);
+	dev->sq_ctrl_pool.pages = NULL;
+	dev->sq_ctrl_pool.npages = 0;
+	dev->sq_ctrl_pool.slot_cnt = 0;
+	dev->sq_ctrl_pool.slot_stride = 0;
 err_mp:
 	mlx5_ib_cleanup_multiport_master(dev);
 err:

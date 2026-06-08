@@ -400,7 +400,7 @@ int mlx5r_umr_revoke_mr(struct mlx5_ib_mr *mr)
 	wqe.ctrl_seg.flags |= MLX5_UMR_INLINE;
 
 	MLX5_SET(mkc, &wqe.mkey_seg, free, 1);
-	MLX5_SET(mkc, &wqe.mkey_seg, pd, to_mpd(dev->umrc.pd)->pdn);
+	MLX5_SET(mkc, &wqe.mkey_seg, pd, mlx5_ib_effective_pdn(dev->umrc.pd));
 	MLX5_SET(mkc, &wqe.mkey_seg, qpn, 0xffffff);
 	MLX5_SET(mkc, &wqe.mkey_seg, mkey_7_0,
 		 mlx5_mkey_variant(mr->mmkey.key));
@@ -440,7 +440,7 @@ int mlx5r_umr_rereg_pd_access(struct mlx5_ib_mr *mr, struct ib_pd *pd,
 	wqe.ctrl_seg.flags |= MLX5_UMR_INLINE;
 
 	mlx5r_umr_set_access_flags(dev, &wqe.mkey_seg, access_flags);
-	MLX5_SET(mkc, &wqe.mkey_seg, pd, to_mpd(pd)->pdn);
+	MLX5_SET(mkc, &wqe.mkey_seg, pd, mlx5_ib_effective_pdn(pd));
 	MLX5_SET(mkc, &wqe.mkey_seg, qpn, 0xffffff);
 	MLX5_SET(mkc, &wqe.mkey_seg, mkey_7_0,
 		 mlx5_mkey_variant(mr->mmkey.key));
@@ -578,7 +578,7 @@ static void mlx5r_umr_set_update_xlt_mkey_seg(struct mlx5_ib_dev *dev,
 					      unsigned int page_shift)
 {
 	mlx5r_umr_set_access_flags(dev, mkey_seg, mr->access_flags);
-	MLX5_SET(mkc, mkey_seg, pd, to_mpd(mr->ibmr.pd)->pdn);
+	MLX5_SET(mkc, mkey_seg, pd, mlx5_ib_effective_pdn(mr->ibmr.pd));
 	MLX5_SET64(mkc, mkey_seg, start_addr, mr->ibmr.iova);
 	MLX5_SET64(mkc, mkey_seg, len, mr->ibmr.length);
 	MLX5_SET(mkc, mkey_seg, log_page_size, page_shift);

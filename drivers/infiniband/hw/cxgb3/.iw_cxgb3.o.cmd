@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/iw_cxgb3.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/iw_cxgb3.o /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/main.o
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/iw_cxgb3.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/iw_cxgb3.o /root/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/main.o

@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/nvme/host/nvme-rdma.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/nvme/host/rdma.o /home/dell/zxm/rdma-kerndriver/drivers/nvme/host/nvfs-rdma.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/nvme/host/nvme-rdma.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-rdma.mod := { echo  /root/zxm/rdma-kerndriver/drivers/nvme/host/rdma.o /root/zxm/rdma-kerndriver/drivers/nvme/host/nvfs-rdma.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-rdma.mod

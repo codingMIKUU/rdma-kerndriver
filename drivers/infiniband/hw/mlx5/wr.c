@@ -586,7 +586,7 @@ static int set_pi_umr_wr(const struct ib_send_wr *send_wr,
 	struct mlx5_ib_mr *sig_mr = to_mmr(wr->mr);
 	struct mlx5_ib_mr *pi_mr = sig_mr->pi_mr;
 	struct ib_sig_attrs *sig_attrs = sig_mr->ibmr.sig_attrs;
-	u32 pdn = to_mpd(qp->ibqp.pd)->pdn;
+	u32 pdn = mlx5_ib_effective_pdn(qp->ibqp.pd);
 	u32 xlt_size;
 	int region_len, ret;
 
@@ -1305,7 +1305,7 @@ int mlx5_ib_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 	}
 
 out:
-	if (likely(nreq))
+	if (likely(nreq) )
 		mlx5r_ring_db(qp, nreq, ctrl);
 
 	spin_unlock_irqrestore(&qp->sq.lock, flags);

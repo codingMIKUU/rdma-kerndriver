@@ -97,7 +97,7 @@ static int create_srq_user(struct ib_pd *pd, struct mlx5_ib_srq *srq,
 		goto err_umem;
 	}
 
-	in->uid = (in->type != IB_SRQT_XRC) ?  to_mpd(pd)->uid : 0;
+	in->uid = (in->type != IB_SRQT_XRC) ? mlx5_ib_effective_uid(pd) : 0;
 	if (MLX5_CAP_GEN(dev->mdev, cqe_version) == MLX5_CQE_VERSION_V1 &&
 	    in->type != IB_SRQT_BASIC)
 		in->user_index = uidx;
@@ -299,7 +299,7 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 	else
 		in.cqn = to_mcq(dev->devr.c0)->mcq.cqn;
 
-	in.pd = to_mpd(ib_srq->pd)->pdn;
+	in.pd = mlx5_ib_effective_pdn(ib_srq->pd);
 	in.db_record = srq->db.dma;
 	err = mlx5_cmd_create_srq(dev, &srq->msrq, &in);
 	kvfree(in.pas);

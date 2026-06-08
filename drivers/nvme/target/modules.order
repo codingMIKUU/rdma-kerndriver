@@ -1,6 +1,6 @@
-/home/dell/zxm/rdma-kerndriver/drivers/nvme/target/nvmet.ko
-/home/dell/zxm/rdma-kerndriver/drivers/nvme/target/nvme-loop.ko
-/home/dell/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-rdma.ko
-/home/dell/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-fc.ko
-/home/dell/zxm/rdma-kerndriver/drivers/nvme/target/nvme-fcloop.ko
-/home/dell/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-tcp.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/target/nvmet.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/target/nvme-loop.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-rdma.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-fc.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/target/nvme-fcloop.ko
+/root/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-tcp.ko

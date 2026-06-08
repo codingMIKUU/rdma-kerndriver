@@ -53,6 +53,7 @@ enum {
 	MLX5_QP_FLAG_UAR_PAGE_INDEX = 1 << 10,
 	MLX5_QP_FLAG_DCI_STREAM	= 1 << 11,
 	MLX5_QP_FLAG_SRM_SENDER	= 1 << 12,
+	MLX5_QP_FLAG_SRM_SKIP_KERN_QP = 1 << 13,
 };
 
 enum {
@@ -350,6 +351,7 @@ struct mlx5_ib_create_qp {
 	__u32 db_bf_reg_size;
 	__u32 bf_buf_size;
 	__u32 bf_offset;
+	__u8 gid[16];
 	__u16 reserved;
 };
 
@@ -396,6 +398,8 @@ enum mlx5_ib_create_qp_resp_mask {
 	MLX5_IB_CREATE_QP_RESP_MASK_RQN  = 1UL << 2,
 	MLX5_IB_CREATE_QP_RESP_MASK_SQN  = 1UL << 3,
 	MLX5_IB_CREATE_QP_RESP_MASK_TIR_ICM_ADDR  = 1UL << 4,
+	MLX5_IB_CREATE_QP_RESP_MASK_SQ_MMAP = 1UL << 5,
+	MLX5_IB_CREATE_QP_RESP_MASK_USR_RC_CNT = 1UL << 6,
 };
 
 struct mlx5_ib_create_qp_resp {
@@ -408,6 +412,10 @@ struct mlx5_ib_create_qp_resp {
 	__u32	sqn;
 	__u32   reserved1;
 	__u64	tir_icm_addr;
+	__u64	sq_mmap_offset;
+	__u32	sq_mmap_len;
+	__u32	usr_rc_cnt;
+	__u32	reserved2;
 };
 
 struct mlx5_ib_alloc_mw {
@@ -461,6 +469,34 @@ struct mlx5_ib_modify_qp_resp {
 	__u32	dctn;
 	__u32   ece_options;
 	__u32   reserved;
+	__u32	comp_mask;
+	__u64	sq_state_mmap_offset;
+	__u32	sq_state_mmap_len;
+	__u32	sq_state_slot_idx;
+	__u64	sq_mmap_offset;
+	__u32	sq_mmap_len;
+	__u32	reserved1;
+	__u64	ready_mmap_offset;
+	__u32	ready_mmap_len;
+	__u32	ready_depth;
+	__u32	kernel_qpn;
+	__u32	kernel_sq_wqe_cnt;
+	__u32	kernel_sq_wqe_shift;
+	__u32	kernel_sq_max_post;
+	__u32	kernel_sq_max_gs;
+	__u32	kernel_sq_qp_state_max_gs;
+	__u32	kernel_max_inline_data;
+	__u64	usr_rc_mmap_offset;
+	__u32	usr_rc_mmap_len;
+	__u32	usr_rc_depth;
+};
+
+enum mlx5_ib_modify_qp_resp_mask {
+	MLX5_IB_MODIFY_QP_RESP_MASK_SQ_STATE_MMAP = 1UL << 0,
+	MLX5_IB_MODIFY_QP_RESP_MASK_KERNEL_QP_INFO = 1UL << 1,
+	MLX5_IB_MODIFY_QP_RESP_MASK_SQ_MMAP = 1UL << 2,
+	MLX5_IB_MODIFY_QP_RESP_MASK_READY_MMAP = 1UL << 3,
+	MLX5_IB_MODIFY_QP_RESP_MASK_USR_RC_MMAP = 1UL << 4,
 };
 
 struct mlx5_ib_create_wq_resp {

@@ -1,28 +1,26 @@
 rl.o: \
- /home/dell/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlx5/core/rl.c \
+ /root/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlx5/core/rl.c \
  /lib/modules/5.4.0-86-generic/build/include/generated/autoconf.h \
  /lib/modules/5.4.0-86-generic/build/include/linux/kconfig.h \
- /home/dell/zxm/rdma-kerndriver/include/generated/autoconf.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/compat-2.6.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/../../compat/config.h \
+ /root/zxm/rdma-kerndriver/include/generated/autoconf.h \
+ /root/zxm/rdma-kerndriver/include/linux/compat-2.6.h \
+ /root/zxm/rdma-kerndriver/include/linux/../../compat/config.h \
  include/generated/uapi/linux/version.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/kconfig.h \
+ /root/zxm/rdma-kerndriver/include/linux/kconfig.h \
  include/linux/kconfig.h include/uapi/linux/if.h \
  include/uapi/linux/libc-compat.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/types.h \
- include/linux/types.h include/uapi/linux/types.h \
- arch/x86/include/generated/uapi/asm/types.h \
+ /root/zxm/rdma-kerndriver/include/linux/types.h include/linux/types.h \
+ include/uapi/linux/types.h arch/x86/include/generated/uapi/asm/types.h \
  include/uapi/asm-generic/types.h include/asm-generic/int-ll64.h \
  include/uapi/asm-generic/int-ll64.h \
  arch/x86/include/uapi/asm/bitsperlong.h \
  include/asm-generic/bitsperlong.h include/uapi/asm-generic/bitsperlong.h \
  include/uapi/linux/posix_types.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/stddef.h \
- include/linux/stddef.h include/uapi/linux/stddef.h \
- include/linux/compiler_types.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/compiler_attributes.h \
+ /root/zxm/rdma-kerndriver/include/linux/stddef.h include/linux/stddef.h \
+ include/uapi/linux/stddef.h include/linux/compiler_types.h \
+ /root/zxm/rdma-kerndriver/include/linux/compiler_attributes.h \
  include/linux/compiler_attributes.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/compiler-gcc.h \
+ /root/zxm/rdma-kerndriver/include/linux/compiler-gcc.h \
  include/linux/compiler-gcc.h arch/x86/include/asm/posix_types.h \
  arch/x86/include/uapi/asm/posix_types_64.h \
  include/uapi/asm-generic/posix_types.h include/linux/socket.h \
@@ -30,21 +28,18 @@ rl.o: \
  include/uapi/asm-generic/socket.h \
  arch/x86/include/generated/uapi/asm/sockios.h \
  include/uapi/asm-generic/sockios.h include/uapi/linux/sockios.h \
- include/linux/uio.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/kernel.h \
+ include/linux/uio.h /root/zxm/rdma-kerndriver/include/linux/kernel.h \
  include/linux/kernel.h /usr/lib/gcc/x86_64-linux-gnu/9/include/stdarg.h \
  include/linux/limits.h include/uapi/linux/limits.h \
  include/linux/linkage.h include/linux/stringify.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/export.h \
- include/linux/export.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/compiler.h \
+ /root/zxm/rdma-kerndriver/include/linux/export.h include/linux/export.h \
+ /root/zxm/rdma-kerndriver/include/linux/compiler.h \
  include/linux/compiler.h arch/x86/include/asm/barrier.h \
  arch/x86/include/asm/alternative.h arch/x86/include/asm/asm.h \
  arch/x86/include/asm/nops.h include/asm-generic/barrier.h \
  include/linux/kasan-checks.h arch/x86/include/asm/linkage.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/bitops.h \
- include/linux/bitops.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/bits.h include/linux/bits.h \
+ /root/zxm/rdma-kerndriver/include/linux/bitops.h include/linux/bitops.h \
+ /root/zxm/rdma-kerndriver/include/linux/bits.h include/linux/bits.h \
  include/linux/const.h include/uapi/linux/const.h \
  arch/x86/include/asm/bitops.h arch/x86/include/asm/rmwcc.h \
  include/asm-generic/bitops/find.h include/asm-generic/bitops/sched.h \
@@ -59,19 +54,19 @@ rl.o: \
  include/uapi/linux/swab.h arch/x86/include/uapi/asm/swab.h \
  include/linux/byteorder/generic.h \
  include/asm-generic/bitops/ext2-atomic-setbit.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/log2.h include/linux/log2.h \
+ /root/zxm/rdma-kerndriver/include/linux/log2.h include/linux/log2.h \
  include/linux/typecheck.h include/linux/printk.h include/linux/init.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/kern_levels.h \
+ /root/zxm/rdma-kerndriver/include/linux/kern_levels.h \
  include/linux/kern_levels.h include/linux/cache.h \
  include/uapi/linux/kernel.h include/uapi/linux/sysinfo.h \
  arch/x86/include/asm/cache.h include/linux/dynamic_debug.h \
  include/linux/jump_label.h arch/x86/include/asm/jump_label.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/build_bug.h \
+ /root/zxm/rdma-kerndriver/include/linux/build_bug.h \
  include/linux/build_bug.h arch/x86/include/asm/div64.h \
  include/asm-generic/div64.h include/linux/thread_info.h \
  include/linux/bug.h arch/x86/include/asm/bug.h \
- /home/dell/zxm/rdma-kerndriver/include/asm-generic/bug.h \
- /home/dell/zxm/rdma-kerndriver/include/asm-generic/../../compat/config.h \
+ /root/zxm/rdma-kerndriver/include/asm-generic/bug.h \
+ /root/zxm/rdma-kerndriver/include/asm-generic/../../compat/config.h \
  include/asm-generic/bug.h include/linux/restart_block.h \
  include/linux/time64.h include/linux/math64.h include/uapi/linux/time.h \
  include/uapi/linux/time_types.h include/linux/errno.h \
@@ -110,10 +105,8 @@ rl.o: \
  include/asm-generic/qrwlock_types.h \
  arch/x86/include/uapi/asm/sigcontext.h arch/x86/include/asm/msr.h \
  arch/x86/include/asm/msr-index.h arch/x86/include/asm/cpumask.h \
- include/linux/cpumask.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/bitmap.h \
- include/linux/bitmap.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/string.h \
+ include/linux/cpumask.h /root/zxm/rdma-kerndriver/include/linux/bitmap.h \
+ include/linux/bitmap.h /root/zxm/rdma-kerndriver/include/linux/string.h \
  include/linux/string.h include/uapi/linux/string.h \
  arch/x86/include/asm/string.h arch/x86/include/asm/string_64.h \
  include/linux/atomic.h arch/x86/include/asm/atomic.h \
@@ -128,16 +121,15 @@ rl.o: \
  include/linux/personality.h include/uapi/linux/personality.h \
  include/linux/err.h include/linux/irqflags.h \
  arch/x86/include/asm/irqflags.h include/crypto/hash.h \
- include/linux/crypto.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/list.h include/linux/list.h \
- include/linux/poison.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/slab.h include/linux/slab.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/gfp.h include/linux/gfp.h \
+ include/linux/crypto.h /root/zxm/rdma-kerndriver/include/linux/list.h \
+ include/linux/list.h include/linux/poison.h \
+ /root/zxm/rdma-kerndriver/include/linux/slab.h include/linux/slab.h \
+ /root/zxm/rdma-kerndriver/include/linux/gfp.h include/linux/gfp.h \
  include/linux/mmdebug.h include/linux/mmzone.h include/linux/spinlock.h \
  include/linux/preempt.h arch/x86/include/asm/preempt.h \
  include/linux/bottom_half.h arch/x86/include/generated/asm/mmiowb.h \
  include/asm-generic/mmiowb.h include/linux/spinlock_types.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/lockdep.h \
+ /root/zxm/rdma-kerndriver/include/linux/lockdep.h \
  include/linux/lockdep.h include/linux/rwlock_types.h \
  arch/x86/include/asm/spinlock.h arch/x86/include/asm/qspinlock.h \
  include/asm-generic/qspinlock.h arch/x86/include/asm/qrwlock.h \
@@ -145,15 +137,14 @@ rl.o: \
  include/linux/spinlock_api_smp.h include/linux/rwlock_api_smp.h \
  include/linux/wait.h include/uapi/linux/wait.h include/linux/numa.h \
  include/linux/seqlock.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/nodemask.h \
+ /root/zxm/rdma-kerndriver/include/linux/nodemask.h \
  include/linux/nodemask.h include/linux/pageblock-flags.h \
  include/linux/page-flags-layout.h include/generated/bounds.h \
  include/linux/mm_types.h include/linux/mm_types_task.h \
  arch/x86/include/asm/tlbbatch.h include/linux/auxvec.h \
  include/uapi/linux/auxvec.h arch/x86/include/uapi/asm/auxvec.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/rbtree.h \
- include/linux/rbtree.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/rcupdate.h \
+ /root/zxm/rdma-kerndriver/include/linux/rbtree.h include/linux/rbtree.h \
+ /root/zxm/rdma-kerndriver/include/linux/rcupdate.h \
  include/linux/rcupdate.h include/linux/rcutree.h include/linux/rwsem.h \
  include/linux/osq_lock.h include/linux/completion.h \
  include/linux/uprobes.h arch/x86/include/asm/uprobes.h \
@@ -166,7 +157,7 @@ rl.o: \
  include/uapi/asm-generic/param.h arch/x86/include/asm/timex.h \
  arch/x86/include/asm/tsc.h include/linux/jiffies.h \
  include/generated/timeconst.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/timekeeping.h \
+ /root/zxm/rdma-kerndriver/include/linux/timekeeping.h \
  include/linux/timekeeping.h include/linux/timekeeping32.h \
  include/linux/debugobjects.h include/linux/rcu_segcblist.h \
  include/linux/srcutree.h include/linux/rcu_node_tree.h \
@@ -179,28 +170,26 @@ rl.o: \
  arch/x86/include/asm/acpi.h include/acpi/pdc_intel.h \
  arch/x86/include/asm/numa.h arch/x86/include/asm/topology.h \
  include/asm-generic/topology.h arch/x86/include/asm/realmode.h \
- /home/dell/zxm/rdma-kerndriver/include/asm/io.h \
- /home/dell/zxm/rdma-kerndriver/include/asm/../../compat/config.h \
+ /root/zxm/rdma-kerndriver/include/asm/io.h \
+ /root/zxm/rdma-kerndriver/include/asm/../../compat/config.h \
  arch/x86/include/asm/io.h arch/x86/include/generated/asm/early_ioremap.h \
  include/asm-generic/early_ioremap.h include/asm-generic/iomap.h \
  include/asm-generic/pci_iomap.h include/asm-generic/io.h \
  include/linux/logic_pio.h include/linux/fwnode.h include/linux/vmalloc.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/llist.h \
- include/linux/llist.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/overflow.h \
+ /root/zxm/rdma-kerndriver/include/linux/llist.h include/linux/llist.h \
+ /root/zxm/rdma-kerndriver/include/linux/overflow.h \
  include/linux/overflow.h arch/x86/include/uapi/asm/vsyscall.h \
  include/asm-generic/fixmap.h arch/x86/include/asm/hardirq.h \
  arch/x86/include/asm/io_apic.h arch/x86/include/asm/irq_vectors.h \
  include/linux/topology.h include/linux/arch_topology.h \
  include/linux/percpu.h include/linux/smp.h \
  include/linux/percpu-refcount.h include/linux/kasan.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/uaccess.h \
- include/linux/uaccess.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/sched.h \
+ /root/zxm/rdma-kerndriver/include/linux/uaccess.h \
+ include/linux/uaccess.h /root/zxm/rdma-kerndriver/include/linux/sched.h \
  include/linux/sched.h include/uapi/linux/sched.h include/linux/pid.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/rculist.h \
+ /root/zxm/rdma-kerndriver/include/linux/rculist.h \
  include/linux/rculist.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/refcount.h \
+ /root/zxm/rdma-kerndriver/include/linux/refcount.h \
  include/linux/refcount.h arch/x86/include/asm/refcount.h \
  include/linux/sem.h include/uapi/linux/sem.h include/linux/ipc.h \
  include/linux/uidgid.h include/linux/highuid.h \
@@ -236,31 +225,29 @@ rl.o: \
  arch/x86/include/asm/extable.h arch/x86/include/asm/uaccess_64.h \
  include/uapi/linux/uio.h include/uapi/linux/socket.h \
  include/uapi/linux/hdlc/ioctl.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/compat_autoconf.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/module.h \
- include/linux/module.h include/linux/stat.h \
- arch/x86/include/uapi/asm/stat.h include/uapi/linux/stat.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/kmod.h include/linux/kmod.h \
- include/linux/umh.h include/linux/sysctl.h include/uapi/linux/sysctl.h \
- include/linux/elf.h arch/x86/include/asm/elf.h \
- arch/x86/include/asm/user.h arch/x86/include/asm/user_64.h \
- arch/x86/include/asm/fsgsbase.h arch/x86/include/asm/vdso.h \
- include/uapi/linux/elf.h include/uapi/linux/elf-em.h \
- include/linux/kobject.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/sysfs.h \
- include/linux/sysfs.h include/linux/kernfs.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/idr.h include/linux/idr.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/radix-tree.h \
+ /root/zxm/rdma-kerndriver/include/linux/compat_autoconf.h \
+ /root/zxm/rdma-kerndriver/include/linux/module.h include/linux/module.h \
+ include/linux/stat.h arch/x86/include/uapi/asm/stat.h \
+ include/uapi/linux/stat.h /root/zxm/rdma-kerndriver/include/linux/kmod.h \
+ include/linux/kmod.h include/linux/umh.h include/linux/sysctl.h \
+ include/uapi/linux/sysctl.h include/linux/elf.h \
+ arch/x86/include/asm/elf.h arch/x86/include/asm/user.h \
+ arch/x86/include/asm/user_64.h arch/x86/include/asm/fsgsbase.h \
+ arch/x86/include/asm/vdso.h include/uapi/linux/elf.h \
+ include/uapi/linux/elf-em.h include/linux/kobject.h \
+ /root/zxm/rdma-kerndriver/include/linux/sysfs.h include/linux/sysfs.h \
+ include/linux/kernfs.h /root/zxm/rdma-kerndriver/include/linux/idr.h \
+ include/linux/idr.h /root/zxm/rdma-kerndriver/include/linux/radix-tree.h \
  include/linux/radix-tree.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/xarray.h \
- include/linux/xarray.h include/linux/kobject_ns.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/kref.h include/linux/kref.h \
+ /root/zxm/rdma-kerndriver/include/linux/xarray.h include/linux/xarray.h \
+ include/linux/kobject_ns.h \
+ /root/zxm/rdma-kerndriver/include/linux/kref.h include/linux/kref.h \
  include/linux/moduleparam.h include/linux/rbtree_latch.h \
  include/linux/error-injection.h include/asm-generic/error-injection.h \
  arch/x86/include/asm/module.h include/asm-generic/module.h \
  arch/x86/include/asm/orc_types.h \
- /home/dell/zxm/rdma-kerndriver/drivers/infiniband/debug/mtrack.h \
- /home/dell/zxm/rdma-kerndriver/drivers/infiniband/debug/memtrack.h \
+ /root/zxm/rdma-kerndriver/drivers/infiniband/debug/mtrack.h \
+ /root/zxm/rdma-kerndriver/drivers/infiniband/debug/memtrack.h \
  include/linux/io.h include/linux/random.h include/linux/once.h \
  include/uapi/linux/random.h include/linux/irqnr.h \
  include/uapi/linux/irqnr.h include/linux/prandom.h \
@@ -268,15 +255,15 @@ rl.o: \
  arch/x86/include/asm/pgtable.h arch/x86/include/asm/fpu/xstate.h \
  arch/x86/include/asm/fpu/api.h arch/x86/include/asm/pgtable_64.h \
  arch/x86/include/asm/pgtable-invert.h include/asm-generic/pgtable.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/mm.h include/linux/mm.h \
+ /root/zxm/rdma-kerndriver/include/linux/mm.h include/linux/mm.h \
  include/linux/bit_spinlock.h include/linux/shrinker.h \
  include/linux/page_ext.h include/linux/stacktrace.h \
  include/linux/stackdepot.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/page_ref.h \
+ /root/zxm/rdma-kerndriver/include/linux/page_ref.h \
  include/linux/page_ref.h include/linux/memremap.h include/linux/ioport.h \
  include/linux/sizes.h include/linux/huge_mm.h \
  include/linux/sched/coredump.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/fs.h include/linux/fs.h \
+ /root/zxm/rdma-kerndriver/include/linux/fs.h include/linux/fs.h \
  include/linux/wait_bit.h include/linux/kdev_t.h \
  include/uapi/linux/kdev_t.h include/linux/dcache.h \
  include/linux/rculist_bl.h include/linux/list_bl.h \
@@ -289,7 +276,7 @@ rl.o: \
  include/linux/migrate_mode.h include/linux/percpu-rwsem.h \
  include/linux/rcuwait.h include/linux/rcu_sync.h \
  include/linux/delayed_call.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/uuid.h include/linux/uuid.h \
+ /root/zxm/rdma-kerndriver/include/linux/uuid.h include/linux/uuid.h \
  include/uapi/linux/uuid.h include/linux/errseq.h include/linux/ioprio.h \
  include/linux/sched/rt.h include/linux/iocontext.h \
  include/linux/fs_types.h include/uapi/linux/fs.h include/linux/quota.h \
@@ -298,72 +285,69 @@ rl.o: \
  include/linux/dqblk_qtree.h include/linux/projid.h \
  include/uapi/linux/quota.h include/linux/nfs_fs_i.h \
  include/linux/vmstat.h include/linux/vm_event_item.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/scatterlist.h \
+ /root/zxm/rdma-kerndriver/include/linux/scatterlist.h \
  include/linux/scatterlist.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/skbuff.h \
- include/linux/skbuff.h include/linux/bvec.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/net.h include/linux/net.h \
- include/uapi/linux/net.h include/linux/textsearch.h \
+ /root/zxm/rdma-kerndriver/include/linux/skbuff.h include/linux/skbuff.h \
+ include/linux/bvec.h /root/zxm/rdma-kerndriver/include/linux/net.h \
+ include/linux/net.h include/uapi/linux/net.h include/linux/textsearch.h \
  include/net/checksum.h arch/x86/include/asm/checksum.h \
  arch/x86/include/asm/checksum_64.h include/linux/dma-mapping.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/device.h \
- include/linux/device.h include/linux/klist.h include/linux/pm.h \
- include/linux/ratelimit.h arch/x86/include/asm/device.h \
- include/linux/pm_wakeup.h include/linux/dma-debug.h \
- include/linux/dma-direction.h arch/x86/include/asm/dma-mapping.h \
- arch/x86/include/asm/swiotlb.h include/linux/swiotlb.h \
- include/linux/dma-contiguous.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/netdev_features.h \
+ /root/zxm/rdma-kerndriver/include/linux/device.h include/linux/device.h \
+ include/linux/klist.h include/linux/pm.h include/linux/ratelimit.h \
+ arch/x86/include/asm/device.h include/linux/pm_wakeup.h \
+ include/linux/dma-debug.h include/linux/dma-direction.h \
+ arch/x86/include/asm/dma-mapping.h arch/x86/include/asm/swiotlb.h \
+ include/linux/swiotlb.h include/linux/dma-contiguous.h \
+ /root/zxm/rdma-kerndriver/include/linux/netdev_features.h \
  include/linux/netdev_features.h include/linux/sched/clock.h \
- /home/dell/zxm/rdma-kerndriver/include/net/flow_dissector.h \
- /home/dell/zxm/rdma-kerndriver/include/net/../../compat/config.h \
+ /root/zxm/rdma-kerndriver/include/net/flow_dissector.h \
+ /root/zxm/rdma-kerndriver/include/net/../../compat/config.h \
  include/net/flow_dissector.h include/linux/in6.h \
  include/uapi/linux/in6.h include/linux/siphash.h \
  include/uapi/linux/if_ether.h include/linux/splice.h \
  include/linux/pipe_fs_i.h include/uapi/linux/if_packet.h \
  include/net/flow.h include/linux/netfilter/nf_conntrack_common.h \
  include/uapi/linux/netfilter/nf_conntrack_common.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/pci.h include/linux/pci.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/mod_devicetable.h \
+ /root/zxm/rdma-kerndriver/include/linux/pci.h include/linux/pci.h \
+ /root/zxm/rdma-kerndriver/include/linux/mod_devicetable.h \
  include/uapi/linux/mei.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/interrupt.h \
+ /root/zxm/rdma-kerndriver/include/linux/interrupt.h \
  include/linux/interrupt.h include/linux/irqreturn.h \
  include/linux/hardirq.h include/linux/ftrace_irq.h include/linux/vtime.h \
  include/linux/context_tracking_state.h arch/x86/include/asm/irq.h \
  arch/x86/include/asm/sections.h include/asm-generic/sections.h \
  include/linux/resource_ext.h include/uapi/linux/pci.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/pci_regs.h \
+ /root/zxm/rdma-kerndriver/include/linux/pci_regs.h \
  include/uapi/linux/pci_regs.h include/linux/pci_ids.h \
  include/linux/dmapool.h arch/x86/include/asm/pci.h \
  arch/x86/include/asm/pat.h arch/x86/include/asm/pci_64.h \
  include/asm-generic/pci.h include/linux/pci-dma-compat.h \
  include/linux/compiler_types.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/mlx5/driver.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/mlx5/../../../compat/config.h \
+ /root/zxm/rdma-kerndriver/include/linux/mlx5/driver.h \
+ /root/zxm/rdma-kerndriver/include/linux/mlx5/../../../compat/config.h \
  include/linux/irq.h include/linux/irqhandler.h \
  arch/x86/include/asm/irq_regs.h include/linux/irqdesc.h \
  arch/x86/include/asm/hw_irq.h include/linux/profile.h \
  include/linux/mempool.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/auxiliary_bus.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/mlx5/device.h \
- /home/dell/zxm/rdma-kerndriver/include/rdma/ib_verbs.h \
- /home/dell/zxm/rdma-kerndriver/include/rdma/../../compat/config.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/ethtool.h \
+ /root/zxm/rdma-kerndriver/include/linux/auxiliary_bus.h \
+ /root/zxm/rdma-kerndriver/include/linux/mlx5/device.h \
+ /root/zxm/rdma-kerndriver/include/rdma/ib_verbs.h \
+ /root/zxm/rdma-kerndriver/include/rdma/../../compat/config.h \
+ /root/zxm/rdma-kerndriver/include/linux/ethtool.h \
  include/linux/ethtool.h include/linux/compat.h \
  include/uapi/linux/aio_abi.h arch/x86/include/asm/compat.h \
  include/linux/sched/task_stack.h include/uapi/linux/magic.h \
  arch/x86/include/asm/user32.h include/asm-generic/compat.h \
  arch/x86/include/asm/syscall_wrapper.h include/uapi/linux/ethtool.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/if_ether.h \
+ /root/zxm/rdma-kerndriver/include/linux/if_ether.h \
  include/linux/if_ether.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/irq_poll.h \
- include/linux/irq_poll.h \
- /home/dell/zxm/rdma-kerndriver/include/net/ipv6.h include/net/ipv6.h \
- include/linux/ipv6.h include/uapi/linux/ipv6.h include/linux/tcp.h \
- include/linux/win_minmax.h \
- /home/dell/zxm/rdma-kerndriver/include/net/sock.h include/net/sock.h \
+ /root/zxm/rdma-kerndriver/include/linux/irq_poll.h \
+ include/linux/irq_poll.h /root/zxm/rdma-kerndriver/include/net/ipv6.h \
+ include/net/ipv6.h include/linux/ipv6.h include/uapi/linux/ipv6.h \
+ include/linux/tcp.h include/linux/win_minmax.h \
+ /root/zxm/rdma-kerndriver/include/net/sock.h include/net/sock.h \
  include/linux/list_nulls.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/netdevice.h \
+ /root/zxm/rdma-kerndriver/include/linux/netdevice.h \
  include/linux/netdevice.h include/linux/delay.h \
  arch/x86/include/asm/delay.h include/asm-generic/delay.h \
  include/linux/prefetch.h include/linux/dynamic_queue_limits.h \
@@ -387,78 +371,77 @@ rl.o: \
  include/uapi/linux/xfrm.h include/net/netns/mpls.h \
  include/net/netns/can.h include/net/netns/xdp.h \
  include/linux/ns_common.h include/linux/seq_file_net.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/seq_file.h \
+ /root/zxm/rdma-kerndriver/include/linux/seq_file.h \
  include/linux/seq_file.h include/linux/cred.h include/linux/key.h \
  include/linux/assoc_array.h include/linux/sched/user.h \
- include/net/dcbnl.h /home/dell/zxm/rdma-kerndriver/include/linux/dcbnl.h \
+ include/net/dcbnl.h /root/zxm/rdma-kerndriver/include/linux/dcbnl.h \
  include/uapi/linux/dcbnl.h include/net/netprio_cgroup.h \
  include/linux/cgroup.h include/uapi/linux/cgroupstats.h \
  include/uapi/linux/taskstats.h include/linux/nsproxy.h \
  include/linux/user_namespace.h include/linux/kernel_stat.h \
  include/linux/cgroup-defs.h include/linux/bpf-cgroup.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/bpf.h include/linux/bpf.h \
+ /root/zxm/rdma-kerndriver/include/linux/bpf.h include/linux/bpf.h \
  include/uapi/linux/bpf.h include/uapi/linux/bpf_common.h \
  include/linux/file.h include/linux/bpf_types.h include/linux/psi_types.h \
  include/linux/kthread.h include/linux/cgroup_subsys.h \
- /home/dell/zxm/rdma-kerndriver/include/net/xdp.h include/net/xdp.h \
+ /root/zxm/rdma-kerndriver/include/net/xdp.h include/net/xdp.h \
  include/uapi/linux/neighbour.h include/linux/netlink.h include/net/scm.h \
  include/linux/security.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/sched/signal.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/sched/../../../compat/config.h \
+ /root/zxm/rdma-kerndriver/include/linux/sched/signal.h \
+ /root/zxm/rdma-kerndriver/include/linux/sched/../../../compat/config.h \
  include/linux/sched/signal.h include/linux/signal.h \
  include/linux/sched/jobctl.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/sched/task.h \
+ /root/zxm/rdma-kerndriver/include/linux/sched/task.h \
  include/linux/sched/task.h include/uapi/linux/netlink.h \
  include/uapi/linux/netdevice.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/if_link.h \
+ /root/zxm/rdma-kerndriver/include/linux/if_link.h \
  include/linux/if_link.h include/uapi/linux/if_link.h \
  include/uapi/linux/if_bonding.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/linux/pkt_cls.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/linux/../../../compat/config.h \
+ /root/zxm/rdma-kerndriver/include/uapi/linux/pkt_cls.h \
+ /root/zxm/rdma-kerndriver/include/uapi/linux/../../../compat/config.h \
  include/uapi/linux/pkt_cls.h include/uapi/linux/pkt_sched.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/hashtable.h \
+ /root/zxm/rdma-kerndriver/include/linux/hashtable.h \
  include/linux/hashtable.h include/linux/page_counter.h \
  include/linux/memcontrol.h include/linux/vmpressure.h \
  include/linux/eventfd.h include/linux/writeback.h \
  include/linux/flex_proportions.h include/linux/backing-dev-defs.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/blk_types.h \
+ /root/zxm/rdma-kerndriver/include/linux/blk_types.h \
  include/linux/blk_types.h include/linux/blk-cgroup.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/blkdev.h \
- include/linux/blkdev.h include/uapi/linux/major.h include/linux/genhd.h \
+ /root/zxm/rdma-kerndriver/include/linux/blkdev.h include/linux/blkdev.h \
+ include/uapi/linux/major.h include/linux/genhd.h \
  arch/x86/include/asm/local.h include/linux/pagemap.h \
  include/linux/highmem.h arch/x86/include/asm/cacheflush.h \
  include/asm-generic/cacheflush.h include/linux/hugetlb_inline.h \
  include/linux/bio.h include/linux/bsg.h include/uapi/linux/bsg.h \
  include/uapi/linux/blkzoned.h include/linux/elevator.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/filter.h \
- include/linux/filter.h include/linux/cryptohash.h \
- include/linux/set_memory.h arch/x86/include/asm/set_memory.h \
- include/asm-generic/set_memory.h include/linux/kallsyms.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/if_vlan.h \
+ /root/zxm/rdma-kerndriver/include/linux/filter.h include/linux/filter.h \
+ include/linux/cryptohash.h include/linux/set_memory.h \
+ arch/x86/include/asm/set_memory.h include/asm-generic/set_memory.h \
+ include/linux/kallsyms.h \
+ /root/zxm/rdma-kerndriver/include/linux/if_vlan.h \
  include/linux/if_vlan.h include/linux/etherdevice.h \
  arch/x86/include/asm/unaligned.h include/linux/unaligned/access_ok.h \
  include/linux/unaligned/generic.h include/linux/rtnetlink.h \
  include/uapi/linux/rtnetlink.h include/uapi/linux/if_addr.h \
  include/uapi/linux/if_vlan.h include/net/sch_generic.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/linux/pkt_cls.h \
+ /root/zxm/rdma-kerndriver/include/uapi/linux/pkt_cls.h \
  include/net/gen_stats.h include/uapi/linux/gen_stats.h \
- include/net/rtnetlink.h \
- /home/dell/zxm/rdma-kerndriver/include/net/netlink.h \
+ include/net/rtnetlink.h /root/zxm/rdma-kerndriver/include/net/netlink.h \
  include/net/netlink.h include/net/genetlink.h include/linux/genetlink.h \
  include/uapi/linux/genetlink.h \
- /home/dell/zxm/rdma-kerndriver/include/net/flow_offload.h \
+ /root/zxm/rdma-kerndriver/include/net/flow_offload.h \
  include/net/flow_offload.h include/linux/rhashtable.h \
  include/linux/jhash.h include/linux/unaligned/packed_struct.h \
  include/uapi/linux/filter.h include/linux/rculist_nulls.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/poll.h include/linux/poll.h \
+ /root/zxm/rdma-kerndriver/include/linux/poll.h include/linux/poll.h \
  include/uapi/linux/poll.h arch/x86/include/generated/uapi/asm/poll.h \
  include/uapi/asm-generic/poll.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/linux/eventpoll.h \
+ /root/zxm/rdma-kerndriver/include/uapi/linux/eventpoll.h \
  include/uapi/linux/eventpoll.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/linux/eventpoll.h \
- /home/dell/zxm/rdma-kerndriver/include/net/dst.h include/net/dst.h \
+ /root/zxm/rdma-kerndriver/include/uapi/linux/eventpoll.h \
+ /root/zxm/rdma-kerndriver/include/net/dst.h include/net/dst.h \
  include/net/neighbour.h include/net/tcp_states.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/linux/net_tstamp.h \
+ /root/zxm/rdma-kerndriver/include/uapi/linux/net_tstamp.h \
  include/uapi/linux/net_tstamp.h include/net/smc.h include/net/l3mdev.h \
  include/net/fib_rules.h include/uapi/linux/fib_rules.h \
  include/net/fib_notifier.h include/net/inet_connection_sock.h \
@@ -467,51 +450,50 @@ rl.o: \
  include/net/timewait_sock.h include/uapi/linux/tcp.h include/linux/udp.h \
  include/uapi/linux/udp.h include/linux/jump_label_ratelimit.h \
  include/net/if_inet6.h include/net/ndisc.h \
- /home/dell/zxm/rdma-kerndriver/include/net/ipv6_stubs.h \
+ /root/zxm/rdma-kerndriver/include/net/ipv6_stubs.h \
  include/net/ipv6_stubs.h include/linux/icmpv6.h include/linux/if_arp.h \
  include/uapi/linux/if_arp.h include/net/ip.h include/linux/ip.h \
  include/uapi/linux/ip.h include/net/route.h include/net/inetpeer.h \
- /home/dell/zxm/rdma-kerndriver/include/net/ip_fib.h include/net/ip_fib.h \
+ /root/zxm/rdma-kerndriver/include/net/ip_fib.h include/net/ip_fib.h \
  include/net/arp.h include/uapi/linux/in_route.h \
  include/uapi/linux/route.h include/net/lwtunnel.h \
  include/uapi/linux/lwtunnel.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/mmu_notifier.h \
+ /root/zxm/rdma-kerndriver/include/linux/mmu_notifier.h \
  include/linux/mmu_notifier.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/cgroup_rdma.h \
+ /root/zxm/rdma-kerndriver/include/linux/cgroup_rdma.h \
  include/linux/cgroup_rdma.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/dim.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_verbs.h \
- /home/dell/zxm/rdma-kerndriver/include/rdma/rdma_counter.h \
+ /root/zxm/rdma-kerndriver/include/linux/dim.h \
+ /root/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_verbs.h \
+ /root/zxm/rdma-kerndriver/include/rdma/rdma_counter.h \
  include/linux/pid_namespace.h \
- /home/dell/zxm/rdma-kerndriver/include/rdma/restrack.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/rdma/rdma_netlink.h \
- /home/dell/zxm/rdma-kerndriver/include/rdma/rdma_netlink.h \
- /home/dell/zxm/rdma-kerndriver/include/rdma/signature.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/rdma/rdma_user_ioctl.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_mad.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/rdma/hfi/hfi1_ioctl.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/rdma/rdma_user_ioctl_cmds.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_ioctl_verbs.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_verbs.h \
- /home/dell/zxm/rdma-kerndriver/include/rdma/ib_verbs_nvmf_def.h \
- /home/dell/zxm/rdma-kerndriver/include/rdma/ib_verbs_nvmf.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/mlx5/mlx5_ifc.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/mlx5/mlx5_ifc_fpga.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/bitfield.h \
+ /root/zxm/rdma-kerndriver/include/rdma/restrack.h \
+ /root/zxm/rdma-kerndriver/include/uapi/rdma/rdma_netlink.h \
+ /root/zxm/rdma-kerndriver/include/rdma/rdma_netlink.h \
+ /root/zxm/rdma-kerndriver/include/rdma/signature.h \
+ /root/zxm/rdma-kerndriver/include/uapi/rdma/rdma_user_ioctl.h \
+ /root/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_mad.h \
+ /root/zxm/rdma-kerndriver/include/uapi/rdma/hfi/hfi1_ioctl.h \
+ /root/zxm/rdma-kerndriver/include/uapi/rdma/rdma_user_ioctl_cmds.h \
+ /root/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_ioctl_verbs.h \
+ /root/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_verbs.h \
+ /root/zxm/rdma-kerndriver/include/rdma/ib_verbs_nvmf_def.h \
+ /root/zxm/rdma-kerndriver/include/rdma/ib_verbs_nvmf.h \
+ /root/zxm/rdma-kerndriver/include/linux/mlx5/mlx5_ifc.h \
+ /root/zxm/rdma-kerndriver/include/linux/mlx5/mlx5_ifc_fpga.h \
+ /root/zxm/rdma-kerndriver/include/linux/bitfield.h \
  include/linux/bitfield.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/mlx5/doorbell.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/mlx5/eq.h \
+ /root/zxm/rdma-kerndriver/include/linux/mlx5/doorbell.h \
+ /root/zxm/rdma-kerndriver/include/linux/mlx5/eq.h \
  include/linux/timecounter.h include/linux/ptp_clock_kernel.h \
  include/linux/pps_kernel.h include/uapi/linux/pps.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/cdev.h include/linux/cdev.h \
+ /root/zxm/rdma-kerndriver/include/linux/cdev.h include/linux/cdev.h \
  include/uapi/linux/ptp_clock.h \
- /home/dell/zxm/rdma-kerndriver/include/net/devlink.h \
- include/net/devlink.h \
- /home/dell/zxm/rdma-kerndriver/include/uapi/linux/devlink.h \
+ /root/zxm/rdma-kerndriver/include/net/devlink.h include/net/devlink.h \
+ /root/zxm/rdma-kerndriver/include/uapi/linux/devlink.h \
  include/uapi/linux/devlink.h \
- /home/dell/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlx5/core/mlx5_core.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/firmware.h \
+ /root/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlx5/core/mlx5_core.h \
+ /root/zxm/rdma-kerndriver/include/linux/firmware.h \
  include/linux/firmware.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/mlx5/cq.h \
- /home/dell/zxm/rdma-kerndriver/include/linux/mlx5/fs.h \
- /home/dell/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlx5/core/lib/devcom.h
+ /root/zxm/rdma-kerndriver/include/linux/mlx5/cq.h \
+ /root/zxm/rdma-kerndriver/include/linux/mlx5/fs.h \
+ /root/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlx5/core/lib/devcom.h

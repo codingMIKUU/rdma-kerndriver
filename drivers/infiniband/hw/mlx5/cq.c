@@ -39,6 +39,8 @@
 #include "qp.h"
 #include "scheduler.h"
 
+extern struct mlx5_ib_sched_group sched_group;
+
 #define UVERBS_MODULE_NAME mlx5_ib
 #include <rdma/uverbs_named_ioctl.h>
 
@@ -1226,18 +1228,26 @@ int mlx5_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 		goto err_cqb;
 
 	mlx5_ib_dbg(dev, "cqn 0x%x\n", cq->mcq.cqn);
-	// if(udata){
-	// 	//map cq buf to kernel space
-	// 	struct mlx5_ib_create_cq ucmd;
-	// 	int ucmdlen;
-	// 	ucmdlen = min(udata->inlen, sizeof(ucmd));
-	// 	if (ucmdlen < offsetof(struct mlx5_ib_create_cq, flags))
-	// 		return -EINVAL;
+		if(udata){
+			//map cq buf to kernel space
+			struct mlx5_ib_create_cq ucmd;
+			int ucmdlen;
+			ucmdlen = min(udata->inlen, sizeof(ucmd));
+			if (ucmdlen < offsetof(struct mlx5_ib_create_cq, flags)) {
+				err = -EINVAL;
+				goto err_cmd;
+			}
 
-	// 	if (ib_copy_from_udata(&ucmd, udata, ucmdlen))
-	// 		return -EFAULT;
-	// 	mlx5_ib_map_cq_ubuf(&sched,ucmd.buf_addr,entries*cqe_size,cq->mcq.cqn);
-	// }
+			if (ib_copy_from_udata(&ucmd, udata, ucmdlen)) {
+				err = -EFAULT;
+				goto err_cmd;
+			}
+			err = mlx5_ib_map_cq_ubuf(&sched_group, ucmd.buf_addr,
+						  entries * cqe_size,
+						  cq->mcq.cqn);
+			if (err)
+				goto err_cmd;
+		}
 	if (udata)
 		cq->mcq.tasklet_ctx.comp = mlx5_ib_cq_comp;
 	else

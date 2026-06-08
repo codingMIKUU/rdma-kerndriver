@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/net/rds/rds_rdma.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/dell/zxm/rdma-kerndriver/net/rds/rds_rdma.o /home/dell/zxm/rdma-kerndriver/net/rds/rds_rdma_dummy.o
+cmd_/root/zxm/rdma-kerndriver/net/rds/rds_rdma.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/net/rds/rds_rdma.o /root/zxm/rdma-kerndriver/net/rds/rds_rdma_dummy.o

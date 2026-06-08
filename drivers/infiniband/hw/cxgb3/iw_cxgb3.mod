@@ -1,2 +1,2 @@
-/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/main.o
+/root/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/main.o
 

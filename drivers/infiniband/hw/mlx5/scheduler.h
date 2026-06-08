@@ -4,6 +4,7 @@
 
 #include <linux/mutex.h>
 #include <linux/types.h>
+#include <linux/wait.h>
 #include <rdma/rdma_cm.h>
 
 #define SQ_DEPTH 8192
@@ -41,7 +42,7 @@ static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 static const size_t QUEUE_LIMIT = 256 * 1024;
 static const size_t SCHED_SIZE_LIMIT = 8 * 1024;
 
-static int LIMIT_BATCHING =6;
+static u64 LIMIT_BATCHING = 6;
 
 #define DEBUG_LOG \
     if (debug)    \
@@ -59,6 +60,18 @@ struct srm_qp_entry{
     uint64_t bytes;
     uint64_t cycles;
 }CACHELINE_ALIGNED_USER;
+
+struct mlx5_sq_ctrl_page {
+    __u64 resv_idx;
+    __u8 resv_pad[56];
+    __u64 pub_idx;
+    __u8 pub_pad[56];
+    __u64 cons_idx;
+    __u8 cons_pad[56];
+    __u64 wqe_cnt;
+    __u8 wqe_cnt_pad[56];
+} CACHELINE_ALIGNED_USER;
+
 struct mlx5_ib_cqbuf
 {
     void *buf;
@@ -80,6 +93,7 @@ struct mlx5_ib_sqbuf
     int qpn;
     u32 uidx;
     uint32_t cur_post;
+    struct mlx5_sq_ctrl_page *ctrl;
     struct mlx5_ib_cqbuf *cqb;
     struct mlx5_ib_sqbuf *next; // not loop
 
@@ -136,12 +150,14 @@ struct buf_info
 struct mlx5_wqe_info
 {
     u32 qpn;
-    struct mlx5_ib_sqbuf *sqb;
-    u16 wqe_counter;
+    u32 usr_rc_cnt;
+    struct mlx5_ib_cqbuf *cqb;
+    u64 wqe_counter;
     size_t pending_bytes;
     size_t byte_cnt;
     u8 to_user;
     u8 valid;
+    struct mlx5_sq_ctrl_page *ctrl_page;
 };
 struct mlx5_ib_srmc
 {
@@ -155,14 +171,23 @@ struct mlx5_ib_srmc
     size_t cul_pending_bytes; // next cqe's pending bytes
     int idx;                  // 该srmc在表中的索引
     int srmc_idx;             // 该srmc在创建顺序中排第几个(用于分配cq)
+    struct page **ready_seq_pages;
+    u32 ready_seq_npages;
+    u32 ready_seq_depth;
+    struct page **usr_rc_pages;
+    u32 usr_rc_npages;
+    u32 usr_rc_depth;
 } CACHELINE_ALIGNED;
 struct mlx5_ib_sched
 {
     struct task_struct *task;
     struct mutex srmc_lock;
-    struct mlx5_ib_srmc *srmc_small_tb[NUM_SRMC]; // for small flows
-    struct mlx5_ib_srmc *srmc_large_tb[NUM_SRMC]; // for large flows
-    size_t srmc_cnt[2];
+    struct mlx5_ib_srmc *srmc_tb[NUM_SRMC]; // single per-gid SRMC
+    struct mlx5_ib_srmc *srmc_by_idx[NUM_SRMC]; // direct lookup by ctrl slot / srmc_idx
+    size_t srmc_cnt;
+    size_t ready_srmc_cnt;
+    int init_error;
+    wait_queue_head_t init_wait;
     int id;
 
     
@@ -208,10 +233,11 @@ struct mlx5_ib_sched_group
     uint32_t sqb_cnt;
     uint32_t cqb_cnt;
     uint32_t xrc_bf_cnt;
-    struct mlx5_ib_sqbuf *sqb_arr[NUM_SQB];
-    struct mutex cq_lock;
-    struct mlx5_ib_cqbuf *cqb_arr[NUM_SQB];
-    struct xrc_bf_entry *xrc_bf_arr[MAX_USER_THREADS_NUM*NUM_SCHED*NUM_LEVEL*MAX_USER_XRC_QP_PER_SRM];
+	struct mlx5_ib_sqbuf *sqb_arr[NUM_SQB];
+	struct mutex cq_lock;
+	struct mlx5_ib_cqbuf *cqb_arr[NUM_SQB];
+	struct mlx5_ib_cqbuf *usr_rc_cqb_arr[NUM_SQB];
+	struct xrc_bf_entry *xrc_bf_arr[MAX_USER_THREADS_NUM*NUM_SCHED*NUM_LEVEL*MAX_USER_XRC_QP_PER_SRM];
 
     int num_sched;
     struct mlx5_ib_sched *scheds;
@@ -233,19 +259,22 @@ enum srmc_create_flag
 
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx);
 int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int cqn);
+int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
+			   u32 usr_rc_cnt, int cqn);
+struct mlx5_ib_sqbuf *mlx5_ib_find_sqbuf_by_qpn(struct mlx5_ib_sched_group *sched_group, int qpn);
 int scheduler_polling(void *sched_data);
 int mlx5_ib_create_srmc(struct mlx5_ib_sched *sched, struct mlx5_ib_qp *init_qp, struct mlx5_ib_qp *tgt_qp, union ib_gid *dgid);
 int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num);
 void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group);
 // flags == 1: check ini, flags == 2: check tgt
 // If no exists, return -1 and create the srmc, if init qp then create kernel qp;else return 1 and add the refcnt of that qp
-int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *dgid, int flags, int qpn);
+int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *dgid, int flags, int qpn, u32 sq_depth);
 
 int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn);
 int mlx5_ib_destroy_srmc(struct mlx5_ib_sched *sched, int ah_id);
 int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched *sched, struct mlx5_ib_srmc *srmc, struct ib_pd *pd, int flags, int qpn);
 int mlx5_sched_run_server(struct srm_cb *cb);
-int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid *dgid, int flags, int id);
+int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid *dgid, int flags, int id, u32 sq_depth);
 void ib_sched_free_buf(struct srm_cb *cb);
 int sched_hash_ip(char addr[4], int n);
 int srm_accept(struct srm_cb *cb);
@@ -256,4 +285,3 @@ int mlx5_ib_register_external_table(void *table, size_t size, struct page **page
                                            void *xrc_table, size_t xrc_size, struct page **xrc_pages, int xrc_qp_num_per_srm);
 int srm_map_bf(struct mlx5_ib_sched_group *sched_group,struct mlx5_ib_create_qp *ucmd,struct mlx5_ib_dev *dev);
 #endif /* _MLX5_IB_SCHEDULER_H */
-

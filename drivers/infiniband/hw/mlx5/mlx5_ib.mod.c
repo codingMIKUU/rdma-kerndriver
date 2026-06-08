@@ -107,6 +107,7 @@ __used __section(__versions) = {
 	{ 0xfb429b5, "mlx5_query_hca_vport_context" },
 	{ 0x7b67bdd4, "rdma_roce_rescan_port" },
 	{ 0x5b3e282f, "xa_store" },
+	{ 0xd36dc10c, "get_random_u32" },
 	{ 0xb712ffdb, "mlx5_nic_vport_unaffiliate_multiport" },
 	{ 0x948fa401, "rdma_accept" },
 	{ 0x2d2f06d, "memtrack_randomize_mem" },
@@ -478,4 +479,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "F1814BB04547327DAFD84D0");
+MODULE_INFO(srcversion, "F60EB67B968BF8C2735B88D");

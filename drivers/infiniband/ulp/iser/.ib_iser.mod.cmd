@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser_dummy.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser_dummy.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser.mod

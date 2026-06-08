@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/nvme/target/nvme-fcloop.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/dell/zxm/rdma-kerndriver/drivers/nvme/target/nvme-fcloop.o /home/dell/zxm/rdma-kerndriver/drivers/nvme/target/fcloop.o
+cmd_/root/zxm/rdma-kerndriver/drivers/nvme/target/nvme-fcloop.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/drivers/nvme/target/nvme-fcloop.o /root/zxm/rdma-kerndriver/drivers/nvme/target/fcloop.o

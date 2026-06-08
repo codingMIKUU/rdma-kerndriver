@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/iw_cxgb3.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/main.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/iw_cxgb3.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/iw_cxgb3.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/cxgb3/iw_cxgb3.mod

@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/i40iw.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/i40iw.o /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/main.o
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/i40iw.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/i40iw.o /root/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/main.o

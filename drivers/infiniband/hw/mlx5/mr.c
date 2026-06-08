@@ -95,7 +95,7 @@ static void set_mkc_access_pd_addr_fields(void *mkc, int acc, u64 start_addr,
 			MLX5_SET(mkc, mkc, relaxed_ordering_read, 1);
 	}
 
-	MLX5_SET(mkc, mkc, pd, to_mpd(pd)->pdn);
+	MLX5_SET(mkc, mkc, pd, mlx5_ib_effective_pdn(pd));
 	MLX5_SET(mkc, mkc, qpn, 0xffffff);
 	MLX5_SET64(mkc, mkc, start_addr, start_addr);
 }
@@ -2440,7 +2440,7 @@ static int mlx5_alloc_integrity_descs(struct ib_pd *pd, struct mlx5_ib_mr *mr,
 		return -ENOMEM;
 
 	/* create mem & wire PSVs */
-	err = mlx5_core_create_psv(dev->mdev, to_mpd(pd)->pdn, 2, psv_index);
+	err = mlx5_core_create_psv(dev->mdev, mlx5_ib_effective_pdn(pd), 2, psv_index);
 	if (err)
 		goto err_free_sig;
 
@@ -2608,7 +2608,7 @@ int mlx5_ib_alloc_mw(struct ib_mw *ibmw, struct ib_udata *udata)
 
 	MLX5_SET(mkc, mkc, free, 1);
 	MLX5_SET(mkc, mkc, translations_octword_size, ndescs);
-	MLX5_SET(mkc, mkc, pd, to_mpd(ibmw->pd)->pdn);
+	MLX5_SET(mkc, mkc, pd, mlx5_ib_effective_pdn(ibmw->pd));
 	MLX5_SET(mkc, mkc, umr_en, 1);
 	MLX5_SET(mkc, mkc, lr, 1);
 	MLX5_SET(mkc, mkc, access_mode_1_0, MLX5_MKC_ACCESS_MODE_KLMS);
