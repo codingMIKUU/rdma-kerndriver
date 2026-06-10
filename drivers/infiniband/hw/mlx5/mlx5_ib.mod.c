@@ -224,6 +224,7 @@ __used __section(__versions) = {
 	{ 0xa5cc5d9f, "kthread_stop" },
 	{ 0x449ad0a7, "memcmp" },
 	{ 0xd67364f7, "eventfd_ctx_fdget" },
+	{ 0x1528ba0e, "rdma_destroy_qp" },
 	{ 0x5a5cbd14, "mlx5_core_modify_sq" },
 	{ 0xc8b5c031, "rdma_listen" },
 	{ 0xdcbdd233, "kobject_init_and_add" },
@@ -327,6 +328,7 @@ __used __section(__versions) = {
 	{ 0x27353696, "ib_register_device" },
 	{ 0x1ef1e99b, "mlx5_wc_support_get" },
 	{ 0x1000e51, "schedule" },
+	{ 0x8ddd8aad, "schedule_timeout" },
 	{ 0xb8b9f817, "kmalloc_order_trace" },
 	{ 0x1d24c881, "___ratelimit" },
 	{ 0x4f536e99, "memtrack_free" },
@@ -352,7 +354,6 @@ __used __section(__versions) = {
 	{ 0xbdfb6dbb, "__fentry__" },
 	{ 0x65361f87, "mlx5_packet_reformat_dealloc" },
 	{ 0x907d14d, "blocking_notifier_chain_register" },
-	{ 0x49a1b7c, "rdma_disconnect" },
 	{ 0xcbd4898c, "fortify_panic" },
 	{ 0x3b67ff49, "pci_unregister_driver" },
 	{ 0x24381090, "mlx5_core_query_rq" },
@@ -479,4 +480,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "F60EB67B968BF8C2735B88D");
+MODULE_INFO(srcversion, "5ED82A37B5E553B2AF77C0C");

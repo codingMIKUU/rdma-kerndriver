@@ -2667,13 +2667,12 @@ static int mlx5_ib_mmap(struct ib_ucontext *ibcontext, struct vm_area_struct *vm
 	return 0;
 }
 
-int mlx5_ib_bind_hollow_rc_shared_pd(struct mlx5_ib_dev *dev, struct ib_pd *ibpd,
-				     struct mlx5_ib_ucontext *context)
+int mlx5_ib_bind_hollow_rc_shared_pd_uid(struct mlx5_ib_dev *dev,
+					 struct ib_pd *ibpd, u16 uid)
 {
 	struct mlx5_ib_pd *pd = to_mpd(ibpd);
 	u32 out[MLX5_ST_SZ_DW(alloc_pd_out)] = {};
 	u32 in[MLX5_ST_SZ_DW(alloc_pd_in)] = {};
-	u16 uid = context ? context->devx_uid : pd->uid;
 	int err = 0;
 
 	mutex_lock(&dev->hollow_rc_shared_pd_lock);
@@ -2693,6 +2692,17 @@ int mlx5_ib_bind_hollow_rc_shared_pd(struct mlx5_ib_dev *dev, struct ib_pd *ibpd
 		mlx5_ib_dbg(dev, "allocated hollow RC shared PDN %u uid %u\n",
 			    dev->hollow_rc_shared_pdn,
 			    dev->hollow_rc_shared_uid);
+	} else if (dev->hollow_rc_shared_uid != uid) {
+		/*
+		 * Each userspace context has its own firmware UID. Hollow RC
+		 * QPs do not create a per-user hardware QP; they all use the
+		 * scheduler QP and therefore must inherit the shared PDN's UID,
+		 * even when their software PD belongs to another context.
+		 */
+		mlx5_ib_dbg(dev,
+			    "binding uid %u to hollow RC shared PDN %u owned by uid %u\n",
+			    uid, dev->hollow_rc_shared_pdn,
+			    dev->hollow_rc_shared_uid);
 	}
 
 	pd->hollow_rc_shared = true;
@@ -2703,6 +2713,15 @@ int mlx5_ib_bind_hollow_rc_shared_pd(struct mlx5_ib_dev *dev, struct ib_pd *ibpd
 out:
 	mutex_unlock(&dev->hollow_rc_shared_pd_lock);
 	return err;
+}
+
+int mlx5_ib_bind_hollow_rc_shared_pd(struct mlx5_ib_dev *dev,
+				     struct ib_pd *ibpd,
+				     struct mlx5_ib_ucontext *context)
+{
+	u16 uid = context ? context->devx_uid : to_mpd(ibpd)->uid;
+
+	return mlx5_ib_bind_hollow_rc_shared_pd_uid(dev, ibpd, uid);
 }
 
 static void mlx5_ib_put_hollow_rc_shared_pd(struct mlx5_ib_dev *dev,
@@ -2724,6 +2743,10 @@ static void mlx5_ib_cleanup_hollow_rc_shared_pd(struct mlx5_ib_dev *dev)
 {
 	mutex_lock(&dev->hollow_rc_shared_pd_lock);
 	if (dev->hollow_rc_shared_pd_valid) {
+		if (dev->hollow_rc_shared_refcnt)
+			mlx5_ib_warn(dev,
+				     "freeing hollow RC shared PDN with %u PD references\n",
+				     dev->hollow_rc_shared_refcnt);
 		mlx5_cmd_dealloc_pd(dev->mdev, dev->hollow_rc_shared_pdn,
 				    dev->hollow_rc_shared_uid);
 		dev->hollow_rc_shared_pd_valid = false;
@@ -5527,15 +5550,19 @@ static int __init mlx5_ib_init(void)
 	ret = mlx5_ib_sched_init(&sched_group,NUM_SCHED);
 	if (ret){
 		pr_err("mlx5_ib_sched_init failed\n");
+		goto sched_err;
 	}
-	
+
 	//init server
 	ret = mlx5_ib_server_init(&server);
 	if (ret){
 		pr_err("mlx5_ib_server_init failed\n");
 		mlx5_ib_sched_exit(&sched_group);
+		goto sched_err;
 	}
 	return 0;
+sched_err:
+	auxiliary_driver_unregister(&mlx5r_driver);
 drv_err:
 	auxiliary_driver_unregister(&mlx5r_mp_driver);
 mp_err:
@@ -5558,7 +5585,8 @@ static void __exit mlx5_ib_cleanup(void)
 	pr_info("mlx5_ib exit\n");
 
 
-	//exit server. server exit must be called before scheduler exit
+	/* Stop polling before destroying any QP, CQ, or RDMA-CM object. */
+	mlx5_ib_sched_stop(&sched_group);
 	mlx5_ib_server_exit(&server,&sched_group);
 
 	mlx5_ib_sched_exit(&sched_group);

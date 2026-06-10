@@ -1563,6 +1563,9 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 		if (!srmc || !srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
 			return -EINVAL;
 		qp->srmc_owner = srmc;
+		pr_info("hollow RC attach: usr_rc=%u srmc=%d kernel_qpn=%u users=%d\n",
+			qp->ibqp.qp_num, srmc->srmc_idx,
+			srmc->ini_cb.qp->ibqp.qp_num, srmc->ini_cb.refcnt);
 	}
 
 	err = mlx5_ib_modify_qp_sq_mmap(dev, context, qp, resp);
@@ -3046,7 +3049,8 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 
 		err = mlx5_ib_bind_usr_rc_cq(&sched_group,
 					     params->resp.usr_rc_cnt,
-					     to_mcq(init_attr->send_cq)->mcq.cqn);
+					     to_mcq(init_attr->send_cq)->mcq.cqn,
+					     params->uidx);
 		if (err)
 			return err;
 

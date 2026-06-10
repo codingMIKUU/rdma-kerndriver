@@ -100,7 +100,18 @@ static void *get_sw_cqe(struct mlx5_ib_cq *cq, int n)
 
 static void *next_cqe_sw(struct mlx5_ib_cq *cq)
 {
-	return get_sw_cqe(cq, cq->mcq.cons_index);
+    return get_sw_cqe(cq, cq->mcq.cons_index);
+}
+
+static inline void mlx5_ib_srmc_advance_sq_tail(struct mlx5_ib_wq *wq,
+						u16 wqe_ctr)
+{
+	unsigned completed = (wq->tail & ~0xffffU) | wqe_ctr;
+
+	if (wqe_ctr < (wq->tail & 0xffffU))
+		completed += 1U << 16;
+
+	wq->tail = completed + 1;
 }
 
 static enum ib_wc_opcode get_umr_comp(struct mlx5_ib_wq *wq, int idx)
@@ -511,15 +522,25 @@ repoll:
 		wqe_ctr = be16_to_cpu(cqe64->wqe_counter);
 		idx = wqe_ctr & (wq->wqe_cnt - 1);
 		handle_good_req(wc, cqe64, wq, idx);
-		handle_atomics(*cur_qp, cqe64, wq->last_poll, idx);
-		wc->wr_id = wq->wrid[idx];
-		wq->tail = wq->wqe_head[idx] + 1;
-		if (unlikely(wq->wr_data[idx] == MLX5_IB_WR_SIG_CANCELED))
-			wc->status = IB_WC_SIG_PIPELINE_CANCELED;
-		else
+		if ((*cur_qp)->is_srmc_kernel_qp) {
+			/*
+			 * Scheduler WQEs bypass ib_post_send(), so wqe_head[],
+			 * wr_data[] and atomic-response bookkeeping are absent.
+			 */
+			wc->wr_id = wq->wrid[idx];
+			mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
 			wc->status = IB_WC_SUCCESS;
+		} else {
+			handle_atomics(*cur_qp, cqe64, wq->last_poll, idx);
+			wc->wr_id = wq->wrid[idx];
+			wq->tail = wq->wqe_head[idx] + 1;
+			if (unlikely(wq->wr_data[idx] ==
+				     MLX5_IB_WR_SIG_CANCELED))
+				wc->status = IB_WC_SIG_PIPELINE_CANCELED;
+			else
+				wc->status = IB_WC_SUCCESS;
+		}
  		break;
-		break;
 	case MLX5_CQE_RESP_WR_IMM:
 	case MLX5_CQE_RESP_SEND:
 	case MLX5_CQE_RESP_SEND_IMM:
@@ -547,7 +568,10 @@ repoll:
 			wqe_ctr = be16_to_cpu(cqe64->wqe_counter);
 			idx = wqe_ctr & (wq->wqe_cnt - 1);
 			wc->wr_id = wq->wrid[idx];
-			wq->tail = wq->wqe_head[idx] + 1;
+			if ((*cur_qp)->is_srmc_kernel_qp)
+				mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
+			else
+				wq->tail = wq->wqe_head[idx] + 1;
 		} else {
 			struct mlx5_ib_srq *srq;
 
@@ -650,15 +674,21 @@ repoll:
 		wqe_ctr = be16_to_cpu(cqe64->wqe_counter);
 		idx = wqe_ctr & (wq->wqe_cnt - 1);
 		handle_good_req(wc, cqe64, wq, idx);
-		handle_atomics(*cur_qp, cqe64, wq->last_poll, idx);
-		wc->wr_id = wq->wrid[idx];
-		wq->tail = wq->wqe_head[idx] + 1;
-		if (unlikely(wq->wr_data[idx] == MLX5_IB_WR_SIG_CANCELED))
-			wc->status = IB_WC_SIG_PIPELINE_CANCELED;
-		else
+		if ((*cur_qp)->is_srmc_kernel_qp) {
+			wc->wr_id = wq->wrid[idx];
+			mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
 			wc->status = IB_WC_SUCCESS;
+		} else {
+			handle_atomics(*cur_qp, cqe64, wq->last_poll, idx);
+			wc->wr_id = wq->wrid[idx];
+			wq->tail = wq->wqe_head[idx] + 1;
+			if (unlikely(wq->wr_data[idx] ==
+				     MLX5_IB_WR_SIG_CANCELED))
+				wc->status = IB_WC_SIG_PIPELINE_CANCELED;
+			else
+				wc->status = IB_WC_SUCCESS;
+		}
  		break;
-		break;
 	case MLX5_CQE_RESP_WR_IMM:
 	case MLX5_CQE_RESP_SEND:
 	case MLX5_CQE_RESP_SEND_IMM:
@@ -686,7 +716,10 @@ repoll:
 			wqe_ctr = be16_to_cpu(cqe64->wqe_counter);
 			idx = wqe_ctr & (wq->wqe_cnt - 1);
 			wc->wr_id = wq->wrid[idx];
-			wq->tail = wq->wqe_head[idx] + 1;
+			if ((*cur_qp)->is_srmc_kernel_qp)
+				mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
+			else
+				wq->tail = wq->wqe_head[idx] + 1;
 		} else {
 			struct mlx5_ib_srq *srq;
 

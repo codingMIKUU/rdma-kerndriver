@@ -571,7 +571,8 @@ struct mlx5_ib_qp {
 	struct mlx5_qp_usr_rc_mmap_entry *sq_usr_rc_entry;
 	u32			sq_ctrl_slot_idx;
 	u8			kernel_db:1;
-    struct mlx5_ib_srmc *srmc_owner;
+	u8			is_srmc_kernel_qp:1;
+	struct mlx5_ib_srmc	*srmc_owner;
 
 	struct list_head	qps_list;
 	struct list_head	cq_recv_list;
@@ -1374,6 +1375,8 @@ static inline u16 mlx5_ib_effective_uid(struct ib_pd *ibpd)
 
 int mlx5_ib_bind_hollow_rc_shared_pd(struct mlx5_ib_dev *dev, struct ib_pd *ibpd,
 				     struct mlx5_ib_ucontext *context);
+int mlx5_ib_bind_hollow_rc_shared_pd_uid(struct mlx5_ib_dev *dev,
+					 struct ib_pd *ibpd, u16 uid);
 
 static inline struct mlx5_ib_srq *to_msrq(struct ib_srq *ibsrq)
 {

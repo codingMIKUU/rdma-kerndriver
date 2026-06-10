@@ -139,7 +139,66 @@ static u32 mlx5_ib_srmc_get_usr_rc(struct mlx5_ib_srmc *srmc, u32 idx)
         return U32_MAX;
 
     entry = (u32 *)((char *)page_address(srmc->usr_rc_pages[page_idx]) + page_off);
-    return READ_ONCE(*entry);
+    return smp_load_acquire(entry);
+}
+
+static u64 mlx5_ib_srmc_get_ready_seq(struct mlx5_ib_srmc *srmc, u32 idx);
+
+static u64 mlx5_ib_srmc_help_publish(struct mlx5_ib_srmc *srmc,
+                                     struct mlx5_sq_ctrl_page *ctrl)
+{
+    u64 pub;
+    u64 new_pub;
+    u64 old_pub;
+    u32 scanned;
+
+    if (!srmc || !ctrl || !srmc->ready_seq_depth)
+        return ctrl ? smp_load_acquire(&ctrl->pub_idx) : 0;
+
+    for (;;) {
+        pub = smp_load_acquire(&ctrl->pub_idx);
+        new_pub = pub;
+
+        for (scanned = 0; scanned < srmc->ready_seq_depth; scanned++) {
+            u32 idx = new_pub & (srmc->ready_seq_depth - 1);
+
+            if (mlx5_ib_srmc_get_ready_seq(srmc, idx) != new_pub + 1)
+                break;
+            new_pub++;
+        }
+
+        if (new_pub == pub)
+            return pub;
+
+        old_pub = cmpxchg(&ctrl->pub_idx, pub, new_pub);
+        if (old_pub == pub)
+            continue;
+
+        cpu_relax();
+    }
+}
+
+static u64 mlx5_ib_srmc_get_ready_seq(struct mlx5_ib_srmc *srmc, u32 idx)
+{
+    size_t off;
+    u32 page_idx;
+    u32 page_off;
+    u64 *entry;
+
+    if (!srmc || !srmc->ready_seq_pages || !srmc->ready_seq_depth)
+        return U64_MAX;
+
+    idx &= srmc->ready_seq_depth - 1;
+    off = (size_t)idx * sizeof(*entry);
+    page_idx = off / PAGE_SIZE;
+    page_off = off % PAGE_SIZE;
+    if (page_idx >= srmc->ready_seq_npages ||
+        !srmc->ready_seq_pages[page_idx])
+        return U64_MAX;
+
+    entry = (u64 *)((char *)page_address(srmc->ready_seq_pages[page_idx]) +
+                    page_off);
+    return smp_load_acquire(entry);
 }
 
 static struct mlx5_ib_srmc *mlx5_ib_sched_find_srmc_idx(struct mlx5_ib_sched *sched,
@@ -340,7 +399,7 @@ mlx5_ib_find_cqb_by_cqn_locked(struct mlx5_ib_sched_group *sched_group, int cqn)
 }
 
 int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
-                           u32 usr_rc_cnt, int cqn)
+                           u32 usr_rc_cnt, int cqn, u32 uidx)
 {
     struct mlx5_ib_cqbuf *cqb;
 
@@ -360,6 +419,7 @@ int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
     }
 
     sched_group->usr_rc_cqb_arr[usr_rc_cnt] = cqb;
+    sched_group->usr_rc_uidx_arr[usr_rc_cnt] = uidx;
     mutex_unlock(&sched_group->cq_lock);
 
     return 0;
@@ -429,8 +489,11 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
             int j;
 
             for (j = 0; j < ARRAY_SIZE(sched_group->usr_rc_cqb_arr); j++) {
-                if (sched_group->usr_rc_cqb_arr[j] == cqb)
+                if (sched_group->usr_rc_cqb_arr[j] == cqb) {
                     sched_group->usr_rc_cqb_arr[j] = NULL;
+                    sched_group->usr_rc_uidx_arr[j] =
+                        MLX5_IB_DEFAULT_UIDX;
+                }
             }
 
             sched_group->cqb_arr[i] = NULL;
@@ -562,10 +625,8 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                     cqe64 = cqe[j];
                     memcpy(ucqe, cqe[j], cqb->cqe_sz - 1);
                     DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
-                    ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
-                    ucqe64->wqe_counter = htons(srmc->wqe_infos[idx].wqe_counter & 0xffff);
-                    // 根据cqe v1，保存uidx
-                    ucqe64->srqn = htonl(srmc->wqe_infos[idx].usr_rc_cnt);
+                    /* CQE v1 request lookup uses srqn_uidx. */
+                    ucqe64->srqn = htonl(srmc->wqe_infos[idx].uidx);
 
                     // 反转用户态cqe的owner_bit
                     smp_store_release(&ucqe64->op_own, (cqe64->op_own & (~0xf)) | cqb->op_own);
@@ -605,6 +666,7 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
         cqe_num = 0;
         if ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe)))
         {
+            srmc->last_cqe_jiffies = jiffies;
             // 减去sig_cnt
             srmc->sig_cnt -= cqe_num;
             // pr_info("sig_cnt cqe_num:%d,sig_cnt:%d\n", cqe_num, srmc->sig_cnt);
@@ -644,10 +706,8 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
                 cqe64 = cqe[i];
                 memcpy(ucqe, cqe[i], cqb->cqe_sz - 1);
                 DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
-                //ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
-                //ucqe64->wqe_counter = htons(srmc->wqe_infos[idx].wqe_counter & 0xffff);
-                // 根据cqe v1，保存uidx
-                // ucqe64->srqn = htonl(sqb->uidx);
+                /* CQE v1 request lookup uses srqn_uidx. */
+                ucqe64->srqn = htonl(srmc->wqe_infos[idx].uidx);
 
                 // 反转用户态cqe的owner_bit
                 smp_store_release(&ucqe64->op_own, (cqe64->op_own & (~0xf)) | cqb->op_own);
@@ -747,10 +807,8 @@ static inline int srm_poll_srmc_once_debug(struct mlx5_ib_srmc *srmc, struct ib_
                 cqe64 = cqe[i];
                 memcpy(ucqe, cqe[i], cqb->cqe_sz - 1);
                 DEBUG_LOG("cqe64->op_own:%x,cqe_size:%d\n", ucqe64->op_own, cqb->cqe_sz);
-                ucqe64->sop_drop_qpn = htonl(ntohl(ucqe64->sop_drop_qpn) & (~0xffffff) | qpn);
-                ucqe64->wqe_counter = htons(srmc->wqe_infos[idx].wqe_counter & 0xffff);
-                // 根据cqe v1，保存uidx
-                ucqe64->srqn = htonl(srmc->wqe_infos[idx].usr_rc_cnt);
+                /* CQE v1 request lookup uses srqn_uidx. */
+                ucqe64->srqn = htonl(srmc->wqe_infos[idx].uidx);
 
                 // 反转用户态cqe的owner_bit
                 smp_store_release(&ucqe64->op_own, (cqe64->op_own & (~0xf)) | cqb->op_own);
@@ -861,15 +919,15 @@ static __always_inline int poll_srmc_inline(
     void **cqe,
     int *free_cqe_idx,
     int *free_cqe_cnt,
-    int id,
-    struct mlx5_ib_srmc *srmc)
+    int id)
 {
     // 从队列尾取出SRMC
-    struct mlx5_ib_srmc *pre_srmc = pre_srmcs[*polling_tail];
+    int old_tail = *polling_tail;
+    struct mlx5_ib_srmc *pre_srmc = pre_srmcs[old_tail];
     int polled = 0;
     int ret;
 
-    pre_srmcs[*polling_tail] = NULL; // 清空当前位置
+    pre_srmcs[old_tail] = NULL; // 清空当前位置
 
     if (!pre_srmc)
         return 0; // 无待处理的SRMC，直接返回
@@ -889,11 +947,21 @@ static __always_inline int poll_srmc_inline(
         if (unlikely(pre_srmcs[*polling_head] != NULL))
         {
             pr_info("[sched-%d] cq polling queue exceed queue length\n", id);
-            while (pre_srmc->sig_cnt)
+            while (pre_srmc->sig_cnt && !kthread_should_stop())
             {
                 ret = srm_poll_srmc_once(pre_srmc, wc, cqe, free_cqe_idx, free_cqe_cnt);
                 if (ret > 0)
                     polled += ret;
+                else {
+                    /*
+                     * CQE may not be visible yet. Preserve this SRMC at the
+                     * queue tail instead of dropping it or busy-spinning.
+                     */
+                    pre_srmcs[old_tail] = pre_srmc;
+                    *polling_tail = old_tail;
+                    cond_resched();
+                    return polled;
+                }
             }
             in_queue[pre_srmc->srmc_idx & (CQ_NUM - 1)] = 0; // 位运算优化
         }
@@ -915,14 +983,21 @@ static __always_inline int poll_srmc_inline(
                         pre_srmc->ini_cb.qp->sq.max_post);
             }
             // 循环处理至sig_cnt < SQ_DEPTH且SQ不满
-            while (pre_srmc->sig_cnt >= pre_srmc->ini_cb.qp->sq.wqe_cnt ||
+            while (!kthread_should_stop() &&
+                   (pre_srmc->sig_cnt >= pre_srmc->ini_cb.qp->sq.wqe_cnt ||
                    (pre_srmc->ini_cb.qp->sq.head -
                     pre_srmc->ini_cb.qp->sq.tail) >=
-                       pre_srmc->ini_cb.qp->sq.max_post)
+                       pre_srmc->ini_cb.qp->sq.max_post))
             {
                 ret = srm_poll_srmc_once(pre_srmc, wc, cqe, free_cqe_idx, free_cqe_cnt);
                 if (ret > 0)
                     polled += ret;
+                else {
+                    pre_srmcs[old_tail] = pre_srmc;
+                    *polling_tail = old_tail;
+                    cond_resched();
+                    return polled;
+                }
             }
             // 处理完成后判断是否仍有剩余信号
             if (!pre_srmc->sig_cnt)
@@ -1628,8 +1703,8 @@ int scheduler_polling(void *sched_data)
     uint64_t start_cycles_cq, end_cycles_cq;
     const uint64_t cpu_frequency_hz = 2900000000; // 2.9 GHz
 
-    cqe = kmalloc_array(SQ_DEPTH, sizeof(void *), GFP_KERNEL);
-    wc = kmalloc_array(SQ_DEPTH, sizeof(struct ib_wc), GFP_KERNEL);
+    cqe = kvcalloc(SQ_DEPTH, sizeof(*cqe), GFP_KERNEL);
+    wc = kvcalloc(SQ_DEPTH, sizeof(*wc), GFP_KERNEL);
 
     memset(gid.raw, 0, sizeof(gid.raw));
     memset(gid.raw + 10, 0xff, 2); // 高80位为0，中16位全1，低32位为ip地址，此为gid格式
@@ -1683,14 +1758,13 @@ int scheduler_polling(void *sched_data)
     uint32_t poll_round = 0;
     const int POLL_ALL_INTERVAL = 10000; // 全体遍历的时间
     struct mlx5_ib_srmc *pre_srmc = NULL;
-    struct mlx5_ib_srmc **pre_srmcs = kmalloc_array(SRMC_POLLING_CNT, sizeof(struct mlx5_ib_srmc *), GFP_KERNEL);
-    memset(pre_srmcs, 0, SRMC_POLLING_CNT * sizeof(struct mlx5_ib_srmc *));
+    struct mlx5_ib_srmc **pre_srmcs =
+        kvcalloc(SRMC_POLLING_CNT, sizeof(*pre_srmcs), GFP_KERNEL);
     int polling_tail, polling_head;
     polling_tail = polling_head = 0;
 
     u8 *in_queue;
-    in_queue = kmalloc_array(NUM_SRMC * 2, sizeof(u8), GFP_KERNEL); // 大小要是num_kqps的4倍
-    memset(in_queue, 0, NUM_SRMC * 2 * sizeof(u8));
+    in_queue = kvcalloc(NUM_SRMC * 2, sizeof(*in_queue), GFP_KERNEL); // 大小要是num_kqps的4倍
 
     int wqe_cur_idx = 0;
 
@@ -1703,7 +1777,16 @@ int scheduler_polling(void *sched_data)
     struct mlx5_ib_srmc *cq_srmc_tb[CQ_NUM] = {0}; // 保存每个cq对应srmc代表
 
     int *free_cqe_idx, free_cqe_cnt;
-    free_cqe_idx = kmalloc_array(SQ_DEPTH, sizeof(int), GFP_KERNEL);
+    free_cqe_idx = kvcalloc(SQ_DEPTH, sizeof(*free_cqe_idx), GFP_KERNEL);
+    if (!cqe || !wc || !pre_srmcs || !in_queue || !free_cqe_idx) {
+        pr_err("scheduler thread %d: temporary buffer allocation failed\n",
+               id);
+        WRITE_ONCE(sched->init_error, -ENOMEM);
+        wake_up_all(&sched->init_wait);
+        wait_event_interruptible(sched->init_wait,
+                                 kthread_should_stop());
+        goto out;
+    }
     free_cqe_cnt = SQ_DEPTH;
     for (i = 0; i < SQ_DEPTH; i++)
     {
@@ -1729,13 +1812,27 @@ int scheduler_polling(void *sched_data)
         if (READ_ONCE(sched->init_error)) {
             pr_err("scheduler thread %d: SRMC init failed: %d\n",
                    id, READ_ONCE(sched->init_error));
+            /*
+             * Keep task_struct valid until the module explicitly stops us.
+             * Returning here leaves sched->task stale for kthread_stop().
+             */
+            wait_event_interruptible(sched->init_wait,
+                                     kthread_should_stop());
             goto out;
         }
         break;
     }
 
-    level_qp_st_arr = kmalloc_array(NUM_LEVEL, sizeof(int), GFP_KERNEL);
-    memset(level_qp_st_arr, 0, NUM_LEVEL * sizeof(int));
+    level_qp_st_arr = kvcalloc(NUM_LEVEL, sizeof(*level_qp_st_arr),
+                               GFP_KERNEL);
+    if (!level_qp_st_arr) {
+        pr_err("scheduler thread %d: level buffer allocation failed\n", id);
+        WRITE_ONCE(sched->init_error, -ENOMEM);
+        wake_up_all(&sched->init_wait);
+        wait_event_interruptible(sched->init_wait,
+                                 kthread_should_stop());
+        goto out;
+    }
 
     u8 use_user_idx;
 
@@ -1791,8 +1888,9 @@ int scheduler_polling(void *sched_data)
                 cnt++;
                 msleep(0);
             }
-            ret = poll_srmc_inline(pre_srmc, &polling_tail,&polling_head,in_queue,wc,cqe,
-                free_cqe_idx,&free_cqe_cnt,0,srmc);
+            ret = poll_srmc_inline(pre_srmcs, &polling_tail, &polling_head,
+                                   in_queue, wc, cqe, free_cqe_idx,
+                                   &free_cqe_cnt, id);
             if (ret > 0)
                 user_tot_cqes += ret;
 
@@ -1806,36 +1904,118 @@ int scheduler_polling(void *sched_data)
             if (!smp_load_acquire(&ctrl_page->wqe_cnt))
                 continue;
 
-            pub = smp_load_acquire(&ctrl_page->pub_idx);
             srmc = mlx5_ib_sched_find_srmc_idx(sched, i);
             if (!srmc || !srmc->ini_cb.qp)
                 continue;
+            pub = mlx5_ib_srmc_help_publish(srmc, ctrl_page);
 
             stuck_cnt = 0;
             inflight = kernel_tot_db - user_tot_cqes;
 
             while (inflight >= LIMIT_BATCHING && !kthread_should_stop()) {
-                ret = poll_srmc_inline(pre_srmc, &polling_tail, &polling_head,
+                ret = poll_srmc_inline(pre_srmcs, &polling_tail, &polling_head,
                                        in_queue, wc, cqe, free_cqe_idx,
-                                       &free_cqe_cnt, 0, srmc);
+                                       &free_cqe_cnt, id);
                 if (ret > 0) {
                     user_tot_cqes += ret;
                     stuck_cnt = 0;
                 } else {
                     cpu_relax();
-                    if (++stuck_cnt % 1024 == 0)
+                    if (++stuck_cnt % 1024 == 0) {
+                        if (pre_srmc &&
+                            time_after(jiffies,
+                                       pre_srmc->last_db_jiffies + HZ) &&
+                            time_after(jiffies,
+                                       pre_srmc->last_stall_warn_jiffies +
+                                           HZ)) {
+                            pre_srmc->last_stall_warn_jiffies = jiffies;
+                            pr_warn(
+                                "hollow RC kernel CQ wait stalled: sig_cnt=%d kernel_db=%llu user_cqe=%llu sq_head=%u sq_tail=%u\n",
+                                pre_srmc->sig_cnt, kernel_tot_db,
+                                user_tot_cqes,
+                                pre_srmc->ini_cb.qp->sq.head,
+                                pre_srmc->ini_cb.qp->sq.tail);
+                            for (j = 0; j < num_kqps; j++) {
+                                struct mlx5_ib_srmc *shared_srmc;
+                                struct mlx5_sq_ctrl_page *shared_ctrl;
+
+                                shared_srmc =
+                                    mlx5_ib_sched_find_srmc_idx(sched, j);
+                                if (!shared_srmc ||
+                                    shared_srmc->ini_cb.refcnt <= 1)
+                                    continue;
+                                shared_ctrl =
+                                    mlx5_sq_ctrl_get_slot(sq_ctrl_pool, j);
+                                if (!shared_ctrl)
+                                    continue;
+                                pr_warn(
+                                    "shared srmc=%d users=%d qpn=%u resv=%llu pub=%llu sched=%llu cons=%llu\n",
+                                    shared_srmc->srmc_idx,
+                                    shared_srmc->ini_cb.refcnt,
+                                    shared_srmc->ini_cb.qp->ibqp.qp_num,
+                                    smp_load_acquire(
+                                        &shared_ctrl->resv_idx),
+                                    smp_load_acquire(
+                                        &shared_ctrl->pub_idx),
+                                    shared_srmc->sched_post_idx,
+                                    smp_load_acquire(
+                                        &shared_ctrl->cons_idx));
+                            }
+                        }
                         cond_resched();
+                    }
                 }
                 inflight = kernel_tot_db - user_tot_cqes;
             }
             if (kthread_should_stop())
                 goto out;
 
-            pub = smp_load_acquire(&ctrl_page->pub_idx);
-            if (pub <= srmc->ini_cb.qp->sq.cur_post) {
+            pub = mlx5_ib_srmc_help_publish(srmc, ctrl_page);
+            if (pub <= srmc->sched_post_idx) {
+                u64 resv = smp_load_acquire(&ctrl_page->resv_idx);
+
+                if (resv > pub) {
+                    if (srmc->publish_gap_slot != pub) {
+                        srmc->publish_gap_slot = pub;
+                        srmc->publish_gap_jiffies = jiffies;
+                    } else if (time_after(
+                                   jiffies,
+                                   srmc->publish_gap_jiffies + HZ) &&
+                               time_after(
+                                   jiffies,
+                                   srmc->last_stall_warn_jiffies + HZ)) {
+                        u32 gap_idx =
+                            pub & (srmc->ini_cb.qp->sq.wqe_cnt - 1);
+                        struct mlx5_wqe_ctrl_seg *gap_ctrl =
+                            mlx5_frag_buf_get_wqe(
+                                &srmc->ini_cb.qp->sq.fbc, gap_idx);
+                        u32 gap_opmod = be32_to_cpu(
+                            READ_ONCE(gap_ctrl->opmod_idx_opcode));
+                        u32 gap_qpn_ds =
+                            be32_to_cpu(READ_ONCE(gap_ctrl->qpn_ds));
+
+                        srmc->last_stall_warn_jiffies = jiffies;
+                        pr_warn(
+                            "hollow RC publish gap: srmc=%d users=%d qpn=%u resv=%llu pub=%llu sched=%llu cons=%llu gap_idx=%u ready=%llu expected=%llu wqe_idx=%u wqe_qpn=%u usr_rc=%u\n",
+                            srmc->srmc_idx, srmc->ini_cb.refcnt,
+                            srmc->ini_cb.qp->ibqp.qp_num, resv, pub,
+                            srmc->sched_post_idx,
+                            smp_load_acquire(&ctrl_page->cons_idx),
+                            gap_idx,
+                            mlx5_ib_srmc_get_ready_seq(srmc, gap_idx),
+                            pub + 1, (u16)(gap_opmod >> 8),
+                            gap_qpn_ds >> 8,
+                            mlx5_ib_srmc_get_usr_rc(srmc, gap_idx));
+                    }
+                } else {
+                    srmc->publish_gap_jiffies = 0;
+                    srmc->publish_gap_slot = U64_MAX;
+                }
                 cnt++;
                 continue;
             }
+            srmc->publish_gap_jiffies = 0;
+            srmc->publish_gap_slot = U64_MAX;
 
             inflight = kernel_tot_db - user_tot_cqes;
             if (inflight >= LIMIT_BATCHING)
@@ -1862,7 +2042,7 @@ int scheduler_polling(void *sched_data)
             }
 
             {
-                u64 ready_cnt = pub - srmc->ini_cb.qp->sq.cur_post;
+                u64 ready_cnt = pub - srmc->sched_post_idx;
                 int batch = min_t(u64, ready_cnt,
                                   min_t(u64, free_cqe_cnt, credit));
                 int sent = 0;
@@ -1870,15 +2050,38 @@ int scheduler_polling(void *sched_data)
 
                 while (sent < batch) {
                     uint32_t usr_rc_cnt;
+                    u32 opmod_idx_opcode;
+                    u32 qpn_ds;
+                    u16 wqe_idx;
+                    u32 wqe_qpn;
 
-                    idx = srmc->ini_cb.qp->sq.cur_post &
+                    idx = srmc->sched_post_idx &
                           (srmc->ini_cb.qp->sq.wqe_cnt - 1);
                     ctrl = mlx5_frag_buf_get_wqe(&srmc->ini_cb.qp->sq.fbc,
                                                   idx);
                     usr_rc_cnt = mlx5_ib_srmc_get_usr_rc(srmc, idx);
+                    opmod_idx_opcode = be32_to_cpu(READ_ONCE(ctrl->opmod_idx_opcode));
+                    qpn_ds = be32_to_cpu(READ_ONCE(ctrl->qpn_ds));
+                    wqe_idx = opmod_idx_opcode >> 8;
+                    wqe_qpn = qpn_ds >> 8;
+
+                    if (unlikely(wqe_idx != (u16)srmc->sched_post_idx ||
+                                 wqe_qpn != srmc->ini_cb.qp->ibqp.qp_num)) {
+                        pr_err_ratelimited(
+                            "hollow RC shared SQ corrupt: srmc=%d refcnt=%d slot=%llu idx=%u wqe_idx=%u qpn=%u expected_qpn=%u usr_rc=%u resv=%llu pub=%llu cons=%llu\n",
+                            srmc->srmc_idx, srmc->ini_cb.refcnt,
+                            srmc->sched_post_idx, idx, wqe_idx, wqe_qpn,
+                            srmc->ini_cb.qp->ibqp.qp_num, usr_rc_cnt,
+                            smp_load_acquire(&ctrl_page->resv_idx),
+                            pub,
+                            smp_load_acquire(&ctrl_page->cons_idx));
+                        break;
+                    }
 
                     if (unlikely(usr_rc_cnt >= ARRAY_SIZE(sched_group.usr_rc_cqb_arr) ||
-                                 !sched_group.usr_rc_cqb_arr[usr_rc_cnt])) {
+                                 !sched_group.usr_rc_cqb_arr[usr_rc_cnt] ||
+                                 sched_group.usr_rc_uidx_arr[usr_rc_cnt] ==
+                                     MLX5_IB_DEFAULT_UIDX)) {
                         pr_warn_ratelimited("invalid hollow RC id %u for srmc %d\n",
                                             usr_rc_cnt, srmc->srmc_idx);
                         break;
@@ -1887,8 +2090,10 @@ int scheduler_polling(void *sched_data)
                     uidx = free_cqe_idx[--free_cqe_cnt];
                     pre_srmc->wqe_infos[uidx].qpn = usr_rc_cnt;
                     pre_srmc->wqe_infos[uidx].usr_rc_cnt = usr_rc_cnt;
+                    pre_srmc->wqe_infos[uidx].uidx =
+                        sched_group.usr_rc_uidx_arr[usr_rc_cnt];
                     pre_srmc->wqe_infos[uidx].wqe_counter =
-                        srmc->ini_cb.qp->sq.cur_post;
+                        srmc->sched_post_idx;
                     pre_srmc->wqe_infos[uidx].cqb =
                         sched_group.usr_rc_cqb_arr[usr_rc_cnt];
                     pre_srmc->wqe_infos[uidx].to_user = 1;
@@ -1896,6 +2101,7 @@ int scheduler_polling(void *sched_data)
                     pre_srmc->wqe_infos[uidx].ctrl_page = ctrl_page;
 
                     srmc->ini_cb.qp->sq.wrid[idx] = uidx;
+                    srmc->sched_post_idx++;
                     srmc->ini_cb.qp->sq.cur_post++;
                     last_ctrl = ctrl;
                     sent++;
@@ -1905,48 +2111,78 @@ int scheduler_polling(void *sched_data)
                     continue;
 
                 mlx5r_ring_db(srmc->ini_cb.qp, sent, last_ctrl);
+                pre_srmc->last_db_jiffies = jiffies;
                 kernel_tot_db += sent;
 
                 if (!in_queue[cq_idx])
                 {
-                    if (pre_srmcs[polling_head] != NULL)
-                    {
+                    if (pre_srmcs[polling_head] != NULL) {
+                        int old_tail = polling_tail;
+
                         pre_srmc = pre_srmcs[polling_tail];
                         pre_srmcs[polling_tail] = NULL;
                         polling_tail = (polling_tail + 1) % SRMC_POLLING_CNT;
                         pr_info("err:exceed queue length\n");
                         if (pre_srmc) {
-                            while ((ret = srm_poll_srmc_once(pre_srmc, wc, cqe,
-                                                             free_cqe_idx,
-                                                             &free_cqe_cnt)) != -1)
-                            {
-                                if (ret > 0)
+                            while (pre_srmc->sig_cnt &&
+                                   !kthread_should_stop()) {
+                                ret = srm_poll_srmc_once(pre_srmc, wc, cqe,
+                                                         free_cqe_idx,
+                                                         &free_cqe_cnt);
+                                if (ret > 0) {
                                     user_tot_cqes += ret;
+                                } else {
+                                    pre_srmcs[old_tail] = pre_srmc;
+                                    polling_tail = old_tail;
+                                    cond_resched();
+                                    break;
+                                }
                             }
-                            in_queue[pre_srmc->srmc_idx % (CQ_NUM)] = 0;
+                            if (!pre_srmc->sig_cnt)
+                                in_queue[pre_srmc->srmc_idx % CQ_NUM] = 0;
                         }
                     }
 
-                    pre_srmcs[polling_head] = cq_srmc_tb[cq_idx];
-                    polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
-                    in_queue[cq_idx] = 1;
+                    if (pre_srmcs[polling_head] == NULL) {
+                        pre_srmcs[polling_head] = cq_srmc_tb[cq_idx];
+                        polling_head = (polling_head + 1) % SRMC_POLLING_CNT;
+                        in_queue[cq_idx] = 1;
+                    } else {
+                        pr_warn_ratelimited("scheduler CQ polling queue remains full for srmc %d\n",
+                                            srmc->srmc_idx);
+                    }
                 }
 
                 pre_srmc = cq_srmc_tb[cq_idx];
                 DEBUG_LOG("send signaled\n");
                 pre_srmc->sig_cnt += sent;
             }
+
+            if (pre_srmc && pre_srmc->sig_cnt &&
+                time_after(jiffies, pre_srmc->last_db_jiffies + HZ) &&
+                time_after(jiffies,
+                           pre_srmc->last_stall_warn_jiffies + HZ)) {
+                pre_srmc->last_stall_warn_jiffies = jiffies;
+                pr_warn(
+                    "hollow RC CQ stalled: cq_srmc=%d sig_cnt=%d kernel_db=%llu user_cqe=%llu sq_head=%u sq_tail=%u last_db=%lu last_cqe=%lu\n",
+                    pre_srmc->srmc_idx, pre_srmc->sig_cnt,
+                    kernel_tot_db, user_tot_cqes,
+                    pre_srmc->ini_cb.qp->sq.head,
+                    pre_srmc->ini_cb.qp->sq.tail,
+                    pre_srmc->last_db_jiffies,
+                    pre_srmc->last_cqe_jiffies);
+            }
             // pre_srmc->cur_cqe++;
         }
     }
 out:
     DEBUG_LOG("scheduler thread %d exit\n", id);
-    kfree(cqe);
-    kfree(wc);
-    kfree(pre_srmcs);
-    kfree(in_queue);
-    kfree(free_cqe_idx);
-    kfree(level_qp_st_arr);
+    kvfree(cqe);
+    kvfree(wc);
+    kvfree(pre_srmcs);
+    kvfree(in_queue);
+    kvfree(free_cqe_idx);
+    kvfree(level_qp_st_arr);
 
     // // 文件
     // filp_close(filp, NULL);
@@ -1954,12 +2190,15 @@ out:
     return 0;
 err:
     pr_err("scheduler thread %d exit in error state\n", id);
-    kfree(cqe);
-    kfree(wc);
-    kfree(pre_srmcs);
-    kfree(in_queue);
-    kfree(free_cqe_idx);
-    kfree(level_qp_st_arr);
+    WRITE_ONCE(sched->init_error, -EIO);
+    wake_up_all(&sched->init_wait);
+    wait_event_interruptible(sched->init_wait, kthread_should_stop());
+    kvfree(cqe);
+    kvfree(wc);
+    kvfree(pre_srmcs);
+    kvfree(in_queue);
+    kvfree(free_cqe_idx);
+    kvfree(level_qp_st_arr);
 
     // // 文件
     // filp_close(filp, NULL);
@@ -1987,6 +2226,8 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
     memset(sched_group->cqb_arr, 0, sizeof(sched_group->cqb_arr));
     memset(sched_group->usr_rc_cqb_arr, 0,
            sizeof(sched_group->usr_rc_cqb_arr));
+    memset(sched_group->usr_rc_uidx_arr, 0xff,
+           sizeof(sched_group->usr_rc_uidx_arr));
     memset(sched_group->xrc_bf_arr, 0, sizeof(sched_group->xrc_bf_arr));
 
     sched_group->num_sched = num;
@@ -2055,37 +2296,104 @@ err:
         }
     }
     kfree(sched_group->scheds);
+    sched_group->scheds = NULL;
+    sched_group->num_sched = 0;
     return ret;
 }
+
+void mlx5_ib_sched_stop(struct mlx5_ib_sched_group *sched_group)
+{
+    struct mlx5_ib_sched *sched;
+    int i;
+
+    if (!sched_group || !sched_group->scheds ||
+        sched_group->num_sched <= 0)
+        return;
+
+    for (i = 0; i < sched_group->num_sched; i++) {
+        sched = &sched_group->scheds[i];
+        if (!sched->task || IS_ERR(sched->task)) {
+            sched->task = NULL;
+            continue;
+        }
+
+        wake_up_all(&sched->init_wait);
+        kthread_stop(sched->task);
+        sched->task = NULL;
+    }
+}
+
+static void mlx5_ib_destroy_srmc_ini(struct mlx5_ib_srmc *srmc)
+{
+    struct srm_cb *cb;
+    struct rdma_cm_id *cm_id;
+    struct ib_pd *pd;
+
+    if (!srmc)
+        return;
+
+    cb = &srmc->ini_cb;
+    cm_id = cb->cm_id;
+    pd = cb->pd;
+
+    if (cm_id && cm_id->qp)
+        rdma_destroy_qp(cm_id);
+    cb->qp = NULL;
+    cb->cq = NULL;
+    cb->pd = NULL;
+    cb->state = ERROR;
+
+    if (pd && !IS_ERR(pd))
+        ib_dealloc_pd(pd);
+    if (cm_id) {
+        cb->cm_id = NULL;
+        rdma_destroy_id(cm_id);
+    }
+}
+
+static void mlx5_ib_unmap_all_cq_ubufs(struct mlx5_ib_sched_group *sched_group)
+{
+    struct mlx5_ib_cqbuf *cqb;
+    int npages;
+    int i;
+
+    mutex_lock(&sched_group->cq_lock);
+    memset(sched_group->usr_rc_cqb_arr, 0,
+           sizeof(sched_group->usr_rc_cqb_arr));
+    memset(sched_group->usr_rc_uidx_arr, 0xff,
+           sizeof(sched_group->usr_rc_uidx_arr));
+
+    for (i = 0; i < sched_group->cqb_cnt; i++) {
+        cqb = sched_group->cqb_arr[i];
+        sched_group->cqb_arr[i] = NULL;
+        if (!cqb)
+            continue;
+
+        vunmap(cqb->buf);
+        npages = DIV_ROUND_UP(cqb->cq_size, PAGE_SIZE);
+        put_user_pages(cqb->pages, npages);
+        kfree(cqb->pages);
+        kfree(cqb);
+    }
+    sched_group->cqb_cnt = 0;
+    mutex_unlock(&sched_group->cq_lock);
+}
+
 //TODO:释放bf（mlx5_put_uars_page(mdev, up)）
 void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
 {
     struct mlx5_ib_sqbuf *sqb;
-    struct mlx5_ib_cqbuf *cqb;
     struct mlx5_ib_srmc *srmc;
     struct mlx5_ib_sched *sched;
     int npages;
-    int i, j,k;
+    int i, j;
 
     if (!sched_group || !sched_group->scheds || sched_group->num_sched <= 0) {
         pr_warn("mlx5_sched_exit: already cleaned or uninitialized\n");
         return;
     }
 
-    for (i = 0; i < sched_group->num_sched; i++)
-    {
-        DEBUG_LOG("Ready to stop sched->task %d\n", i);
-        sched = &sched_group->scheds[i];
-        if (sched->task && !IS_ERR(sched->task) && pid_alive(sched->task))
-        {
-            kthread_stop(sched->task);
-            sched->task = NULL;
-        }
-        else
-        {
-            sched->task = NULL;
-        }
-    }
+    mlx5_ib_sched_stop(sched_group);
 
     /*
      * Scheduler threads are stopped; safe to release SQ/CQ buffers pinned
@@ -2097,17 +2405,32 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
             continue;
         mlx5_ib_unmap_ubuf(sched_group, sqb->qpn);
     }
+    sched_group->sqb_cnt = 0;
+    mlx5_ib_unmap_all_cq_ubufs(sched_group);
 
     for (i = 0; i < sched_group->num_sched; i++) {
         sched = &sched_group->scheds[i];
-        mutex_lock(&sched->srmc_lock);
         for (j = 0; j < NUM_SRMC; j++) {
+            mutex_lock(&sched->srmc_lock);
             srmc = sched->srmc_tb[j];
+            sched->srmc_tb[j] = NULL;
+            if (srmc && srmc->srmc_idx >= 0 &&
+                srmc->srmc_idx < NUM_SRMC &&
+                sched->srmc_by_idx[srmc->srmc_idx] == srmc)
+                sched->srmc_by_idx[srmc->srmc_idx] = NULL;
+            mutex_unlock(&sched->srmc_lock);
+
+            if (!srmc)
+                continue;
+
+            mlx5_ib_destroy_srmc_ini(srmc);
             mlx5_ib_free_srmc_ready_seq(srmc);
             mlx5_ib_free_srmc_usr_rc(srmc);
+            kfree(srmc);
         }
         memset(sched->srmc_by_idx, 0, sizeof(sched->srmc_by_idx));
-        mutex_unlock(&sched->srmc_lock);
+        sched->srmc_cnt = 0;
+        sched->ready_srmc_cnt = 0;
     }
     //     mutex_lock(&sched->srmc_lock);
     //     for (j = 0; j < NUM_SRMC; j++)
@@ -2172,6 +2495,15 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
     //         if (shared_cq[i][j])
     //             ib_destroy_cq(shared_cq[i][j]);
     // }
+
+    for (i = 0; i < sched_group->num_sched; i++) {
+        for (j = 0; j < CQ_NUM; j++) {
+            if (!shared_cq[i][j])
+                continue;
+            ib_destroy_cq(shared_cq[i][j]);
+            shared_cq[i][j] = NULL;
+        }
+    }
 
     // clean up srm qp table
     if (user_wqe_table)
@@ -2239,6 +2571,9 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
 }
 int mlx5_ib_server_init(struct mlx5_ib_server *server)
 {
+    atomic_set(&server->conn_tasks, 0);
+    init_waitqueue_head(&server->conn_wait);
+    WRITE_ONCE(server->stopping, false);
     server->task = kthread_run(mlx5_sched_run_server, &server->server_cb, "server thread");
     if (IS_ERR(server->task))
     {
@@ -2252,38 +2587,73 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
     int i, j;
     struct mlx5_ib_sched *sched;
     struct mlx5_ib_srmc *srmc;
+    struct srm_cb *cb;
+    long waited;
 
-    if (server->task)
-    {
+    WRITE_ONCE(server->stopping, true);
+    if (server->task && !IS_ERR(server->task)) {
+        wake_up_all(&server->server_cb.sem);
         kthread_stop(server->task);
-        for (i = 0; i < sched_group->num_sched; i++)
-        {
-            sched = &sched_group->scheds[i];
+        server->task = NULL;
+    } else {
+        server->task = NULL;
+    }
+
+    for (i = 0; i < sched_group->num_sched; i++) {
+        sched = &sched_group->scheds[i];
+        for (j = 0; j < NUM_SRMC; j++) {
             mutex_lock(&sched->srmc_lock);
-            for (j = 0; j < NUM_SRMC; j++)
-            {
-                srmc = sched->srmc_tb[j];
-                if (srmc == NULL)
-                {
-                    continue;
-                }
-                if (srmc->tgt_cb.cm_id)
-                {
-                    DEBUG_LOG("Freeing tgt cb's cm connection resources.\n");
-                    rdma_disconnect(srmc->tgt_cb.cm_id);
-                    ib_destroy_qp(&srmc->tgt_cb.qp->ibqp);
-                    ib_destroy_cq(srmc->tgt_cb.cq);
-                    ib_dealloc_pd(srmc->tgt_cb.pd);
-                    rdma_destroy_id(srmc->tgt_cb.cm_id);
-                }
+            srmc = sched->srmc_tb[j];
+            if (srmc) {
+                srmc->tgt_cb.state = ERROR;
+                srmc->tgt_cb.cm_error = -ESHUTDOWN;
+                wake_up_all(&srmc->tgt_cb.sem);
             }
             mutex_unlock(&sched->srmc_lock);
         }
-        if (server->server_cb.cm_id)
-            rdma_destroy_id(server->server_cb.cm_id);
     }
-    else
-        pr_info("server task PTR is err\n");
+
+    waited = wait_event_timeout(server->conn_wait,
+                                atomic_read(&server->conn_tasks) == 0,
+                                msecs_to_jiffies(6000));
+    if (!waited && atomic_read(&server->conn_tasks))
+        pr_warn("timed out waiting for %d SRM connection tasks\n",
+                atomic_read(&server->conn_tasks));
+
+    /*
+     * Never hold srmc_lock while destroying CM resources. CM teardown can
+     * sleep and invoke callbacks.
+     */
+    for (i = 0; i < sched_group->num_sched; i++) {
+        sched = &sched_group->scheds[i];
+        for (j = 0; j < NUM_SRMC; j++) {
+            mutex_lock(&sched->srmc_lock);
+            srmc = sched->srmc_tb[j];
+            cb = srmc ? &srmc->tgt_cb : NULL;
+            mutex_unlock(&sched->srmc_lock);
+            if (!cb || !cb->cm_id)
+                continue;
+
+            if (cb->cm_id->qp)
+                rdma_destroy_qp(cb->cm_id);
+            cb->qp = NULL;
+            if (cb->cq && !IS_ERR(cb->cq))
+                ib_destroy_cq(cb->cq);
+            cb->cq = NULL;
+            if (cb->pd && !IS_ERR(cb->pd))
+                ib_dealloc_pd(cb->pd);
+            cb->pd = NULL;
+            cb->state = ERROR;
+            rdma_destroy_id(cb->cm_id);
+            cb->cm_id = NULL;
+            cb->refcnt = 0;
+        }
+    }
+
+    if (server->server_cb.cm_id) {
+        rdma_destroy_id(server->server_cb.cm_id);
+        server->server_cb.cm_id = NULL;
+    }
     pr_info("mlx5_ib_server_exit success\n");
 }
 void mlx5_ib_gid2ip(char addr[4], union ib_gid *gid)
@@ -2357,8 +2727,21 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
             mutex_lock(&sched->srmc_lock);
             if (ret <= 0 || !srmc->ini_cb.qp) {
                 ret = ret ?: -EINVAL;
+                if (sched->srmc_tb[j] == srmc)
+                    sched->srmc_tb[j] = NULL;
+                if (srmc->srmc_idx >= 0 &&
+                    srmc->srmc_idx < NUM_SRMC &&
+                    sched->srmc_by_idx[srmc->srmc_idx] == srmc)
+                    sched->srmc_by_idx[srmc->srmc_idx] = NULL;
+                if (sched->srmc_cnt)
+                    sched->srmc_cnt--;
                 WRITE_ONCE(sched->init_error, ret);
                 wake_up_all(&sched->init_wait);
+                mutex_unlock(&sched->srmc_lock);
+                mlx5_ib_free_srmc_ready_seq(srmc);
+                mlx5_ib_free_srmc_usr_rc(srmc);
+                kfree(srmc);
+                mutex_lock(&sched->srmc_lock);
                 break;
             }
 
@@ -2374,11 +2757,14 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
 	        (smp_load_acquire(&sched->ready_srmc_cnt) < num_kqps ||
 	         READ_ONCE(sched->init_error))) {
 	        mutex_unlock(&sched->srmc_lock);
-	        ret = wait_event_interruptible(sched->init_wait,
+	        ret = wait_event_interruptible_timeout(sched->init_wait,
 	            READ_ONCE(sched->init_error) ||
-	            smp_load_acquire(&sched->ready_srmc_cnt) >= num_kqps);
-	        if (ret)
+	            smp_load_acquire(&sched->ready_srmc_cnt) >= num_kqps,
+	            msecs_to_jiffies(5000));
+	        if (ret < 0)
 	            return ret;
+	        if (!ret)
+	            return -ETIMEDOUT;
 	        ret = READ_ONCE(sched->init_error);
 	        if (ret)
 	            return ret;
@@ -2490,12 +2876,20 @@ struct server_conn_info
 {
     struct rdma_cm_id *cm_id;
     int flags;
+    struct mlx5_ib_server *server;
 };
+
+static void mlx5_ib_server_conn_done(struct mlx5_ib_server *server)
+{
+    if (atomic_dec_and_test(&server->conn_tasks))
+        wake_up_all(&server->conn_wait);
+}
 
 int srm_create_connection(struct server_conn_info *conn_info)
 {
     struct rdma_cm_id *cm_id = conn_info->cm_id;
     int flags = conn_info->flags;
+    struct mlx5_ib_server *server = conn_info->server;
     extern struct mlx5_ib_sched_group sched_group;
     struct mlx5_ib_srmc *srmc;
     struct mlx5_ib_sched *sched;
@@ -2550,6 +2944,8 @@ int srm_create_connection(struct server_conn_info *conn_info)
             pr_err("srmc queue is full\n");
             mutex_unlock(&sched->srmc_lock);
             rdma_destroy_id(cm_id);
+            kfree(conn_info);
+            mlx5_ib_server_conn_done(server);
             return -1;
         }
     }
@@ -2557,6 +2953,14 @@ int srm_create_connection(struct server_conn_info *conn_info)
     if (!srmc)
     {
         srmc = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
+        if (!srmc) {
+            mutex_unlock(&sched->srmc_lock);
+            rdma_reject(cm_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);
+            rdma_destroy_id(cm_id);
+            kfree(conn_info);
+            mlx5_ib_server_conn_done(server);
+            return -ENOMEM;
+        }
         sched->srmc_cnt++;
         memcpy(srmc->dgid.raw, dgid.raw, sizeof(srmc->dgid.raw));
         // 将srmc 加入到srmc_head中
@@ -2580,6 +2984,7 @@ int srm_create_connection(struct server_conn_info *conn_info)
     {
         printk(KERN_ERR "alloc pd failed\n");
         ret = PTR_ERR(cb->pd);
+        cb->pd = NULL;
         goto err0;
     }
     DEBUG_LOG("alloc pd\n");
@@ -2646,18 +3051,29 @@ int srm_create_connection(struct server_conn_info *conn_info)
 
     DEBUG_LOG("srm_create_connection success\n");
     kfree(conn_info);
+    mlx5_ib_server_conn_done(server);
     return 0;
 
 err3:
-    ib_destroy_qp(&cb->qp->ibqp);
+    if (cm_id->qp)
+        rdma_destroy_qp(cm_id);
+    cb->qp = NULL;
 err2:
-    ib_destroy_cq(cb->cq);
+    if (cb->cq && !IS_ERR(cb->cq))
+        ib_destroy_cq(cb->cq);
+    cb->cq = NULL;
 err1:
-    ib_dealloc_pd(cb->pd);
+    if (cb->pd && !IS_ERR(cb->pd))
+        ib_dealloc_pd(cb->pd);
+    cb->pd = NULL;
 err0:
+    cb->state = ERROR;
+    cb->cm_id = NULL;
+    cb->refcnt = 0;
     rdma_reject(cm_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);
     rdma_destroy_id(cm_id);
     kfree(conn_info);
+    mlx5_ib_server_conn_done(server);
     return ret;
 }
 static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
@@ -2666,6 +3082,8 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
     int ret;
     int flags;
     struct server_conn_info *conn_info;
+    struct mlx5_ib_server *server;
+    struct task_struct *task;
     struct srm_cb *cb = cma_id->context;
 
     printk("cma_event type %d cma_id %p (%s)\n", event->event, cma_id,
@@ -2680,27 +3098,50 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
         {
             printk(KERN_ERR "rdma_resolve_route error %d\n",
                    ret);
+            cb->cm_error = ret;
+            cb->state = ERROR;
             wake_up_interruptible(&cb->sem);
         }
         break;
 
     case RDMA_CM_EVENT_ROUTE_RESOLVED:
+        cb->cm_error = 0;
         cb->state = ROUTE_RESOLVED;
         wake_up_interruptible(&cb->sem);
         break;
 
     case RDMA_CM_EVENT_CONNECT_REQUEST:
+        server = container_of(cb, struct mlx5_ib_server, server_cb);
+        if (READ_ONCE(server->stopping)) {
+            rdma_reject(cma_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);
+            break;
+        }
         flags = *(int *)event->param.conn.private_data;
         DEBUG_LOG("connect request,flags = %d\n", flags);
         conn_info = kzalloc(sizeof(struct server_conn_info), GFP_KERNEL);
+        if (!conn_info) {
+            rdma_reject(cma_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);
+            return -ENOMEM;
+        }
         conn_info->cm_id = cma_id;
         conn_info->flags = flags;
-        kthread_run(srm_create_connection, conn_info, "server connection thread");
+        conn_info->server = server;
+        atomic_inc(&server->conn_tasks);
+        task = kthread_run(srm_create_connection, conn_info,
+                           "server connection thread");
+        if (IS_ERR(task)) {
+            ret = PTR_ERR(task);
+            kfree(conn_info);
+            mlx5_ib_server_conn_done(server);
+            rdma_reject(cma_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);
+            return ret;
+        }
         printk("child cma %p\n", cma_id);
         break;
 
     case RDMA_CM_EVENT_ESTABLISHED:
         printk("ESTABLISHED\n");
+        cb->cm_error = 0;
         cb->state = CONNECTED;
         wake_up_interruptible(&cb->sem);
         break;
@@ -2712,18 +3153,21 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
     case RDMA_CM_EVENT_REJECTED:
         printk(KERN_ERR "cma event %d, error %d,reject msg:%s\n", event->event,
                event->status, rdma_reject_msg(cma_id, event->status));
+        cb->cm_error = event->status ? event->status : -ECONNREFUSED;
         cb->state = ERROR;
         wake_up_interruptible(&cb->sem);
         break;
 
     case RDMA_CM_EVENT_DISCONNECTED:
         printk(KERN_ERR "DISCONNECT EVENT...\n");
+        cb->cm_error = -ECONNRESET;
         cb->state = ERROR;
         wake_up_interruptible(&cb->sem);
         break;
 
     case RDMA_CM_EVENT_DEVICE_REMOVAL:
         printk(KERN_ERR "cma detected device removal!!!!\n");
+        cb->cm_error = -ENODEV;
         cb->state = ERROR;
         wake_up_interruptible(&cb->sem);
         break;
@@ -2775,13 +3219,17 @@ static int srm_bind_client(struct srm_cb *cb)
         return ret;
     }
 
-    wait_event_interruptible(cb->sem, cb->state >= ROUTE_RESOLVED);
+    ret = wait_event_interruptible_timeout(cb->sem,
+                                           cb->state >= ROUTE_RESOLVED,
+                                           msecs_to_jiffies(5000));
+    if (ret <= 0)
+        return ret < 0 ? ret : -ETIMEDOUT;
     if (cb->state != ROUTE_RESOLVED)
     {
         printk(KERN_ERR
-               "addr/route resolution did not resolve: state %d\n",
-               cb->state);
-        return -EINTR;
+               "addr/route resolution failed: state %d error %d\n",
+               cb->state, cb->cm_error);
+        return cb->cm_error ? cb->cm_error : -EHOSTUNREACH;
     }
 
     if (!reg_supported(cb->cm_id->device))
@@ -2811,11 +3259,16 @@ static int srm_connect_client(struct srm_cb *cb, int flags)
         return ret;
     }
 
-    wait_event_interruptible(cb->sem, cb->state >= CONNECTED);
+    ret = wait_event_interruptible_timeout(cb->sem,
+                                           cb->state >= CONNECTED,
+                                           msecs_to_jiffies(5000));
+    if (ret <= 0)
+        return ret < 0 ? ret : -ETIMEDOUT;
     if (cb->state == ERROR)
     {
-        printk(KERN_ERR "wait for CONNECTED state %d\n", cb->state);
-        return -1;
+        printk(KERN_ERR "wait for CONNECTED state %d error %d\n",
+               cb->state, cb->cm_error);
+        return cb->cm_error ? cb->cm_error : -ECONNABORTED;
     }
 
     DEBUG_LOG("rdma_connect successful\n");
@@ -2825,6 +3278,7 @@ static int srm_connect_client(struct srm_cb *cb, int flags)
 int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid *dgid, int flags, int id, u32 sq_depth)
 {
     struct srm_cb *cb;
+    struct mlx5_ib_dev *dev;
     int ret;
     struct ib_cq_init_attr cq_attr;
     struct ib_qp_init_attr init_attr;
@@ -2833,6 +3287,8 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
 
     cb->addr_str = IP_ADDR;
     cb->port = PORT_NUM;
+    cb->state = IDLE;
+    cb->cm_error = 0;
     if (!(ret = in4_pton(cb->addr_str, -1, cb->addr, -1, NULL)))
     {
         printk(KERN_ERR "in4_pton error %d\n", ret);
@@ -2846,7 +3302,7 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
     cb->server = 0;
     init_waitqueue_head(&cb->sem);
     cb->txdepth = sq_depth;
-    cb->pd = pd;
+    cb->pd = NULL;
 
     cb->cm_id = rdma_create_id(&init_net, srm_cma_event_handler, cb, RDMA_PS_TCP, IB_QPT_XRC_INI);
     if (IS_ERR(cb->cm_id))
@@ -2863,28 +3319,45 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
         goto err0;
     }
 
-    // //create pd:now replace the userspace pd with kernel pd
-    // cb->pd = ib_alloc_pd(cb->cm_id->device);
-    // pd = cb->pd;
-    // if (IS_ERR(cb->pd)){
-    //     printk(KERN_ERR "ib_alloc_pd failed,pd:%s\n",PTR_ERR(cb->pd));
-    //     ret = PTR_ERR(cb->pd);
-    //     goto err0;
-    // }
+    /*
+     * Keep the scheduler QP independent of the user PD object's lifetime,
+     * while using the same hardware PDN as hollow RC QPs.
+     */
+    cb->pd = ib_alloc_pd(cb->cm_id->device, 0);
+    if (IS_ERR(cb->pd)) {
+        ret = PTR_ERR(cb->pd);
+        cb->pd = NULL;
+        pr_err("ib_alloc_pd failed,error:%d\n", ret);
+        goto err0;
+    }
+    dev = to_mdev(cb->cm_id->device);
+    ret = mlx5_ib_bind_hollow_rc_shared_pd_uid(
+        dev, cb->pd, mlx5_ib_effective_uid(pd));
+    if (ret) {
+        pr_err("bind kernel PD to hollow RC shared PDN failed,error:%d\n",
+               ret);
+        goto err_pd;
+    }
 
     // create cq
     memset(&cq_attr, 0, sizeof cq_attr);
     cq_attr.cqe = cb->txdepth;
     cq_attr.comp_vector = 0;
     // change to event?
-    if (!shared_cq[id][srmc->srmc_idx % (CQ_NUM)])
-        shared_cq[id][srmc->srmc_idx % (CQ_NUM)] = ib_create_cq(cb->cm_id->device, NULL, NULL, NULL, &cq_attr);
-    cb->cq = shared_cq[id][srmc->srmc_idx % (CQ_NUM)];
+    if (!shared_cq[id][srmc->srmc_idx % CQ_NUM]) {
+        cb->cq = ib_create_cq(cb->cm_id->device, NULL, NULL, NULL,
+                              &cq_attr);
+        if (!IS_ERR(cb->cq))
+            shared_cq[id][srmc->srmc_idx % CQ_NUM] = cb->cq;
+    } else {
+        cb->cq = shared_cq[id][srmc->srmc_idx % CQ_NUM];
+    }
     if (IS_ERR(cb->cq))
     {
         printk(KERN_ERR "ib_create_cq failed,cq:%s\n", PTR_ERR(cb->cq));
         ret = PTR_ERR(cb->cq);
-        goto err0;
+        cb->cq = NULL;
+        goto err_pd;
     }
     DEBUG_LOG("cq_num:%d\n", cb->cq->cqe);
     // ret = ib_req_notify_cq(cb->cq, IB_CQ_NEXT_COMP);
@@ -2908,11 +3381,11 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
     init_attr.send_cq = cb->cq;
     init_attr.recv_cq = cb->cq;
     init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
-    ret = rdma_create_qp(cb->cm_id, pd, &init_attr);
-    if (!ret)
+    ret = rdma_create_qp(cb->cm_id, cb->pd, &init_attr);
+    if (!ret) {
         cb->qp = to_mqp(cb->cm_id->qp);
-    else
-    {
+        cb->qp->is_srmc_kernel_qp = 1;
+    } else {
         pr_err("rdma_create_qp failed,error:%d\n", ret);
         goto err1;
     }
@@ -2937,21 +3410,28 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
 
     
 
-    return ret ? 0 : cb->qp->ibqp.qp_num;
+    return cb->qp->ibqp.qp_num;
 err4:
     rdma_disconnect(cb->cm_id);
 err3:
     // TODO:free buf and mr resources.
     // ib_sched_free_buf(cb);
 err2:
-    ib_destroy_qp(&cb->qp->ibqp);
+    if (cb->cm_id && cb->cm_id->qp)
+        rdma_destroy_qp(cb->cm_id);
+    cb->qp = NULL;
 err1:
-    ib_destroy_cq(cb->cq);
+    cb->cq = NULL;
+err_pd:
+    if (cb->pd) {
+        ib_dealloc_pd(cb->pd);
+        cb->pd = NULL;
+    }
 err0:
     rdma_destroy_id(cb->cm_id);
     cb->cm_id = NULL;
 out:
-    return ret ? 0 : cb->qp->ibqp.qp_num;
+    return ret ? ret : cb->qp->ibqp.qp_num;
 }
 
 int srm_bind_server(struct srm_cb *cb)
@@ -2989,7 +3469,11 @@ int srm_accept(struct srm_cb *cb)
         return ret;
     }
 
-    wait_event_interruptible(cb->sem, cb->state >= CONNECTED);
+    ret = wait_event_interruptible_timeout(cb->sem,
+                                           cb->state >= CONNECTED,
+                                           msecs_to_jiffies(5000));
+    if (ret <= 0)
+        return ret < 0 ? ret : -ETIMEDOUT;
     if (cb->state == ERROR)
     {
         printk(KERN_ERR "wait for CONNECTED state %d\n",
