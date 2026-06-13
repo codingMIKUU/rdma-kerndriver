@@ -187,7 +187,6 @@ struct mlx5_ib_srmc
     int sig_cnt;
     uint32_t cur_cqe;
     u64 sched_post_idx;
-    u64 publish_idx;
     struct mlx5_wqe_info *wqe_infos;
     size_t pending_bytes;     // total pending bytes
     size_t cul_pending_bytes; // next cqe's pending bytes
