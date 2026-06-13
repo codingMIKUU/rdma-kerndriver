@@ -142,6 +142,20 @@ static bool mlx5_ib_cqb_is_inflight(struct mlx5_ib_sched_group *sched_group,
     return false;
 }
 
+static bool
+mlx5_ib_cqb_reached_quiescent_epoch(struct mlx5_ib_sched_group *sched_group,
+                                    struct mlx5_ib_cqbuf *cqb)
+{
+    int i;
+
+    for (i = 0; i < sched_group->num_sched; i++)
+        if (smp_load_acquire(&sched_group->scheds[i].quiescent_epoch) <
+            cqb->retire_epoch)
+            return false;
+
+    return true;
+}
+
 static void mlx5_ib_reclaim_retired_cqbs(struct work_struct *work)
 {
     struct mlx5_ib_sched_group *sched_group =
@@ -153,13 +167,13 @@ static void mlx5_ib_reclaim_retired_cqbs(struct work_struct *work)
     if (!READ_ONCE(sched_group->retired_cqbs))
         return;
 
-    synchronize_rcu();
     mutex_lock(&sched_group->cq_lock);
     link = &sched_group->retired_cqbs;
     while (*link) {
         struct mlx5_ib_cqbuf *cqb = *link;
 
-        if (mlx5_ib_cqb_is_inflight(sched_group, cqb)) {
+        if (!mlx5_ib_cqb_reached_quiescent_epoch(sched_group, cqb) ||
+            mlx5_ib_cqb_is_inflight(sched_group, cqb)) {
             retry = true;
             link = &cqb->next;
             continue;
@@ -505,19 +519,20 @@ int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn)
     }
 
     for (j = 0; j < ARRAY_SIZE(sched_group->usr_rc_routes); j++) {
-        if (rcu_access_pointer(sched_group->usr_rc_routes[j].cqb) == cqb) {
+        if (READ_ONCE(sched_group->usr_rc_routes[j].cqb) == cqb) {
             smp_store_release(&sched_group->usr_rc_routes[j].valid, false);
-            RCU_INIT_POINTER(sched_group->usr_rc_routes[j].cqb, NULL);
-            sched_group->usr_rc_routes[j].uidx = MLX5_IB_DEFAULT_UIDX;
+            WRITE_ONCE(sched_group->usr_rc_routes[j].cqb, NULL);
+            WRITE_ONCE(sched_group->usr_rc_routes[j].uidx,
+                       MLX5_IB_DEFAULT_UIDX);
         }
     }
+    cqb->retire_epoch =
+        atomic64_inc_return(&sched_group->route_epoch);
 
     while (sched_group->cqb_cnt &&
            !sched_group->cqb_arr[sched_group->cqb_cnt - 1])
         sched_group->cqb_cnt--;
-    mutex_unlock(&sched_group->cq_lock);
 
-    mutex_lock(&sched_group->cq_lock);
     cqb->next = sched_group->retired_cqbs;
     sched_group->retired_cqbs = cqb;
     mutex_unlock(&sched_group->cq_lock);
@@ -545,8 +560,8 @@ int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
         return -ENOENT;
     }
 
-    sched_group->usr_rc_routes[usr_rc_cnt].uidx = uidx;
-    rcu_assign_pointer(sched_group->usr_rc_routes[usr_rc_cnt].cqb, cqb);
+    WRITE_ONCE(sched_group->usr_rc_routes[usr_rc_cnt].uidx, uidx);
+    WRITE_ONCE(sched_group->usr_rc_routes[usr_rc_cnt].cqb, cqb);
     smp_store_release(&sched_group->usr_rc_routes[usr_rc_cnt].valid, true);
     mutex_unlock(&sched_group->cq_lock);
 
@@ -565,8 +580,8 @@ void mlx5_ib_unbind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
     mutex_lock(&sched_group->cq_lock);
     route = &sched_group->usr_rc_routes[usr_rc_cnt];
     smp_store_release(&route->valid, false);
-    RCU_INIT_POINTER(route->cqb, NULL);
-    route->uidx = MLX5_IB_DEFAULT_UIDX;
+    WRITE_ONCE(route->cqb, NULL);
+    WRITE_ONCE(route->uidx, MLX5_IB_DEFAULT_UIDX);
     mutex_unlock(&sched_group->cq_lock);
 }
 
@@ -2285,7 +2300,6 @@ int scheduler_polling(void *sched_data)
                         kstats->ready_max = ready_cnt;
                 }
 
-                rcu_read_lock();
                 while (sent < batch) {
                     uint32_t usr_rc_cnt;
                     u64 publish_token;
@@ -2328,15 +2342,19 @@ int scheduler_polling(void *sched_data)
                         break;
                     }
                     route = &sched_group.usr_rc_routes[usr_rc_cnt];
-                    cqb = rcu_dereference(route->cqb);
-                    if (unlikely(!smp_load_acquire(&route->valid) ||
-                                 !cqb ||
-                                 route->uidx == MLX5_IB_DEFAULT_UIDX)) {
+                    if (unlikely(!smp_load_acquire(&route->valid))) {
                         pr_warn_ratelimited("inactive hollow RC id %u for srmc %d\n",
                                             usr_rc_cnt, srmc->srmc_idx);
                         break;
                     }
-                    uidx = route->uidx;
+                    cqb = READ_ONCE(route->cqb);
+                    uidx = READ_ONCE(route->uidx);
+                    if (unlikely(!cqb ||
+                                 uidx == MLX5_IB_DEFAULT_UIDX)) {
+                        pr_warn_ratelimited("inactive hollow RC id %u for srmc %d\n",
+                                            usr_rc_cnt, srmc->srmc_idx);
+                        break;
+                    }
 
                     idx = free_cqe_idx[--free_cqe_cnt];
                     pre_srmc->wqe_infos[idx].usr_rc_cnt = usr_rc_cnt;
@@ -2355,7 +2373,6 @@ int scheduler_polling(void *sched_data)
                     last_ctrl = ctrl;
                     sent++;
                 }
-                rcu_read_unlock();
 
                 if (!sent)
                     continue;
@@ -2434,6 +2451,8 @@ int scheduler_polling(void *sched_data)
             // pre_srmc->cur_cqe++;
         }
         mlx5_ib_srm_report_stats(sched, &srm_stats);
+        smp_store_release(&sched->quiescent_epoch,
+                          atomic64_read(&sched_group.route_epoch));
     }
 out:
     DEBUG_LOG("scheduler thread %d exit\n", id);
@@ -2482,6 +2501,7 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
     sched_group->sqb_cnt = 0;
     sched_group->cqb_cnt = 0;
     sched_group->retired_cqbs = NULL;
+    atomic64_set(&sched_group->route_epoch, 0);
     INIT_DELAYED_WORK(&sched_group->cqb_reclaim_work,
                       mlx5_ib_reclaim_retired_cqbs);
     sched_group->xrc_bf_cnt = 0;
@@ -2524,6 +2544,7 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
         sched_group->scheds[i].srmc_cnt = 0;
         sched_group->scheds[i].ready_srmc_cnt = 0;
         sched_group->scheds[i].init_error = 0;
+        sched_group->scheds[i].quiescent_epoch = 0;
         init_waitqueue_head(&sched_group->scheds[i].init_wait);
         sched_group->scheds[i].task = kthread_create(scheduler_polling, (void *)sched_id, thread_info);
         mutex_init(&sched_group->scheds[i].srmc_lock);

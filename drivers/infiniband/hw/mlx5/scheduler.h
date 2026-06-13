@@ -99,6 +99,7 @@ struct mlx5_ib_cqbuf
     int cur_put;
     int op_own;
     spinlock_t lock;
+    u64 retire_epoch;
     struct mlx5_ib_cqbuf *next; // not loop
 } CACHELINE_ALIGNED;
 struct mlx5_ib_sqbuf
@@ -210,12 +211,11 @@ struct mlx5_ib_sched
     int init_error;
     wait_queue_head_t init_wait;
     int id;
-
-    
+    u64 quiescent_epoch;
 };
 
 struct mlx5_ib_usr_rc_route {
-    struct mlx5_ib_cqbuf __rcu *cqb;
+    struct mlx5_ib_cqbuf *cqb;
     u32 uidx;
     bool valid;
 };
@@ -265,6 +265,7 @@ struct mlx5_ib_sched_group
 	struct mlx5_ib_cqbuf *cqb_arr[NUM_SQB];
 	struct mlx5_ib_cqbuf *retired_cqbs;
 	struct delayed_work cqb_reclaim_work;
+	atomic64_t route_epoch;
 	struct mlx5_ib_usr_rc_route usr_rc_routes[NUM_SQB];
 	struct xrc_bf_entry *xrc_bf_arr[MAX_USER_THREADS_NUM*NUM_SCHED*NUM_LEVEL*MAX_USER_XRC_QP_PER_SRM];
 
