@@ -48,6 +48,23 @@ struct ib_cq *shared_cq[NUM_SCHED][CQ_NUM]; // 每个内核线程一个cq,大小
 uint16_t tot_xrc_sended_wqes[MAX_USER_THREADS_NUM][NUM_SCHED*NUM_LEVEL][MAX_USER_XRC_QP_PER_SRM],
             cur_xrc_sended_wqes[MAX_USER_THREADS_NUM][NUM_SCHED][MAX_USER_XRC_QP_PER_SRM]; // 统计0~4KB，每个用户线程每个xrc qp发送了多少wqe
 uint64_t lst_xrc_bytes[MAX_USER_THREADS_NUM][NUM_SCHED][MAX_USER_XRC_QP_PER_SRM]; // 0~4KB,记录上次统计时每个xrc qp发送的总字节数
+
+static bool srm_stats_enable;
+module_param_named(srm_stats_enable, srm_stats_enable, bool, 0644);
+MODULE_PARM_DESC(srm_stats_enable,
+                 "Enable one-second hollow RC scheduler statistics");
+
+static void mlx5_ib_srm_cb_init_waitqueue(struct srm_cb *cb)
+{
+    init_waitqueue_head(&cb->sem);
+    WRITE_ONCE(cb->sem_initialized, true);
+}
+
+static void mlx5_ib_srm_cb_wake_all(struct srm_cb *cb)
+{
+    if (cb && READ_ONCE(cb->sem_initialized))
+        wake_up_all(&cb->sem);
+}
 extern struct mlx5_uars_page *mlx5_get_uars_page_by_index(struct mlx5_core_dev *mdev,
                                                    int uar_index);
 
@@ -337,52 +354,6 @@ err:
     return -ENOMEM;
 
 }
-int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int cqn)
-{
-    DEBUG_LOG("in mlx5_ib_map_cq_ubuf\n");
-    struct mm_struct *mm = current->mm;
-    int ret;
-    int i;
-    struct mlx5_ib_cqbuf *uq;
-    size_t npages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    struct page **pages = kmalloc_array(npages, sizeof(struct page *), GFP_KERNEL);
-    if (!pages)
-        return -ENOMEM;
-    ret = get_user_pages(virt_addr, npages, FOLL_WRITE, pages, NULL);
-    if (ret < npages)
-    {
-        // 如果获取的页面数少于预期，释放资源并返回错误
-        for (i = 0; i < ret; i++)
-            put_page(pages[i]);
-        kfree(pages);
-        return -EFAULT;
-    }
-    mutex_lock(&sched_group->cq_lock);
-    uq = kzalloc(sizeof(struct mlx5_ib_cqbuf), GFP_KERNEL);
-    uq->cqn = cqn;
-    uq->cq_size = size;
-    uq->buf = vmap(pages, npages, VM_MAP, PAGE_KERNEL);
-    uq->pages = pages;
-    uq->cqe_sz = 64;
-    mutex_init(&uq->lock);
-    if (!uq->buf)
-    {
-        kfree(uq);
-        for (i = 0; i < ret; i++)
-            put_page(pages[i]);
-        kfree(pages);
-        pr_err("failed to map cf buffer\n");
-        mutex_unlock(&sched_group->cq_lock);
-        return -ENOMEM;
-    }
-    sched_group->cqb_arr[sched_group->cqb_cnt] = uq;
-    sched_group->cqb_cnt++;
-
-    mutex_unlock(&sched_group->cq_lock);
-
-    return 0;
-}
-
 static struct mlx5_ib_cqbuf *
 mlx5_ib_find_cqb_by_cqn_locked(struct mlx5_ib_sched_group *sched_group, int cqn)
 {
@@ -396,6 +367,142 @@ mlx5_ib_find_cqb_by_cqn_locked(struct mlx5_ib_sched_group *sched_group, int cqn)
     }
 
     return NULL;
+}
+
+int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group,
+                        unsigned long virt_addr, size_t size, int cqn)
+{
+    DEBUG_LOG("in mlx5_ib_map_cq_ubuf\n");
+    int ret;
+    int i;
+    int slot = -1;
+    struct mlx5_ib_cqbuf *uq;
+    size_t npages;
+    struct page **pages;
+
+    if (!sched_group || !virt_addr || !size)
+        return -EINVAL;
+
+    mutex_lock(&sched_group->cq_lock);
+    if (mlx5_ib_find_cqb_by_cqn_locked(sched_group, cqn)) {
+        mutex_unlock(&sched_group->cq_lock);
+        pr_warn_ratelimited("CQ buffer CQN %d is already mapped\n", cqn);
+        return -EEXIST;
+    }
+    mutex_unlock(&sched_group->cq_lock);
+
+    npages = DIV_ROUND_UP(size, PAGE_SIZE);
+    pages = kmalloc_array(npages, sizeof(struct page *), GFP_KERNEL);
+    if (!pages)
+        return -ENOMEM;
+    ret = get_user_pages(virt_addr, npages, FOLL_WRITE, pages, NULL);
+    if (ret < npages)
+    {
+        // 如果获取的页面数少于预期，释放资源并返回错误
+        for (i = 0; i < ret; i++)
+            put_page(pages[i]);
+        kfree(pages);
+        return -EFAULT;
+    }
+
+    mutex_lock(&sched_group->cq_lock);
+    if (mlx5_ib_find_cqb_by_cqn_locked(sched_group, cqn)) {
+        ret = -EEXIST;
+        pr_warn_ratelimited("concurrent CQ buffer mapping for CQN %d\n", cqn);
+        goto err_unlock_pages;
+    }
+
+    for (i = 0; i < sched_group->cqb_cnt; i++) {
+        if (!sched_group->cqb_arr[i]) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        if (sched_group->cqb_cnt >= ARRAY_SIZE(sched_group->cqb_arr)) {
+            ret = -ENOSPC;
+            goto err_unlock_pages;
+        }
+        slot = sched_group->cqb_cnt++;
+    }
+
+    uq = kzalloc(sizeof(struct mlx5_ib_cqbuf), GFP_KERNEL);
+    if (!uq) {
+        ret = -ENOMEM;
+        goto err_shrink_slot;
+    }
+    uq->cqn = cqn;
+    uq->cq_size = size;
+    uq->buf = vmap(pages, npages, VM_MAP, PAGE_KERNEL);
+    uq->pages = pages;
+    uq->cqe_sz = 64;
+    mutex_init(&uq->lock);
+    if (!uq->buf)
+    {
+        kfree(uq);
+        ret = -ENOMEM;
+        pr_err("failed to map CQ buffer for CQN %d\n", cqn);
+        goto err_shrink_slot;
+    }
+    sched_group->cqb_arr[slot] = uq;
+
+    mutex_unlock(&sched_group->cq_lock);
+
+    return 0;
+
+err_shrink_slot:
+    if (slot == sched_group->cqb_cnt - 1)
+        sched_group->cqb_cnt--;
+err_unlock_pages:
+    mutex_unlock(&sched_group->cq_lock);
+    put_user_pages(pages, npages);
+    kfree(pages);
+    return ret;
+}
+
+int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn)
+{
+    struct mlx5_ib_cqbuf *cqb = NULL;
+    int npages;
+    int i;
+    int j;
+
+    if (!sched_group)
+        return -EINVAL;
+
+    mutex_lock(&sched_group->cq_lock);
+    for (i = 0; i < sched_group->cqb_cnt; i++) {
+        if (sched_group->cqb_arr[i] &&
+            sched_group->cqb_arr[i]->cqn == cqn) {
+            cqb = sched_group->cqb_arr[i];
+            sched_group->cqb_arr[i] = NULL;
+            break;
+        }
+    }
+
+    if (!cqb) {
+        mutex_unlock(&sched_group->cq_lock);
+        return -ENOENT;
+    }
+
+    for (j = 0; j < ARRAY_SIZE(sched_group->usr_rc_cqb_arr); j++) {
+        if (sched_group->usr_rc_cqb_arr[j] == cqb) {
+            sched_group->usr_rc_cqb_arr[j] = NULL;
+            sched_group->usr_rc_uidx_arr[j] = MLX5_IB_DEFAULT_UIDX;
+        }
+    }
+
+    while (sched_group->cqb_cnt &&
+           !sched_group->cqb_arr[sched_group->cqb_cnt - 1])
+        sched_group->cqb_cnt--;
+    mutex_unlock(&sched_group->cq_lock);
+
+    vunmap(cqb->buf);
+    npages = DIV_ROUND_UP(cqb->cq_size, PAGE_SIZE);
+    put_user_pages(cqb->pages, npages);
+    kfree(cqb->pages);
+    kfree(cqb);
+    return 0;
 }
 
 int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
@@ -442,8 +549,6 @@ struct mlx5_ib_sqbuf *mlx5_ib_find_sqbuf_by_qpn(struct mlx5_ib_sched_group *sche
 int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
 {
     struct mlx5_ib_sqbuf *sqb;
-    struct mlx5_ib_cqbuf *cqb;
-    int cqn = -1;
     int npages;
     int i;
     mutex_lock(&sched_group->sq_lock);
@@ -458,8 +563,6 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
         if (sqb->qpn == qpn)
         {
             sched_group->sqb_arr[i] = NULL;
-            if (sqb->cqb)
-                cqn = sqb->cqb->cqn;
             vunmap(sqb->buf);
             npages = (sqb->sq_size + PAGE_SIZE - 1) / PAGE_SIZE;
             put_user_pages(sqb->pages, npages);
@@ -471,42 +574,6 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
     }
 
     mutex_unlock(&sched_group->sq_lock);
-
-    if (cqn < 0)
-        return 0;
-
-    // Free cq
-    mutex_lock(&sched_group->cq_lock);
-
-    for (i = 0; i < sched_group->cqb_cnt; i++)
-    {
-        cqb = sched_group->cqb_arr[i];
-
-        if (cqb == NULL)
-            continue;
-        if (cqb->cqn == cqn)
-        {
-            int j;
-
-            for (j = 0; j < ARRAY_SIZE(sched_group->usr_rc_cqb_arr); j++) {
-                if (sched_group->usr_rc_cqb_arr[j] == cqb) {
-                    sched_group->usr_rc_cqb_arr[j] = NULL;
-                    sched_group->usr_rc_uidx_arr[j] =
-                        MLX5_IB_DEFAULT_UIDX;
-                }
-            }
-
-            sched_group->cqb_arr[i] = NULL;
-            vunmap(cqb->buf);
-            npages = (cqb->cq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-            put_user_pages(cqb->pages, npages);
-            kfree(cqb->pages);
-            kfree(cqb);
-
-            break;
-        }
-    }
-    mutex_unlock(&sched_group->cq_lock);
     return 0;
 }
 static void print_wqe_info(void *seg, size_t size)
@@ -909,6 +976,124 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
 }
 
 const int num_kqps = 32;
+
+struct mlx5_ib_srm_kqp_stats {
+    u64 scans;
+    u64 active_scans;
+    u64 ready_sum;
+    u64 ready_max;
+    u64 db_calls;
+    u64 db_wqes;
+    u64 db_max;
+    u64 publish_gaps;
+    u64 credit_stalls;
+    u64 free_cqe_stalls;
+};
+
+struct mlx5_ib_srm_sched_stats {
+    struct mlx5_ib_srm_kqp_stats kqp[32];
+    u64 cq_poll_calls;
+    u64 cq_poll_empty;
+    u64 cqes;
+    u64 cq_poll_ns;
+    unsigned long last_report;
+};
+
+static inline void mlx5_ib_srm_record_cq_poll(
+    struct mlx5_ib_srm_sched_stats *stats, int ret, u64 start_ns)
+{
+    if (!srm_stats_enable)
+        return;
+
+    stats->cq_poll_calls++;
+    stats->cq_poll_ns += ktime_get_ns() - start_ns;
+    if (ret > 0)
+        stats->cqes += ret;
+    else
+        stats->cq_poll_empty++;
+}
+
+static void mlx5_ib_srm_report_stats(
+    struct mlx5_ib_sched *sched,
+    struct mlx5_ib_srm_sched_stats *stats)
+{
+    u64 scans = 0;
+    u64 active_scans = 0;
+    u64 ready_sum = 0;
+    u64 db_calls = 0;
+    u64 db_wqes = 0;
+    u64 gaps = 0;
+    u64 credit_stalls = 0;
+    u64 free_stalls = 0;
+    int i;
+
+    if (!srm_stats_enable ||
+        time_before(jiffies, stats->last_report + HZ))
+        return;
+
+    for (i = 0; i < num_kqps; i++) {
+        struct mlx5_ib_srm_kqp_stats *k = &stats->kqp[i];
+
+        scans += k->scans;
+        active_scans += k->active_scans;
+        ready_sum += k->ready_sum;
+        db_calls += k->db_calls;
+        db_wqes += k->db_wqes;
+        gaps += k->publish_gaps;
+        credit_stalls += k->credit_stalls;
+        free_stalls += k->free_cqe_stalls;
+    }
+
+    pr_info("SRM_KERN_STATS sched=%d scans=%llu active_pct=%llu "
+            "ready_avg_x100=%llu db_calls=%llu db_wqes=%llu "
+            "db_avg_x100=%llu cq_polls=%llu cq_empty_pct=%llu "
+            "cqes=%llu cq_poll_avg_ns=%llu gaps=%llu credit_stalls=%llu "
+            "free_stalls=%llu\n",
+            sched->id, scans,
+            scans ? div64_u64(active_scans * 100, scans) : 0,
+            active_scans ? div64_u64(ready_sum * 100, active_scans) : 0,
+            db_calls, db_wqes,
+            db_calls ? div64_u64(db_wqes * 100, db_calls) : 0,
+            stats->cq_poll_calls,
+            stats->cq_poll_calls
+                ? div64_u64(stats->cq_poll_empty * 100,
+                            stats->cq_poll_calls)
+                : 0,
+            stats->cqes,
+            stats->cq_poll_calls
+                ? div64_u64(stats->cq_poll_ns, stats->cq_poll_calls)
+                : 0,
+            gaps, credit_stalls, free_stalls);
+
+    for (i = 0; i < num_kqps; i++) {
+        struct mlx5_ib_srm_kqp_stats *k = &stats->kqp[i];
+        struct mlx5_ib_srmc *srmc;
+
+        if (!k->active_scans && !k->db_calls && !k->publish_gaps)
+            continue;
+        srmc = mlx5_ib_sched_find_srmc_idx(sched, i);
+        pr_info("SRM_KQP_STATS sched=%d kqp=%d users=%d scans=%llu "
+                "active=%llu ready_avg_x100=%llu ready_max=%llu "
+                "db_calls=%llu db_wqes=%llu db_avg_x100=%llu db_max=%llu "
+                "gaps=%llu credit_stalls=%llu free_stalls=%llu\n",
+                sched->id, i, srmc ? srmc->ini_cb.refcnt : 0,
+                k->scans, k->active_scans,
+                k->active_scans
+                    ? div64_u64(k->ready_sum * 100, k->active_scans)
+                    : 0,
+                k->ready_max, k->db_calls, k->db_wqes,
+                k->db_calls ? div64_u64(k->db_wqes * 100, k->db_calls) : 0,
+                k->db_max, k->publish_gaps, k->credit_stalls,
+                k->free_cqe_stalls);
+    }
+
+    memset(stats->kqp, 0, sizeof(stats->kqp));
+    stats->cq_poll_calls = 0;
+    stats->cq_poll_empty = 0;
+    stats->cqes = 0;
+    stats->cq_poll_ns = 0;
+    stats->last_report = jiffies;
+}
 
 static __always_inline int poll_srmc_inline(
     struct mlx5_ib_srmc **pre_srmcs,
@@ -1858,6 +2043,9 @@ int scheduler_polling(void *sched_data)
 
     uint32_t real_num_threads = 17; 
     struct mlx5_qp_ctrl_pool *sq_ctrl_pool = NULL;
+    struct mlx5_ib_srm_sched_stats srm_stats = {
+        .last_report = jiffies,
+    };
 
     while (!kthread_should_stop())
     {
@@ -1888,9 +2076,14 @@ int scheduler_polling(void *sched_data)
                 cnt++;
                 msleep(0);
             }
-            ret = poll_srmc_inline(pre_srmcs, &polling_tail, &polling_head,
-                                   in_queue, wc, cqe, free_cqe_idx,
-                                   &free_cqe_cnt, id);
+            {
+                u64 poll_start = srm_stats_enable ? ktime_get_ns() : 0;
+
+                ret = poll_srmc_inline(pre_srmcs, &polling_tail,
+                                       &polling_head, in_queue, wc, cqe,
+                                       free_cqe_idx, &free_cqe_cnt, id);
+                mlx5_ib_srm_record_cq_poll(&srm_stats, ret, poll_start);
+            }
             if (ret > 0)
                 user_tot_cqes += ret;
 
@@ -1908,14 +2101,21 @@ int scheduler_polling(void *sched_data)
             if (!srmc || !srmc->ini_cb.qp)
                 continue;
             pub = mlx5_ib_srmc_help_publish(srmc, ctrl_page);
+            if (srm_stats_enable)
+                srm_stats.kqp[i].scans++;
 
             stuck_cnt = 0;
             inflight = kernel_tot_db - user_tot_cqes;
 
             while (inflight >= LIMIT_BATCHING && !kthread_should_stop()) {
-                ret = poll_srmc_inline(pre_srmcs, &polling_tail, &polling_head,
-                                       in_queue, wc, cqe, free_cqe_idx,
-                                       &free_cqe_cnt, id);
+                u64 poll_start = srm_stats_enable ? ktime_get_ns() : 0;
+
+                if (srm_stats_enable)
+                    srm_stats.kqp[i].credit_stalls++;
+                ret = poll_srmc_inline(pre_srmcs, &polling_tail,
+                                       &polling_head, in_queue, wc, cqe,
+                                       free_cqe_idx, &free_cqe_cnt, id);
+                mlx5_ib_srm_record_cq_poll(&srm_stats, ret, poll_start);
                 if (ret > 0) {
                     user_tot_cqes += ret;
                     stuck_cnt = 0;
@@ -1978,6 +2178,8 @@ int scheduler_polling(void *sched_data)
                     if (srmc->publish_gap_slot != pub) {
                         srmc->publish_gap_slot = pub;
                         srmc->publish_gap_jiffies = jiffies;
+                        if (srm_stats_enable)
+                            srm_stats.kqp[i].publish_gaps++;
                     } else if (time_after(
                                    jiffies,
                                    srmc->publish_gap_jiffies + HZ) &&
@@ -2018,14 +2220,19 @@ int scheduler_polling(void *sched_data)
             srmc->publish_gap_slot = U64_MAX;
 
             inflight = kernel_tot_db - user_tot_cqes;
-            if (inflight >= LIMIT_BATCHING)
+            if (inflight >= LIMIT_BATCHING) {
+                if (srm_stats_enable)
+                    srm_stats.kqp[i].credit_stalls++;
                 continue;
+            }
             credit = LIMIT_BATCHING - inflight;
             if (!credit)
                 continue;
 
             if (free_cqe_cnt <= 0)
             {
+                if (srm_stats_enable)
+                    srm_stats.kqp[i].free_cqe_stalls++;
                 pr_err("free_cqe_cnt <= 0, cq exceed\n");
                 goto err;
             }
@@ -2047,6 +2254,16 @@ int scheduler_polling(void *sched_data)
                                   min_t(u64, free_cqe_cnt, credit));
                 int sent = 0;
                 struct mlx5_wqe_ctrl_seg *last_ctrl = NULL;
+
+                if (srm_stats_enable) {
+                    struct mlx5_ib_srm_kqp_stats *kstats =
+                        &srm_stats.kqp[i];
+
+                    kstats->active_scans++;
+                    kstats->ready_sum += ready_cnt;
+                    if (ready_cnt > kstats->ready_max)
+                        kstats->ready_max = ready_cnt;
+                }
 
                 while (sent < batch) {
                     uint32_t usr_rc_cnt;
@@ -2113,6 +2330,15 @@ int scheduler_polling(void *sched_data)
                 mlx5r_ring_db(srmc->ini_cb.qp, sent, last_ctrl);
                 pre_srmc->last_db_jiffies = jiffies;
                 kernel_tot_db += sent;
+                if (srm_stats_enable) {
+                    struct mlx5_ib_srm_kqp_stats *kstats =
+                        &srm_stats.kqp[i];
+
+                    kstats->db_calls++;
+                    kstats->db_wqes += sent;
+                    if (sent > kstats->db_max)
+                        kstats->db_max = sent;
+                }
 
                 if (!in_queue[cq_idx])
                 {
@@ -2174,6 +2400,7 @@ int scheduler_polling(void *sched_data)
             }
             // pre_srmc->cur_cqe++;
         }
+        mlx5_ib_srm_report_stats(sched, &srm_stats);
     }
 out:
     DEBUG_LOG("scheduler thread %d exit\n", id);
@@ -2574,6 +2801,7 @@ int mlx5_ib_server_init(struct mlx5_ib_server *server)
     atomic_set(&server->conn_tasks, 0);
     init_waitqueue_head(&server->conn_wait);
     WRITE_ONCE(server->stopping, false);
+    mlx5_ib_srm_cb_init_waitqueue(&server->server_cb);
     server->task = kthread_run(mlx5_sched_run_server, &server->server_cb, "server thread");
     if (IS_ERR(server->task))
     {
@@ -2592,7 +2820,7 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
 
     WRITE_ONCE(server->stopping, true);
     if (server->task && !IS_ERR(server->task)) {
-        wake_up_all(&server->server_cb.sem);
+        mlx5_ib_srm_cb_wake_all(&server->server_cb);
         kthread_stop(server->task);
         server->task = NULL;
     } else {
@@ -2607,7 +2835,7 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
             if (srmc) {
                 srmc->tgt_cb.state = ERROR;
                 srmc->tgt_cb.cm_error = -ESHUTDOWN;
-                wake_up_all(&srmc->tgt_cb.sem);
+                mlx5_ib_srm_cb_wake_all(&srmc->tgt_cb);
             }
             mutex_unlock(&sched->srmc_lock);
         }
@@ -2619,6 +2847,8 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
     if (!waited && atomic_read(&server->conn_tasks))
         pr_warn("timed out waiting for %d SRM connection tasks\n",
                 atomic_read(&server->conn_tasks));
+    wait_event(server->conn_wait,
+               atomic_read(&server->conn_tasks) == 0);
 
     /*
      * Never hold srmc_lock while destroying CM resources. CM teardown can
@@ -2647,6 +2877,7 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
             rdma_destroy_id(cb->cm_id);
             cb->cm_id = NULL;
             cb->refcnt = 0;
+            WRITE_ONCE(cb->sem_initialized, false);
         }
     }
 
@@ -2654,6 +2885,7 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
         rdma_destroy_id(server->server_cb.cm_id);
         server->server_cb.cm_id = NULL;
     }
+    WRITE_ONCE(server->server_cb.sem_initialized, false);
     pr_info("mlx5_ib_server_exit success\n");
 }
 void mlx5_ib_gid2ip(char addr[4], union ib_gid *gid)
@@ -2968,6 +3200,7 @@ int srm_create_connection(struct server_conn_info *conn_info)
     }
 
     // srmc->tgt_cb.refcnt == 0
+    mlx5_ib_srm_cb_init_waitqueue(&srmc->tgt_cb);
     srmc->tgt_cb.refcnt = 1;
     srmc->tgt_cb.cm_id = cm_id;
     srmc->tgt_cb.state = CONNECT_REQUEST;
@@ -2975,7 +3208,6 @@ int srm_create_connection(struct server_conn_info *conn_info)
     cb = &srmc->tgt_cb;
 
     cb->txdepth = server_cb->txdepth;
-    init_waitqueue_head(&cb->sem);
     cb->server = 1;
 
     // create pd
@@ -3100,14 +3332,14 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
                    ret);
             cb->cm_error = ret;
             cb->state = ERROR;
-            wake_up_interruptible(&cb->sem);
+            mlx5_ib_srm_cb_wake_all(cb);
         }
         break;
 
     case RDMA_CM_EVENT_ROUTE_RESOLVED:
         cb->cm_error = 0;
         cb->state = ROUTE_RESOLVED;
-        wake_up_interruptible(&cb->sem);
+        mlx5_ib_srm_cb_wake_all(cb);
         break;
 
     case RDMA_CM_EVENT_CONNECT_REQUEST:
@@ -3143,7 +3375,7 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
         printk("ESTABLISHED\n");
         cb->cm_error = 0;
         cb->state = CONNECTED;
-        wake_up_interruptible(&cb->sem);
+        mlx5_ib_srm_cb_wake_all(cb);
         break;
 
     case RDMA_CM_EVENT_ADDR_ERROR:
@@ -3155,26 +3387,26 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
                event->status, rdma_reject_msg(cma_id, event->status));
         cb->cm_error = event->status ? event->status : -ECONNREFUSED;
         cb->state = ERROR;
-        wake_up_interruptible(&cb->sem);
+        mlx5_ib_srm_cb_wake_all(cb);
         break;
 
     case RDMA_CM_EVENT_DISCONNECTED:
         printk(KERN_ERR "DISCONNECT EVENT...\n");
         cb->cm_error = -ECONNRESET;
         cb->state = ERROR;
-        wake_up_interruptible(&cb->sem);
+        mlx5_ib_srm_cb_wake_all(cb);
         break;
 
     case RDMA_CM_EVENT_DEVICE_REMOVAL:
         printk(KERN_ERR "cma detected device removal!!!!\n");
         cb->cm_error = -ENODEV;
         cb->state = ERROR;
-        wake_up_interruptible(&cb->sem);
+        mlx5_ib_srm_cb_wake_all(cb);
         break;
 
     default:
         printk(KERN_ERR "oof bad type!\n");
-        wake_up_interruptible(&cb->sem);
+        mlx5_ib_srm_cb_wake_all(cb);
         break;
     }
     return 0;
@@ -3300,7 +3532,7 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
     mlx5_ib_gid2ip(cb->addr, dgid);
     DEBUG_LOG("Real IPv4 address: %u.%u.%u.%u\n", cb->addr[0], cb->addr[1], cb->addr[2], cb->addr[3]);
     cb->server = 0;
-    init_waitqueue_head(&cb->sem);
+    mlx5_ib_srm_cb_init_waitqueue(cb);
     cb->txdepth = sq_depth;
     cb->pd = NULL;
 
@@ -3308,6 +3540,7 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
     if (IS_ERR(cb->cm_id))
     {
         ret = PTR_ERR(cb->cm_id);
+        cb->cm_id = NULL;
         printk(KERN_ERR "rdma_create_id error %d\n", ret);
         goto out;
     }
@@ -3499,13 +3732,13 @@ int mlx5_sched_run_server(struct srm_cb *cb)
         goto out;
     }
     cb->server = 1;
-    init_waitqueue_head(&cb->sem);
     cb->txdepth = SQ_DEPTH;
 
     cb->cm_id = rdma_create_id(&init_net, srm_cma_event_handler, cb, RDMA_PS_TCP, IB_QPT_XRC_TGT);
     if (IS_ERR(cb->cm_id))
     {
         ret = PTR_ERR(cb->cm_id);
+        cb->cm_id = NULL;
         printk(KERN_ERR "rdma_create_id error %d\n", ret);
         goto out;
     }

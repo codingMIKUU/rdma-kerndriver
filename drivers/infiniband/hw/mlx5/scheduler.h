@@ -42,7 +42,7 @@ static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 static const size_t QUEUE_LIMIT = 256 * 1024;
 static const size_t SCHED_SIZE_LIMIT = 8 * 1024;
 
-static u64 LIMIT_BATCHING = 1000;
+static u64 LIMIT_BATCHING = 2048;
 
 #define DEBUG_LOG \
     if (debug)    \
@@ -134,6 +134,7 @@ struct srm_cb
     enum test_state state;
     int cm_error;
     wait_queue_head_t sem;
+    bool sem_initialized;
     int txdepth;
     struct ib_pd *pd;
     struct ib_xrcd *xrcd;
@@ -271,6 +272,7 @@ enum srmc_create_flag
 
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx);
 int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int cqn);
+int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn);
 int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
 			   u32 usr_rc_cnt, int cqn, u32 uidx);
 struct mlx5_ib_sqbuf *mlx5_ib_find_sqbuf_by_qpn(struct mlx5_ib_sched_group *sched_group, int qpn);

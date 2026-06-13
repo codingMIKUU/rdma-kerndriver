@@ -1202,6 +1202,7 @@ int mlx5_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 	int cqe_size;
 	int eqn;
 	int err;
+	bool srm_cq_mapped = false;
 
 	if (entries < 0 ||
 	    (entries > (1 << MLX5_CAP_GEN(dev->mdev, log_max_cq_sz))))
@@ -1280,6 +1281,7 @@ int mlx5_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 						  cq->mcq.cqn);
 			if (err)
 				goto err_cmd;
+			srm_cq_mapped = true;
 		}
 	if (udata)
 		cq->mcq.tasklet_ctx.comp = mlx5_ib_cq_comp;
@@ -1300,6 +1302,8 @@ int mlx5_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 	return 0;
 
 err_cmd:
+	if (srm_cq_mapped)
+		mlx5_ib_unmap_cq_ubuf(&sched_group, cq->mcq.cqn);
 	mlx5_core_destroy_cq(dev->mdev, &cq->mcq);
 
 err_cqb:
@@ -1321,10 +1325,15 @@ int mlx5_ib_destroy_cq(struct ib_cq *cq, struct ib_udata *udata)
 	if (ret)
 		return ret;
 
-	if (udata)
+	if (udata) {
+		ret = mlx5_ib_unmap_cq_ubuf(&sched_group, mcq->mcq.cqn);
+		if (ret && ret != -ENOENT)
+			mlx5_ib_warn(dev, "failed to unmap CQ buffer 0x%x: %d\n",
+				    mcq->mcq.cqn, ret);
 		destroy_cq_user(mcq, udata);
-	else
+	} else {
 		destroy_cq_kernel(dev, mcq);
+	}
 	return 0;
 }
 

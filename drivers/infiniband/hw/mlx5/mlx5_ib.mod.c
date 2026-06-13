@@ -118,6 +118,7 @@ __used __section(__versions) = {
 	{ 0x3c12dfe, "cancel_work_sync" },
 	{ 0x2f07cc2, "_uverbs_alloc" },
 	{ 0x8edd1510, "netdev_master_upper_dev_get" },
+	{ 0xb43f9365, "ktime_get" },
 	{ 0x837b7b09, "__dynamic_pr_debug" },
 	{ 0xa10393b6, "dma_direct_sync_single_for_cpu" },
 	{ 0x4ad05929, "roce_del_all_netdev_gids" },
@@ -135,6 +136,7 @@ __used __section(__versions) = {
 	{ 0x2f7a9799, "rdma_destroy_id" },
 	{ 0x14dfd31, "mlx5_comp_eqn_get" },
 	{ 0xf1d5b27b, "mlx5_eq_notifier_unregister" },
+	{ 0xededc3c3, "param_ops_bool" },
 	{ 0xc6f46339, "init_timer_key" },
 	{ 0xbd34c34e, "ib_free_cq" },
 	{ 0xf026c585, "sock_create_kern" },
@@ -480,4 +482,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "5ED82A37B5E553B2AF77C0C");
+MODULE_INFO(srcversion, "B8B8C6E1FD48531B1AD73E0");
