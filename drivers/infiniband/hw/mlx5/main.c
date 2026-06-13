@@ -2376,16 +2376,10 @@ static void mlx5_ib_mmap_free(struct rdma_user_mmap_entry *entry)
 		kfree(ctrl);
 		break;
 	}
-	case MLX5_IB_MMAP_TYPE_QP_READY: {
-		struct mlx5_qp_ready_mmap_entry *ready =
-			container_of(mentry, struct mlx5_qp_ready_mmap_entry, mentry);
-		kfree(ready);
-		break;
-	}
-	case MLX5_IB_MMAP_TYPE_QP_USR_RC: {
-		struct mlx5_qp_usr_rc_mmap_entry *usr_rc =
-			container_of(mentry, struct mlx5_qp_usr_rc_mmap_entry, mentry);
-		kfree(usr_rc);
+	case MLX5_IB_MMAP_TYPE_QP_PUBLISH: {
+		struct mlx5_qp_publish_mmap_entry *publish =
+			container_of(mentry, struct mlx5_qp_publish_mmap_entry, mentry);
+		kfree(publish);
 		break;
 	}
 	default:
@@ -2572,17 +2566,11 @@ static int mlx5_ib_mmap_offset(struct mlx5_ib_dev *dev,
 		rdma_user_mmap_entry_put(&mentry->rdma_entry);
 		return ret;
 	}
-	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_QP_READY) {
-		struct mlx5_qp_ready_mmap_entry *ready =
-			container_of(mentry, struct mlx5_qp_ready_mmap_entry, mentry);
-		ret = mlx5_ib_mmap_qp_pages(vma, ready->pages, ready->npages);
-		rdma_user_mmap_entry_put(&mentry->rdma_entry);
-		return ret;
-	}
-	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_QP_USR_RC) {
-		struct mlx5_qp_usr_rc_mmap_entry *usr_rc =
-			container_of(mentry, struct mlx5_qp_usr_rc_mmap_entry, mentry);
-		ret = mlx5_ib_mmap_qp_pages(vma, usr_rc->pages, usr_rc->npages);
+	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_QP_PUBLISH) {
+		struct mlx5_qp_publish_mmap_entry *publish =
+			container_of(mentry, struct mlx5_qp_publish_mmap_entry, mentry);
+		ret = mlx5_ib_mmap_qp_pages(vma, publish->pages,
+					    publish->npages);
 		rdma_user_mmap_entry_put(&mentry->rdma_entry);
 		return ret;
 	}

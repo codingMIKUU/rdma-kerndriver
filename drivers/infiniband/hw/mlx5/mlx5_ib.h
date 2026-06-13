@@ -194,8 +194,7 @@ enum {
 };
 
 struct mlx5_qp_ctrl_mmap_entry;
-struct mlx5_qp_ready_mmap_entry;
-struct mlx5_qp_usr_rc_mmap_entry;
+struct mlx5_qp_publish_mmap_entry;
 
 enum mlx5_ib_mmap_type {
 	MLX5_IB_MMAP_TYPE_MEMIC = 1,
@@ -205,8 +204,7 @@ enum mlx5_ib_mmap_type {
 	MLX5_IB_MMAP_TYPE_MEMIC_OP = 5,
 	MLX5_IB_MMAP_TYPE_QP_SQ = 6,
 	MLX5_IB_MMAP_TYPE_QP_CTRL = 7,
-	MLX5_IB_MMAP_TYPE_QP_READY = 8,
-	MLX5_IB_MMAP_TYPE_QP_USR_RC = 9,
+	MLX5_IB_MMAP_TYPE_QP_PUBLISH = 8,
 };
 
 struct mlx5_bfreg_info {
@@ -567,9 +565,10 @@ struct mlx5_ib_qp {
 	int			bfregn;
 	struct mlx5_qp_sq_mmap_entry *sq_mmap_entry;
 	struct mlx5_qp_ctrl_mmap_entry *sq_ctrl_entry;
-	struct mlx5_qp_ready_mmap_entry *sq_ready_entry;
-	struct mlx5_qp_usr_rc_mmap_entry *sq_usr_rc_entry;
+	struct mlx5_qp_publish_mmap_entry *sq_publish_entry;
 	u32			sq_ctrl_slot_idx;
+	u16			usr_rc_id;
+	u8			usr_rc_id_valid:1;
 	u8			kernel_db:1;
 	u8			is_srmc_kernel_qp:1;
 	struct mlx5_ib_srmc	*srmc_owner;
@@ -694,13 +693,7 @@ struct mlx5_qp_ctrl_mmap_entry {
 	struct mlx5_qp_ctrl_pool *pool;
 };
 
-struct mlx5_qp_ready_mmap_entry {
-	struct mlx5_user_mmap_entry mentry;
-	struct page **pages;
-	u32 npages;
-};
-
-struct mlx5_qp_usr_rc_mmap_entry {
+struct mlx5_qp_publish_mmap_entry {
 	struct mlx5_user_mmap_entry mentry;
 	struct page **pages;
 	u32 npages;

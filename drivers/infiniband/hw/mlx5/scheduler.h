@@ -64,13 +64,30 @@ struct srm_qp_entry{
 struct mlx5_sq_ctrl_page {
     __u64 resv_idx;
     __u8 resv_pad[56];
-    __u64 pub_idx;
-    __u8 pub_pad[56];
     __u64 cons_idx;
     __u8 cons_pad[56];
-    __u64 wqe_cnt;
-    __u8 wqe_cnt_pad[56];
 } CACHELINE_ALIGNED_USER;
+static_assert(sizeof(struct mlx5_sq_ctrl_page) == 128);
+
+#define MLX5_SRM_PUBLISH_USR_BITS 16
+#define MLX5_SRM_PUBLISH_USR_MASK ((1ULL << MLX5_SRM_PUBLISH_USR_BITS) - 1)
+#define MLX5_SRM_PUBLISH_SEQ_MASK ((1ULL << 48) - 1)
+
+static inline u64 mlx5_srm_publish_token(u64 seq, u16 usr_rc_cnt)
+{
+    return ((seq & MLX5_SRM_PUBLISH_SEQ_MASK) <<
+            MLX5_SRM_PUBLISH_USR_BITS) | usr_rc_cnt;
+}
+
+static inline u64 mlx5_srm_publish_seq(u64 token)
+{
+    return token >> MLX5_SRM_PUBLISH_USR_BITS;
+}
+
+static inline u16 mlx5_srm_publish_usr_rc(u64 token)
+{
+    return token & MLX5_SRM_PUBLISH_USR_MASK;
+}
 
 struct mlx5_ib_cqbuf
 {
@@ -81,7 +98,7 @@ struct mlx5_ib_cqbuf
     int cqn;
     int cur_put;
     int op_own;
-    struct mutex lock;
+    spinlock_t lock;
     struct mlx5_ib_cqbuf *next; // not loop
 } CACHELINE_ALIGNED;
 struct mlx5_ib_sqbuf
@@ -151,16 +168,13 @@ struct buf_info
 };
 struct mlx5_wqe_info
 {
-    u32 qpn;
-    u32 usr_rc_cnt;
-    u32 uidx;
     struct mlx5_ib_cqbuf *cqb;
-    u64 wqe_counter;
-    size_t pending_bytes;
-    size_t byte_cnt;
-    u8 to_user;
-    u8 valid;
     struct mlx5_sq_ctrl_page *ctrl_page;
+    u64 wqe_counter;
+    u32 uidx;
+    u16 usr_rc_cnt;
+    u8 valid;
+    u8 flags;
 };
 struct mlx5_ib_srmc
 {
@@ -170,17 +184,15 @@ struct mlx5_ib_srmc
     int sig_cnt;
     uint32_t cur_cqe;
     u64 sched_post_idx;
-    struct mlx5_wqe_info wqe_infos[SQ_DEPTH];
+    u64 publish_idx;
+    struct mlx5_wqe_info *wqe_infos;
     size_t pending_bytes;     // total pending bytes
     size_t cul_pending_bytes; // next cqe's pending bytes
     int idx;                  // 该srmc在表中的索引
     int srmc_idx;             // 该srmc在创建顺序中排第几个(用于分配cq)
-    struct page **ready_seq_pages;
-    u32 ready_seq_npages;
-    u32 ready_seq_depth;
-    struct page **usr_rc_pages;
-    u32 usr_rc_npages;
-    u32 usr_rc_depth;
+    struct page **publish_pages;
+    u32 publish_npages;
+    u32 publish_depth;
     unsigned long last_db_jiffies;
     unsigned long last_cqe_jiffies;
     unsigned long last_stall_warn_jiffies;
@@ -200,6 +212,12 @@ struct mlx5_ib_sched
     int id;
 
     
+};
+
+struct mlx5_ib_usr_rc_route {
+    struct mlx5_ib_cqbuf __rcu *cqb;
+    u32 uidx;
+    bool valid;
 };
 struct mlx5_ib_sched_id
 {
@@ -245,8 +263,9 @@ struct mlx5_ib_sched_group
 	struct mlx5_ib_sqbuf *sqb_arr[NUM_SQB];
 	struct mutex cq_lock;
 	struct mlx5_ib_cqbuf *cqb_arr[NUM_SQB];
-	struct mlx5_ib_cqbuf *usr_rc_cqb_arr[NUM_SQB];
-	u32 usr_rc_uidx_arr[NUM_SQB];
+	struct mlx5_ib_cqbuf *retired_cqbs;
+	struct delayed_work cqb_reclaim_work;
+	struct mlx5_ib_usr_rc_route usr_rc_routes[NUM_SQB];
 	struct xrc_bf_entry *xrc_bf_arr[MAX_USER_THREADS_NUM*NUM_SCHED*NUM_LEVEL*MAX_USER_XRC_QP_PER_SRM];
 
     int num_sched;
@@ -275,6 +294,8 @@ int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long v
 int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn);
 int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
 			   u32 usr_rc_cnt, int cqn, u32 uidx);
+void mlx5_ib_unbind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
+			      u32 usr_rc_cnt);
 struct mlx5_ib_sqbuf *mlx5_ib_find_sqbuf_by_qpn(struct mlx5_ib_sched_group *sched_group, int qpn);
 int scheduler_polling(void *sched_data);
 int mlx5_ib_create_srmc(struct mlx5_ib_sched *sched, struct mlx5_ib_qp *init_qp, struct mlx5_ib_qp *tgt_qp, union ib_gid *dgid);

@@ -40,6 +40,7 @@
 #include <rdma/ib_user_verbs.h>
 #include <rdma/rdma_counter.h>
 #include <linux/atomic.h>
+#include <linux/idr.h>
 #include <linux/mlx5/fs.h>
 #include "mlx5_ib.h"
 #include "mlx5_ib_ext.h"
@@ -91,8 +92,8 @@ struct mlx5_ib_qp_event_work {
 
 static struct workqueue_struct *mlx5_ib_qp_event_wq;
 
-static atomic_t mlx5_usr_rc_cnt = ATOMIC_INIT(0);
-static DEFINE_MUTEX(mlx5_ready_seq_lock);
+static DEFINE_IDA(mlx5_usr_rc_ida);
+static DEFINE_MUTEX(mlx5_publish_lock);
 
 struct mlx5_ib_sqd {
 	struct mlx5_ib_qp *qp;
@@ -1324,7 +1325,7 @@ static int mlx5_ib_create_qp_ctrl_mmap(struct mlx5_ib_dev *dev,
 	return err;
 }
 
-static int mlx5_ib_alloc_srmc_ready_seq(struct mlx5_ib_srmc *srmc, u32 depth)
+static int mlx5_ib_alloc_srmc_publish(struct mlx5_ib_srmc *srmc, u32 depth)
 {
 	struct page **pages;
 	u32 npages;
@@ -1334,9 +1335,9 @@ static int mlx5_ib_alloc_srmc_ready_seq(struct mlx5_ib_srmc *srmc, u32 depth)
 	if (!depth || !is_power_of_2(depth))
 		return -EINVAL;
 
-	mutex_lock(&mlx5_ready_seq_lock);
-	if (srmc->ready_seq_pages) {
-		err = srmc->ready_seq_depth == depth ? 0 : -EINVAL;
+	mutex_lock(&mlx5_publish_lock);
+	if (srmc->publish_pages) {
+		err = srmc->publish_depth == depth ? 0 : -EINVAL;
 		goto out;
 	}
 
@@ -1358,145 +1359,58 @@ static int mlx5_ib_alloc_srmc_ready_seq(struct mlx5_ib_srmc *srmc, u32 depth)
 		}
 	}
 
-	srmc->ready_seq_pages = pages;
-	srmc->ready_seq_npages = npages;
-	srmc->ready_seq_depth = depth;
+	srmc->publish_pages = pages;
+	srmc->publish_npages = npages;
+	srmc->publish_depth = depth;
 
 out:
-	mutex_unlock(&mlx5_ready_seq_lock);
+	mutex_unlock(&mlx5_publish_lock);
 	return err;
 }
 
-static int mlx5_ib_alloc_srmc_usr_rc(struct mlx5_ib_srmc *srmc, u32 depth)
-{
-	struct page **pages;
-	u32 npages;
-	u32 i;
-	int err = 0;
-
-	if (!depth || !is_power_of_2(depth))
-		return -EINVAL;
-
-	mutex_lock(&mlx5_ready_seq_lock);
-	if (srmc->usr_rc_pages) {
-		err = srmc->usr_rc_depth == depth ? 0 : -EINVAL;
-		goto out;
-	}
-
-	npages = DIV_ROUND_UP((u64)depth * sizeof(u32), PAGE_SIZE);
-	pages = kcalloc(npages, sizeof(*pages), GFP_KERNEL);
-	if (!pages) {
-		err = -ENOMEM;
-		goto out;
-	}
-
-	for (i = 0; i < npages; i++) {
-		pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
-		if (!pages[i]) {
-			while (i)
-				put_page(pages[--i]);
-			kfree(pages);
-			err = -ENOMEM;
-			goto out;
-		}
-	}
-
-	srmc->usr_rc_pages = pages;
-	srmc->usr_rc_npages = npages;
-	srmc->usr_rc_depth = depth;
-
-out:
-	mutex_unlock(&mlx5_ready_seq_lock);
-	return err;
-}
-
-static int mlx5_ib_create_qp_ready_mmap(struct mlx5_ib_ucontext *context,
-					struct mlx5_ib_qp *qp,
-					struct mlx5_ib_modify_qp_resp *resp)
-{
-	struct mlx5_qp_ready_mmap_entry *ready;
-	struct mlx5_ib_srmc *srmc = qp->srmc_owner;
-	int err;
-
-	if (!srmc)
-		return -EINVAL;
-
-	err = mlx5_ib_alloc_srmc_ready_seq(srmc, srmc->ini_cb.qp->sq.wqe_cnt);
-	if (err)
-		return err;
-
-	if (!qp->sq_ready_entry) {
-		ready = kzalloc(sizeof(*ready), GFP_KERNEL);
-		if (!ready)
-			return -ENOMEM;
-
-		ready->mentry.mmap_flag = MLX5_IB_MMAP_TYPE_QP_READY;
-		ready->pages = srmc->ready_seq_pages;
-		ready->npages = srmc->ready_seq_npages;
-
-		err = rdma_user_mmap_entry_insert_range(&context->ibucontext,
-							&ready->mentry.rdma_entry,
-							ready->npages * PAGE_SIZE,
-							(MLX5_IB_MMAP_OFFSET_START << 16),
-							((MLX5_IB_MMAP_OFFSET_END << 16) + (1UL << 16) - 1));
-		if (err) {
-			kfree(ready);
-			return err;
-		}
-
-		qp->sq_ready_entry = ready;
-	}
-
-	ready = qp->sq_ready_entry;
-	resp->ready_mmap_offset = mlx5_qp_entry_to_mmap_offset(&ready->mentry);
-	resp->ready_mmap_len = ready->npages * PAGE_SIZE;
-	resp->ready_depth = srmc->ready_seq_depth;
-	resp->comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_READY_MMAP;
-	return 0;
-}
-
-static int mlx5_ib_create_qp_usr_rc_mmap(struct mlx5_ib_ucontext *context,
+static int mlx5_ib_create_qp_publish_mmap(struct mlx5_ib_ucontext *context,
 					 struct mlx5_ib_qp *qp,
 					 struct mlx5_ib_modify_qp_resp *resp)
 {
-	struct mlx5_qp_usr_rc_mmap_entry *usr_rc;
+	struct mlx5_qp_publish_mmap_entry *publish;
 	struct mlx5_ib_srmc *srmc = qp->srmc_owner;
 	int err;
 
 	if (!srmc)
 		return -EINVAL;
 
-	err = mlx5_ib_alloc_srmc_usr_rc(srmc, srmc->ini_cb.qp->sq.wqe_cnt);
+	err = mlx5_ib_alloc_srmc_publish(srmc, srmc->ini_cb.qp->sq.wqe_cnt);
 	if (err)
 		return err;
 
-	if (!qp->sq_usr_rc_entry) {
-		usr_rc = kzalloc(sizeof(*usr_rc), GFP_KERNEL);
-		if (!usr_rc)
+	if (!qp->sq_publish_entry) {
+		publish = kzalloc(sizeof(*publish), GFP_KERNEL);
+		if (!publish)
 			return -ENOMEM;
 
-		usr_rc->mentry.mmap_flag = MLX5_IB_MMAP_TYPE_QP_USR_RC;
-		usr_rc->pages = srmc->usr_rc_pages;
-		usr_rc->npages = srmc->usr_rc_npages;
+		publish->mentry.mmap_flag = MLX5_IB_MMAP_TYPE_QP_PUBLISH;
+		publish->pages = srmc->publish_pages;
+		publish->npages = srmc->publish_npages;
 
 		err = rdma_user_mmap_entry_insert_range(&context->ibucontext,
-							&usr_rc->mentry.rdma_entry,
-							usr_rc->npages * PAGE_SIZE,
-							(MLX5_IB_MMAP_OFFSET_START << 16),
-							((MLX5_IB_MMAP_OFFSET_END << 16) + (1UL << 16) - 1));
+								&publish->mentry.rdma_entry,
+								publish->npages * PAGE_SIZE,
+								(MLX5_IB_MMAP_OFFSET_START << 16),
+								((MLX5_IB_MMAP_OFFSET_END << 16) + (1UL << 16) - 1));
 		if (err) {
-			kfree(usr_rc);
+			kfree(publish);
 			return err;
 		}
 
-		qp->sq_usr_rc_entry = usr_rc;
+		qp->sq_publish_entry = publish;
 	}
 
-	usr_rc = qp->sq_usr_rc_entry;
-	resp->usr_rc_mmap_offset = mlx5_qp_entry_to_mmap_offset(&usr_rc->mentry);
-	resp->usr_rc_mmap_len = usr_rc->npages * PAGE_SIZE;
-	resp->usr_rc_depth = srmc->usr_rc_depth;
-	resp->comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_USR_RC_MMAP;
+	publish = qp->sq_publish_entry;
+	resp->publish_mmap_offset =
+		mlx5_qp_entry_to_mmap_offset(&publish->mentry);
+	resp->publish_mmap_len = publish->npages * PAGE_SIZE;
+	resp->publish_depth = srmc->publish_depth;
+	resp->comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_PUBLISH_MMAP;
 	return 0;
 }
 
@@ -1576,11 +1490,7 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 	if (err)
 		return err;
 
-	err = mlx5_ib_create_qp_ready_mmap(context, qp, resp);
-	if (err)
-		return err;
-
-	err = mlx5_ib_create_qp_usr_rc_mmap(context, qp, resp);
+	err = mlx5_ib_create_qp_publish_mmap(context, qp, resp);
 	if (err)
 		return err;
 
@@ -1784,19 +1694,21 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 			rdma_user_mmap_entry_remove(&qp->sq_ctrl_entry->mentry.rdma_entry);
 			qp->sq_ctrl_entry = NULL;
 		}
-		if (qp->sq_ready_entry) {
-			rdma_user_mmap_entry_remove(&qp->sq_ready_entry->mentry.rdma_entry);
-			qp->sq_ready_entry = NULL;
-		}
-		if (qp->sq_usr_rc_entry) {
-			rdma_user_mmap_entry_remove(&qp->sq_usr_rc_entry->mentry.rdma_entry);
-			qp->sq_usr_rc_entry = NULL;
+		if (qp->sq_publish_entry) {
+			rdma_user_mmap_entry_remove(
+				&qp->sq_publish_entry->mentry.rdma_entry);
+			qp->sq_publish_entry = NULL;
 		}
 
 		if (qp->srmc_owner) {
 			if (qp->srmc_owner->ini_cb.refcnt > 0)
 				qp->srmc_owner->ini_cb.refcnt--;
 			qp->srmc_owner = NULL;
+		}
+		if (qp->usr_rc_id_valid) {
+			mlx5_ib_unbind_usr_rc_cq(&sched_group, qp->usr_rc_id);
+			ida_free(&mlx5_usr_rc_ida, qp->usr_rc_id);
+			qp->usr_rc_id_valid = 0;
 		}
 		if (qp->kernel_db && qp->db.db) {
 			mlx5_db_free(dev->mdev, &qp->db);
@@ -3041,18 +2953,29 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 			return err;
 
 		params->resp.bfreg_index = MLX5_IB_INVALID_BFREG;
-		params->resp.usr_rc_cnt =
-			atomic_inc_return(&mlx5_usr_rc_cnt) - 1;
+		err = ida_alloc_range(&mlx5_usr_rc_ida, 0, NUM_SQB - 1,
+				      GFP_KERNEL);
+		if (err < 0)
+			return err;
+		qp->usr_rc_id = err;
+		qp->usr_rc_id_valid = 1;
+		params->resp.usr_rc_cnt = qp->usr_rc_id;
 		params->resp.comp_mask |= MLX5_IB_CREATE_QP_RESP_MASK_USR_RC_CNT;
-		if (!init_attr->send_cq)
+		if (!init_attr->send_cq) {
+			ida_free(&mlx5_usr_rc_ida, qp->usr_rc_id);
+			qp->usr_rc_id_valid = 0;
 			return -EINVAL;
+		}
 
 		err = mlx5_ib_bind_usr_rc_cq(&sched_group,
 					     params->resp.usr_rc_cnt,
 					     to_mcq(init_attr->send_cq)->mcq.cqn,
 					     params->uidx);
-		if (err)
+		if (err) {
+			ida_free(&mlx5_usr_rc_ida, qp->usr_rc_id);
+			qp->usr_rc_id_valid = 0;
 			return err;
+		}
 
 		base->mqp.qpn = params->resp.usr_rc_cnt;
 		base->container_mibqp = qp;

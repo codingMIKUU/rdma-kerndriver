@@ -93,129 +93,149 @@ static inline void mlx5_sq_ctrl_set_cons_idx(struct mlx5_ib_sqbuf *sqb)
         smp_store_release(&sqb->ctrl->cons_idx, sqb->cur_post);
 }
 
-static inline void mlx5_sq_ctrl_inc_cons_idx(struct mlx5_sq_ctrl_page *ctrl)
+static inline void mlx5_sq_ctrl_complete(struct mlx5_sq_ctrl_page *ctrl,
+                                         u64 wqe_counter)
 {
-    u64 cons;
-
     if (!ctrl)
         return;
 
-    cons = smp_load_acquire(&ctrl->cons_idx);
-    smp_store_release(&ctrl->cons_idx, cons + 1);
+    smp_store_release(&ctrl->cons_idx, wqe_counter + 1);
 }
 
-static void mlx5_ib_free_srmc_ready_seq(struct mlx5_ib_srmc *srmc)
+static void mlx5_ib_cqb_release(struct mlx5_ib_cqbuf *cqb)
 {
-    u32 i;
+    int npages;
 
-    if (!srmc || !srmc->ready_seq_pages)
+    if (!cqb)
         return;
 
-    for (i = 0; i < srmc->ready_seq_npages; i++)
-        if (srmc->ready_seq_pages[i])
-            put_page(srmc->ready_seq_pages[i]);
-
-    kfree(srmc->ready_seq_pages);
-    srmc->ready_seq_pages = NULL;
-    srmc->ready_seq_npages = 0;
-    srmc->ready_seq_depth = 0;
+    vunmap(cqb->buf);
+    npages = DIV_ROUND_UP(cqb->cq_size, PAGE_SIZE);
+    put_user_pages(cqb->pages, npages);
+    kfree(cqb->pages);
+    kfree(cqb);
 }
 
-static void mlx5_ib_free_srmc_usr_rc(struct mlx5_ib_srmc *srmc)
+static bool mlx5_ib_cqb_is_inflight(struct mlx5_ib_sched_group *sched_group,
+                                    struct mlx5_ib_cqbuf *cqb)
 {
-    u32 i;
+    int i, j, k;
 
-    if (!srmc || !srmc->usr_rc_pages)
-        return;
+    for (i = 0; i < sched_group->num_sched; i++) {
+        struct mlx5_ib_sched *sched = &sched_group->scheds[i];
 
-    for (i = 0; i < srmc->usr_rc_npages; i++)
-        if (srmc->usr_rc_pages[i])
-            put_page(srmc->usr_rc_pages[i]);
+        for (j = 0; j < NUM_SRMC; j++) {
+            struct mlx5_ib_srmc *srmc = READ_ONCE(sched->srmc_tb[j]);
 
-    kfree(srmc->usr_rc_pages);
-    srmc->usr_rc_pages = NULL;
-    srmc->usr_rc_npages = 0;
-    srmc->usr_rc_depth = 0;
-}
+            if (!srmc || !srmc->wqe_infos)
+                continue;
+            for (k = 0; k < SQ_DEPTH; k++) {
+                struct mlx5_wqe_info *info = &srmc->wqe_infos[k];
 
-static u32 mlx5_ib_srmc_get_usr_rc(struct mlx5_ib_srmc *srmc, u32 idx)
-{
-    size_t off;
-    u32 page_idx;
-    u32 page_off;
-    u32 *entry;
-
-    if (!srmc || !srmc->usr_rc_pages || !srmc->usr_rc_depth)
-        return U32_MAX;
-
-    idx &= srmc->usr_rc_depth - 1;
-    off = (size_t)idx * sizeof(*entry);
-    page_idx = off / PAGE_SIZE;
-    page_off = off % PAGE_SIZE;
-    if (page_idx >= srmc->usr_rc_npages || !srmc->usr_rc_pages[page_idx])
-        return U32_MAX;
-
-    entry = (u32 *)((char *)page_address(srmc->usr_rc_pages[page_idx]) + page_off);
-    return smp_load_acquire(entry);
-}
-
-static u64 mlx5_ib_srmc_get_ready_seq(struct mlx5_ib_srmc *srmc, u32 idx);
-
-static u64 mlx5_ib_srmc_help_publish(struct mlx5_ib_srmc *srmc,
-                                     struct mlx5_sq_ctrl_page *ctrl)
-{
-    u64 pub;
-    u64 new_pub;
-    u64 old_pub;
-    u32 scanned;
-
-    if (!srmc || !ctrl || !srmc->ready_seq_depth)
-        return ctrl ? smp_load_acquire(&ctrl->pub_idx) : 0;
-
-    for (;;) {
-        pub = smp_load_acquire(&ctrl->pub_idx);
-        new_pub = pub;
-
-        for (scanned = 0; scanned < srmc->ready_seq_depth; scanned++) {
-            u32 idx = new_pub & (srmc->ready_seq_depth - 1);
-
-            if (mlx5_ib_srmc_get_ready_seq(srmc, idx) != new_pub + 1)
-                break;
-            new_pub++;
+                if (smp_load_acquire(&info->valid) &&
+                    READ_ONCE(info->cqb) == cqb)
+                    return true;
+            }
         }
-
-        if (new_pub == pub)
-            return pub;
-
-        old_pub = cmpxchg(&ctrl->pub_idx, pub, new_pub);
-        if (old_pub == pub)
-            continue;
-
-        cpu_relax();
     }
+
+    return false;
 }
 
-static u64 mlx5_ib_srmc_get_ready_seq(struct mlx5_ib_srmc *srmc, u32 idx)
+static void mlx5_ib_reclaim_retired_cqbs(struct work_struct *work)
+{
+    struct mlx5_ib_sched_group *sched_group =
+        container_of(to_delayed_work(work), struct mlx5_ib_sched_group,
+                     cqb_reclaim_work);
+    struct mlx5_ib_cqbuf **link;
+    bool retry = false;
+
+    if (!READ_ONCE(sched_group->retired_cqbs))
+        return;
+
+    synchronize_rcu();
+    mutex_lock(&sched_group->cq_lock);
+    link = &sched_group->retired_cqbs;
+    while (*link) {
+        struct mlx5_ib_cqbuf *cqb = *link;
+
+        if (mlx5_ib_cqb_is_inflight(sched_group, cqb)) {
+            retry = true;
+            link = &cqb->next;
+            continue;
+        }
+        *link = cqb->next;
+        mlx5_ib_cqb_release(cqb);
+    }
+    mutex_unlock(&sched_group->cq_lock);
+
+    if (retry)
+        schedule_delayed_work(&sched_group->cqb_reclaim_work,
+                              msecs_to_jiffies(10));
+}
+
+static void mlx5_ib_free_srmc_publish(struct mlx5_ib_srmc *srmc)
+{
+    u32 i;
+
+    if (!srmc || !srmc->publish_pages)
+        return;
+
+    for (i = 0; i < srmc->publish_npages; i++)
+        if (srmc->publish_pages[i])
+            put_page(srmc->publish_pages[i]);
+
+    kfree(srmc->publish_pages);
+    srmc->publish_pages = NULL;
+    srmc->publish_npages = 0;
+    srmc->publish_depth = 0;
+}
+
+static u64 mlx5_ib_srmc_get_publish_token(struct mlx5_ib_srmc *srmc,
+                                          u32 idx)
 {
     size_t off;
     u32 page_idx;
     u32 page_off;
     u64 *entry;
 
-    if (!srmc || !srmc->ready_seq_pages || !srmc->ready_seq_depth)
+    if (!srmc || !srmc->publish_pages || !srmc->publish_depth)
         return U64_MAX;
 
-    idx &= srmc->ready_seq_depth - 1;
+    idx &= srmc->publish_depth - 1;
     off = (size_t)idx * sizeof(*entry);
     page_idx = off / PAGE_SIZE;
     page_off = off % PAGE_SIZE;
-    if (page_idx >= srmc->ready_seq_npages ||
-        !srmc->ready_seq_pages[page_idx])
+    if (page_idx >= srmc->publish_npages ||
+        !srmc->publish_pages[page_idx])
         return U64_MAX;
 
-    entry = (u64 *)((char *)page_address(srmc->ready_seq_pages[page_idx]) +
+    entry = (u64 *)((char *)page_address(srmc->publish_pages[page_idx]) +
                     page_off);
     return smp_load_acquire(entry);
+}
+
+static u64 mlx5_ib_srmc_help_publish(struct mlx5_ib_srmc *srmc)
+{
+    u64 new_pub;
+    u32 scanned;
+
+    if (!srmc || !srmc->publish_depth)
+        return 0;
+
+    new_pub = srmc->publish_idx;
+    for (scanned = 0; scanned < srmc->publish_depth; scanned++) {
+        u32 idx = new_pub & (srmc->publish_depth - 1);
+        u64 token = mlx5_ib_srmc_get_publish_token(srmc, idx);
+
+        if (mlx5_srm_publish_seq(token) !=
+            ((new_pub + 1) & MLX5_SRM_PUBLISH_SEQ_MASK))
+            break;
+        new_pub++;
+    }
+
+    srmc->publish_idx = new_pub;
+    return new_pub;
 }
 
 static struct mlx5_ib_srmc *mlx5_ib_sched_find_srmc_idx(struct mlx5_ib_sched *sched,
@@ -436,7 +456,7 @@ int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group,
     uq->buf = vmap(pages, npages, VM_MAP, PAGE_KERNEL);
     uq->pages = pages;
     uq->cqe_sz = 64;
-    mutex_init(&uq->lock);
+    spin_lock_init(&uq->lock);
     if (!uq->buf)
     {
         kfree(uq);
@@ -463,7 +483,6 @@ err_unlock_pages:
 int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn)
 {
     struct mlx5_ib_cqbuf *cqb = NULL;
-    int npages;
     int i;
     int j;
 
@@ -485,10 +504,11 @@ int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn)
         return -ENOENT;
     }
 
-    for (j = 0; j < ARRAY_SIZE(sched_group->usr_rc_cqb_arr); j++) {
-        if (sched_group->usr_rc_cqb_arr[j] == cqb) {
-            sched_group->usr_rc_cqb_arr[j] = NULL;
-            sched_group->usr_rc_uidx_arr[j] = MLX5_IB_DEFAULT_UIDX;
+    for (j = 0; j < ARRAY_SIZE(sched_group->usr_rc_routes); j++) {
+        if (rcu_access_pointer(sched_group->usr_rc_routes[j].cqb) == cqb) {
+            smp_store_release(&sched_group->usr_rc_routes[j].valid, false);
+            RCU_INIT_POINTER(sched_group->usr_rc_routes[j].cqb, NULL);
+            sched_group->usr_rc_routes[j].uidx = MLX5_IB_DEFAULT_UIDX;
         }
     }
 
@@ -497,11 +517,11 @@ int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn)
         sched_group->cqb_cnt--;
     mutex_unlock(&sched_group->cq_lock);
 
-    vunmap(cqb->buf);
-    npages = DIV_ROUND_UP(cqb->cq_size, PAGE_SIZE);
-    put_user_pages(cqb->pages, npages);
-    kfree(cqb->pages);
-    kfree(cqb);
+    mutex_lock(&sched_group->cq_lock);
+    cqb->next = sched_group->retired_cqbs;
+    sched_group->retired_cqbs = cqb;
+    mutex_unlock(&sched_group->cq_lock);
+    schedule_delayed_work(&sched_group->cqb_reclaim_work, 0);
     return 0;
 }
 
@@ -513,7 +533,7 @@ int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
     if (!sched_group)
         return -EINVAL;
 
-    if (usr_rc_cnt >= ARRAY_SIZE(sched_group->usr_rc_cqb_arr))
+    if (usr_rc_cnt >= ARRAY_SIZE(sched_group->usr_rc_routes))
         return -EINVAL;
 
     mutex_lock(&sched_group->cq_lock);
@@ -525,11 +545,29 @@ int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
         return -ENOENT;
     }
 
-    sched_group->usr_rc_cqb_arr[usr_rc_cnt] = cqb;
-    sched_group->usr_rc_uidx_arr[usr_rc_cnt] = uidx;
+    sched_group->usr_rc_routes[usr_rc_cnt].uidx = uidx;
+    rcu_assign_pointer(sched_group->usr_rc_routes[usr_rc_cnt].cqb, cqb);
+    smp_store_release(&sched_group->usr_rc_routes[usr_rc_cnt].valid, true);
     mutex_unlock(&sched_group->cq_lock);
 
     return 0;
+}
+
+void mlx5_ib_unbind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
+                              u32 usr_rc_cnt)
+{
+    struct mlx5_ib_usr_rc_route *route;
+
+    if (!sched_group ||
+        usr_rc_cnt >= ARRAY_SIZE(sched_group->usr_rc_routes))
+        return;
+
+    mutex_lock(&sched_group->cq_lock);
+    route = &sched_group->usr_rc_routes[usr_rc_cnt];
+    smp_store_release(&route->valid, false);
+    RCU_INIT_POINTER(route->cqb, NULL);
+    route->uidx = MLX5_IB_DEFAULT_UIDX;
+    mutex_unlock(&sched_group->cq_lock);
 }
 
 struct mlx5_ib_sqbuf *mlx5_ib_find_sqbuf_by_qpn(struct mlx5_ib_sched_group *sched_group, int qpn)
@@ -634,7 +672,7 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
     int op_own;
     int uidx, idx;
     int cqe_num;
-    int i, j;
+    int i, j, k;
     for (i = 0; i < NUM_SRMC; i++)
     {
         if (cnt_c >= sched->srmc_cnt)
@@ -666,15 +704,8 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                         pr_warn_ratelimited("invalid scheduler CQ info idx %d\n", idx);
                         continue;
                     }
-                    // 减去发送中的字节数
-                    srmc->pending_bytes -= srmc->wqe_infos[idx].pending_bytes;
-                    if (srmc->wqe_infos[idx].to_user == 0)
-                    {
-                        continue;
-                    }
                     // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
-                    qpn = srmc->wqe_infos[idx].qpn;
-                    DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[j].status, srmc->wqe_infos[idx].pending_bytes);
+                    qpn = srmc->wqe_infos[idx].usr_rc_cnt;
                     DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%llu\n", qpn,
                               srmc->wqe_infos[idx].wqe_counter);
                     cqb = srmc->wqe_infos[idx].cqb;
@@ -683,7 +714,7 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                         pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
                         continue;
                     }
-                    mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
+                    spin_lock(&cqb->lock);
                     //  distribute
                     //  TODO:change the owner bit
                     DEBUG_LOG("cqn:%d\n", cqb->cqn);
@@ -705,7 +736,7 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                         cqb->op_own ^= MLX5_CQE_OWNER_MASK;
                     }
 
-                    mutex_unlock(&cqb->lock);
+                    spin_unlock(&cqb->lock);
                     DEBUG_LOG("distribute cqe finished\n");
                 }
             }
@@ -747,12 +778,6 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
                     pr_warn_ratelimited("invalid scheduler CQ info idx %d\n", idx);
                     continue;
                 }
-                // 减去发送中的字节数
-                //srmc->pending_bytes -= srmc->wqe_infos[idx].pending_bytes;
-                if (srmc->wqe_infos[idx].to_user == 0)
-                {
-                    continue;
-                }
                 // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
                 //qpn = srmc->wqe_infos[idx].qpn;
                 // DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[i].status, srmc->wqe_infos[idx].pending_bytes);
@@ -764,7 +789,7 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
                     pr_err("Unexpected:No cqn found for scheduler info idx %d\n", idx);
                     continue;
                 }
-                mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
+                spin_lock(&cqb->lock);
                 //  distribute
                 //  TODO:change the owner bit
                 DEBUG_LOG("cqn:%d\n", cqb->cqn);
@@ -786,10 +811,11 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
                     cqb->op_own ^= MLX5_CQE_OWNER_MASK;
                 }
 
-                mutex_unlock(&cqb->lock);
+                spin_unlock(&cqb->lock);
                 // pr_info("distribute cqe finished\n");
-                mlx5_sq_ctrl_inc_cons_idx(srmc->wqe_infos[idx].ctrl_page);
-                srmc->wqe_infos[idx].valid = 0;
+                mlx5_sq_ctrl_complete(srmc->wqe_infos[idx].ctrl_page,
+                                      srmc->wqe_infos[idx].wqe_counter);
+                smp_store_release(&srmc->wqe_infos[idx].valid, 0);
 
                 free_cqe_idx[*free_cqe_cnt] = idx;
                 (*free_cqe_cnt)++;
@@ -848,15 +874,8 @@ static inline int srm_poll_srmc_once_debug(struct mlx5_ib_srmc *srmc, struct ib_
                     pr_warn_ratelimited("invalid scheduler CQ info idx %d\n", idx);
                     continue;
                 }
-                // 减去发送中的字节数
-                srmc->pending_bytes -= srmc->wqe_infos[idx].pending_bytes;
-                if (srmc->wqe_infos[idx].to_user == 0)
-                {
-                    continue;
-                }
                 // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
-                qpn = srmc->wqe_infos[idx].qpn;
-                DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[i].status, srmc->wqe_infos[idx].pending_bytes);
+                qpn = srmc->wqe_infos[idx].usr_rc_cnt;
                 DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%llu\n", qpn,
                           srmc->wqe_infos[idx].wqe_counter);
                 cqb = srmc->wqe_infos[idx].cqb;
@@ -865,7 +884,7 @@ static inline int srm_poll_srmc_once_debug(struct mlx5_ib_srmc *srmc, struct ib_
                     pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
                     continue;
                 }
-                mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
+                spin_lock(&cqb->lock);
                 //  distribute
                 //  TODO:change the owner bit
                 DEBUG_LOG("cqn:%d\n", cqb->cqn);
@@ -887,11 +906,13 @@ static inline int srm_poll_srmc_once_debug(struct mlx5_ib_srmc *srmc, struct ib_
                     cqb->op_own ^= MLX5_CQE_OWNER_MASK;
                 }
 
-                mutex_unlock(&cqb->lock);
+                spin_unlock(&cqb->lock);
                 DEBUG_LOG("distribute cqe finished\n");
 
                 /* 3. 写数据 */
-                len = scnprintf(buf, 256, "polled user cqe,k:%d,byte_cnt:%d,elapsed time from last poll:%llu(ns)\n", srmc->srmc_idx, srmc->wqe_infos[idx].byte_cnt, elapsed_ns);
+                len = scnprintf(buf, 256,
+                                "polled user cqe,k:%d,elapsed time from last poll:%llu(ns)\n",
+                                srmc->srmc_idx, elapsed_ns);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
                 /* kernel_write 从 5.11+ 内核可用，无需 set_fs */
                 ret = kernel_write(filp, buf, len, pos);
@@ -901,8 +922,9 @@ static inline int srm_poll_srmc_once_debug(struct mlx5_ib_srmc *srmc, struct ib_
                 if (ret < 0)
                     pr_err("write_int_to_file: write error %d\n", ret);
 
-                mlx5_sq_ctrl_inc_cons_idx(srmc->wqe_infos[idx].ctrl_page);
-                srmc->wqe_infos[idx].valid = 0;
+                mlx5_sq_ctrl_complete(srmc->wqe_infos[idx].ctrl_page,
+                                      srmc->wqe_infos[idx].wqe_counter);
+                smp_store_release(&srmc->wqe_infos[idx].valid, 0);
 
                 free_cqe_idx[*free_cqe_cnt] = idx;
                 (*free_cqe_cnt)++;
@@ -2094,13 +2116,10 @@ int scheduler_polling(void *sched_data)
             ctrl_page = mlx5_sq_ctrl_get_slot(sq_ctrl_pool, i);
             if (!ctrl_page)
                 continue;
-            if (!smp_load_acquire(&ctrl_page->wqe_cnt))
-                continue;
-
             srmc = mlx5_ib_sched_find_srmc_idx(sched, i);
             if (!srmc || !srmc->ini_cb.qp)
                 continue;
-            pub = mlx5_ib_srmc_help_publish(srmc, ctrl_page);
+            pub = mlx5_ib_srmc_help_publish(srmc);
             if (srm_stats_enable)
                 srm_stats.kqp[i].scans++;
 
@@ -2155,8 +2174,7 @@ int scheduler_polling(void *sched_data)
                                     shared_srmc->ini_cb.qp->ibqp.qp_num,
                                     smp_load_acquire(
                                         &shared_ctrl->resv_idx),
-                                    smp_load_acquire(
-                                        &shared_ctrl->pub_idx),
+                                    shared_srmc->publish_idx,
                                     shared_srmc->sched_post_idx,
                                     smp_load_acquire(
                                         &shared_ctrl->cons_idx));
@@ -2170,7 +2188,7 @@ int scheduler_polling(void *sched_data)
             if (kthread_should_stop())
                 goto out;
 
-            pub = mlx5_ib_srmc_help_publish(srmc, ctrl_page);
+            pub = mlx5_ib_srmc_help_publish(srmc);
             if (pub <= srmc->sched_post_idx) {
                 u64 resv = smp_load_acquire(&ctrl_page->resv_idx);
 
@@ -2204,10 +2222,12 @@ int scheduler_polling(void *sched_data)
                             srmc->sched_post_idx,
                             smp_load_acquire(&ctrl_page->cons_idx),
                             gap_idx,
-                            mlx5_ib_srmc_get_ready_seq(srmc, gap_idx),
+                            mlx5_ib_srmc_get_publish_token(srmc, gap_idx),
                             pub + 1, (u16)(gap_opmod >> 8),
                             gap_qpn_ds >> 8,
-                            mlx5_ib_srmc_get_usr_rc(srmc, gap_idx));
+                            mlx5_srm_publish_usr_rc(
+                                mlx5_ib_srmc_get_publish_token(srmc,
+                                                               gap_idx)));
                     }
                 } else {
                     srmc->publish_gap_jiffies = 0;
@@ -2265,8 +2285,11 @@ int scheduler_polling(void *sched_data)
                         kstats->ready_max = ready_cnt;
                 }
 
+                rcu_read_lock();
                 while (sent < batch) {
                     uint32_t usr_rc_cnt;
+                    u64 publish_token;
+                    struct mlx5_ib_usr_rc_route *route;
                     u32 opmod_idx_opcode;
                     u32 qpn_ds;
                     u16 wqe_idx;
@@ -2276,7 +2299,10 @@ int scheduler_polling(void *sched_data)
                           (srmc->ini_cb.qp->sq.wqe_cnt - 1);
                     ctrl = mlx5_frag_buf_get_wqe(&srmc->ini_cb.qp->sq.fbc,
                                                   idx);
-                    usr_rc_cnt = mlx5_ib_srmc_get_usr_rc(srmc, idx);
+                    publish_token =
+                        mlx5_ib_srmc_get_publish_token(srmc, idx);
+                    usr_rc_cnt =
+                        mlx5_srm_publish_usr_rc(publish_token);
                     opmod_idx_opcode = be32_to_cpu(READ_ONCE(ctrl->opmod_idx_opcode));
                     qpn_ds = be32_to_cpu(READ_ONCE(ctrl->qpn_ds));
                     wqe_idx = opmod_idx_opcode >> 8;
@@ -2295,34 +2321,41 @@ int scheduler_polling(void *sched_data)
                         break;
                     }
 
-                    if (unlikely(usr_rc_cnt >= ARRAY_SIZE(sched_group.usr_rc_cqb_arr) ||
-                                 !sched_group.usr_rc_cqb_arr[usr_rc_cnt] ||
-                                 sched_group.usr_rc_uidx_arr[usr_rc_cnt] ==
-                                     MLX5_IB_DEFAULT_UIDX)) {
+                    if (unlikely(usr_rc_cnt >=
+                                     ARRAY_SIZE(sched_group.usr_rc_routes))) {
                         pr_warn_ratelimited("invalid hollow RC id %u for srmc %d\n",
                                             usr_rc_cnt, srmc->srmc_idx);
                         break;
                     }
+                    route = &sched_group.usr_rc_routes[usr_rc_cnt];
+                    cqb = rcu_dereference(route->cqb);
+                    if (unlikely(!smp_load_acquire(&route->valid) ||
+                                 !cqb ||
+                                 route->uidx == MLX5_IB_DEFAULT_UIDX)) {
+                        pr_warn_ratelimited("inactive hollow RC id %u for srmc %d\n",
+                                            usr_rc_cnt, srmc->srmc_idx);
+                        break;
+                    }
+                    uidx = route->uidx;
 
-                    uidx = free_cqe_idx[--free_cqe_cnt];
-                    pre_srmc->wqe_infos[uidx].qpn = usr_rc_cnt;
-                    pre_srmc->wqe_infos[uidx].usr_rc_cnt = usr_rc_cnt;
-                    pre_srmc->wqe_infos[uidx].uidx =
-                        sched_group.usr_rc_uidx_arr[usr_rc_cnt];
-                    pre_srmc->wqe_infos[uidx].wqe_counter =
+                    idx = free_cqe_idx[--free_cqe_cnt];
+                    pre_srmc->wqe_infos[idx].usr_rc_cnt = usr_rc_cnt;
+                    pre_srmc->wqe_infos[idx].uidx = uidx;
+                    pre_srmc->wqe_infos[idx].wqe_counter =
                         srmc->sched_post_idx;
-                    pre_srmc->wqe_infos[uidx].cqb =
-                        sched_group.usr_rc_cqb_arr[usr_rc_cnt];
-                    pre_srmc->wqe_infos[uidx].to_user = 1;
-                    pre_srmc->wqe_infos[uidx].valid = 1;
-                    pre_srmc->wqe_infos[uidx].ctrl_page = ctrl_page;
+                    pre_srmc->wqe_infos[idx].cqb = cqb;
+                    pre_srmc->wqe_infos[idx].ctrl_page = ctrl_page;
+                    smp_store_release(&pre_srmc->wqe_infos[idx].valid, 1);
 
-                    srmc->ini_cb.qp->sq.wrid[idx] = uidx;
+                    srmc->ini_cb.qp->sq.wrid[
+                        srmc->sched_post_idx & (srmc->ini_cb.qp->sq.wqe_cnt - 1)] =
+                        idx;
                     srmc->sched_post_idx++;
                     srmc->ini_cb.qp->sq.cur_post++;
                     last_ctrl = ctrl;
                     sent++;
                 }
+                rcu_read_unlock();
 
                 if (!sent)
                     continue;
@@ -2448,13 +2481,16 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
     /* Fresh scheduler lifecycle state */
     sched_group->sqb_cnt = 0;
     sched_group->cqb_cnt = 0;
+    sched_group->retired_cqbs = NULL;
+    INIT_DELAYED_WORK(&sched_group->cqb_reclaim_work,
+                      mlx5_ib_reclaim_retired_cqbs);
     sched_group->xrc_bf_cnt = 0;
     memset(sched_group->sqb_arr, 0, sizeof(sched_group->sqb_arr));
     memset(sched_group->cqb_arr, 0, sizeof(sched_group->cqb_arr));
-    memset(sched_group->usr_rc_cqb_arr, 0,
-           sizeof(sched_group->usr_rc_cqb_arr));
-    memset(sched_group->usr_rc_uidx_arr, 0xff,
-           sizeof(sched_group->usr_rc_uidx_arr));
+    memset(sched_group->usr_rc_routes, 0,
+           sizeof(sched_group->usr_rc_routes));
+    for (i = 0; i < ARRAY_SIZE(sched_group->usr_rc_routes); i++)
+        sched_group->usr_rc_routes[i].uidx = MLX5_IB_DEFAULT_UIDX;
     memset(sched_group->xrc_bf_arr, 0, sizeof(sched_group->xrc_bf_arr));
 
     sched_group->num_sched = num;
@@ -2581,14 +2617,13 @@ static void mlx5_ib_destroy_srmc_ini(struct mlx5_ib_srmc *srmc)
 static void mlx5_ib_unmap_all_cq_ubufs(struct mlx5_ib_sched_group *sched_group)
 {
     struct mlx5_ib_cqbuf *cqb;
-    int npages;
     int i;
 
     mutex_lock(&sched_group->cq_lock);
-    memset(sched_group->usr_rc_cqb_arr, 0,
-           sizeof(sched_group->usr_rc_cqb_arr));
-    memset(sched_group->usr_rc_uidx_arr, 0xff,
-           sizeof(sched_group->usr_rc_uidx_arr));
+    memset(sched_group->usr_rc_routes, 0,
+           sizeof(sched_group->usr_rc_routes));
+    for (i = 0; i < ARRAY_SIZE(sched_group->usr_rc_routes); i++)
+        sched_group->usr_rc_routes[i].uidx = MLX5_IB_DEFAULT_UIDX;
 
     for (i = 0; i < sched_group->cqb_cnt; i++) {
         cqb = sched_group->cqb_arr[i];
@@ -2596,11 +2631,12 @@ static void mlx5_ib_unmap_all_cq_ubufs(struct mlx5_ib_sched_group *sched_group)
         if (!cqb)
             continue;
 
-        vunmap(cqb->buf);
-        npages = DIV_ROUND_UP(cqb->cq_size, PAGE_SIZE);
-        put_user_pages(cqb->pages, npages);
-        kfree(cqb->pages);
-        kfree(cqb);
+        mlx5_ib_cqb_release(cqb);
+    }
+    while (sched_group->retired_cqbs) {
+        cqb = sched_group->retired_cqbs;
+        sched_group->retired_cqbs = cqb->next;
+        mlx5_ib_cqb_release(cqb);
     }
     sched_group->cqb_cnt = 0;
     mutex_unlock(&sched_group->cq_lock);
@@ -2613,13 +2649,14 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
     struct mlx5_ib_srmc *srmc;
     struct mlx5_ib_sched *sched;
     int npages;
-    int i, j;
+    int i, j, k;
 
     if (!sched_group || !sched_group->scheds || sched_group->num_sched <= 0) {
         pr_warn("mlx5_sched_exit: already cleaned or uninitialized\n");
         return;
     }
 
+    cancel_delayed_work_sync(&sched_group->cqb_reclaim_work);
     mlx5_ib_sched_stop(sched_group);
 
     /*
@@ -2633,8 +2670,6 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
         mlx5_ib_unmap_ubuf(sched_group, sqb->qpn);
     }
     sched_group->sqb_cnt = 0;
-    mlx5_ib_unmap_all_cq_ubufs(sched_group);
-
     for (i = 0; i < sched_group->num_sched; i++) {
         sched = &sched_group->scheds[i];
         for (j = 0; j < NUM_SRMC; j++) {
@@ -2651,14 +2686,22 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
                 continue;
 
             mlx5_ib_destroy_srmc_ini(srmc);
-            mlx5_ib_free_srmc_ready_seq(srmc);
-            mlx5_ib_free_srmc_usr_rc(srmc);
+            mlx5_ib_free_srmc_publish(srmc);
+            for (k = 0; k < SQ_DEPTH; k++) {
+                if (srmc->wqe_infos[k].valid &&
+                    srmc->wqe_infos[k].cqb) {
+                    srmc->wqe_infos[k].cqb = NULL;
+                    srmc->wqe_infos[k].valid = 0;
+                }
+            }
+            kvfree(srmc->wqe_infos);
             kfree(srmc);
         }
         memset(sched->srmc_by_idx, 0, sizeof(sched->srmc_by_idx));
         sched->srmc_cnt = 0;
         sched->ready_srmc_cnt = 0;
     }
+    mlx5_ib_unmap_all_cq_ubufs(sched_group);
     //     mutex_lock(&sched->srmc_lock);
     //     for (j = 0; j < NUM_SRMC; j++)
     //     {
@@ -2944,6 +2987,16 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
                 wake_up_all(&sched->init_wait);
                 break;
             }
+            srmc->wqe_infos = kvcalloc(SQ_DEPTH,
+                                       sizeof(*srmc->wqe_infos),
+                                       GFP_KERNEL);
+            if (!srmc->wqe_infos) {
+                kfree(srmc);
+                ret = -ENOMEM;
+                WRITE_ONCE(sched->init_error, ret);
+                wake_up_all(&sched->init_wait);
+                break;
+            }
             memcpy(srmc->dgid.raw, dgid->raw, sizeof(srmc->dgid.raw));
             if (flags == SRMC_CREATE_FLAG_INIT_QP)
                 srmc->ini_cb.refcnt = 0;
@@ -2970,8 +3023,8 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
                 WRITE_ONCE(sched->init_error, ret);
                 wake_up_all(&sched->init_wait);
                 mutex_unlock(&sched->srmc_lock);
-                mlx5_ib_free_srmc_ready_seq(srmc);
-                mlx5_ib_free_srmc_usr_rc(srmc);
+                mlx5_ib_free_srmc_publish(srmc);
+                kvfree(srmc->wqe_infos);
                 kfree(srmc);
                 mutex_lock(&sched->srmc_lock);
                 break;
