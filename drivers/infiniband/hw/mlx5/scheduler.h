@@ -73,6 +73,9 @@ static_assert(sizeof(struct mlx5_sq_ctrl_page) == 128);
 #define MLX5_SRM_PUBLISH_USR_MASK ((1ULL << MLX5_SRM_PUBLISH_USR_BITS) - 1)
 #define MLX5_SRM_PUBLISH_SEQ_MASK ((1ULL << 48) - 1)
 
+/* cur_put/op_own are lockless because one scheduler owns all CQ writes. */
+static_assert(NUM_SCHED == 1);
+
 static inline u64 mlx5_srm_publish_token(u64 seq, u16 usr_rc_cnt)
 {
     return ((seq & MLX5_SRM_PUBLISH_SEQ_MASK) <<
@@ -98,7 +101,6 @@ struct mlx5_ib_cqbuf
     int cqn;
     int cur_put;
     int op_own;
-    spinlock_t lock;
     u64 retire_epoch;
     struct mlx5_ib_cqbuf *next; // not loop
 } CACHELINE_ALIGNED;
@@ -217,7 +219,6 @@ struct mlx5_ib_sched
 struct mlx5_ib_usr_rc_route {
     struct mlx5_ib_cqbuf *cqb;
     u32 uidx;
-    bool valid;
 };
 struct mlx5_ib_sched_id
 {

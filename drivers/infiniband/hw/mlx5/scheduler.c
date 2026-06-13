@@ -470,7 +470,6 @@ int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group,
     uq->buf = vmap(pages, npages, VM_MAP, PAGE_KERNEL);
     uq->pages = pages;
     uq->cqe_sz = 64;
-    spin_lock_init(&uq->lock);
     if (!uq->buf)
     {
         kfree(uq);
@@ -520,8 +519,7 @@ int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn)
 
     for (j = 0; j < ARRAY_SIZE(sched_group->usr_rc_routes); j++) {
         if (READ_ONCE(sched_group->usr_rc_routes[j].cqb) == cqb) {
-            smp_store_release(&sched_group->usr_rc_routes[j].valid, false);
-            WRITE_ONCE(sched_group->usr_rc_routes[j].cqb, NULL);
+            smp_store_release(&sched_group->usr_rc_routes[j].cqb, NULL);
             WRITE_ONCE(sched_group->usr_rc_routes[j].uidx,
                        MLX5_IB_DEFAULT_UIDX);
         }
@@ -561,8 +559,7 @@ int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
     }
 
     WRITE_ONCE(sched_group->usr_rc_routes[usr_rc_cnt].uidx, uidx);
-    WRITE_ONCE(sched_group->usr_rc_routes[usr_rc_cnt].cqb, cqb);
-    smp_store_release(&sched_group->usr_rc_routes[usr_rc_cnt].valid, true);
+    smp_store_release(&sched_group->usr_rc_routes[usr_rc_cnt].cqb, cqb);
     mutex_unlock(&sched_group->cq_lock);
 
     return 0;
@@ -579,8 +576,7 @@ void mlx5_ib_unbind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
 
     mutex_lock(&sched_group->cq_lock);
     route = &sched_group->usr_rc_routes[usr_rc_cnt];
-    smp_store_release(&route->valid, false);
-    WRITE_ONCE(route->cqb, NULL);
+    smp_store_release(&route->cqb, NULL);
     WRITE_ONCE(route->uidx, MLX5_IB_DEFAULT_UIDX);
     mutex_unlock(&sched_group->cq_lock);
 }
@@ -729,7 +725,6 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                         pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
                         continue;
                     }
-                    spin_lock(&cqb->lock);
                     //  distribute
                     //  TODO:change the owner bit
                     DEBUG_LOG("cqn:%d\n", cqb->cqn);
@@ -751,7 +746,6 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                         cqb->op_own ^= MLX5_CQE_OWNER_MASK;
                     }
 
-                    spin_unlock(&cqb->lock);
                     DEBUG_LOG("distribute cqe finished\n");
                 }
             }
@@ -804,7 +798,6 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
                     pr_err("Unexpected:No cqn found for scheduler info idx %d\n", idx);
                     continue;
                 }
-                spin_lock(&cqb->lock);
                 //  distribute
                 //  TODO:change the owner bit
                 DEBUG_LOG("cqn:%d\n", cqb->cqn);
@@ -826,7 +819,6 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
                     cqb->op_own ^= MLX5_CQE_OWNER_MASK;
                 }
 
-                spin_unlock(&cqb->lock);
                 // pr_info("distribute cqe finished\n");
                 mlx5_sq_ctrl_complete(srmc->wqe_infos[idx].ctrl_page,
                                       srmc->wqe_infos[idx].wqe_counter);
@@ -899,7 +891,6 @@ static inline int srm_poll_srmc_once_debug(struct mlx5_ib_srmc *srmc, struct ib_
                     pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
                     continue;
                 }
-                spin_lock(&cqb->lock);
                 //  distribute
                 //  TODO:change the owner bit
                 DEBUG_LOG("cqn:%d\n", cqb->cqn);
@@ -921,7 +912,6 @@ static inline int srm_poll_srmc_once_debug(struct mlx5_ib_srmc *srmc, struct ib_
                     cqb->op_own ^= MLX5_CQE_OWNER_MASK;
                 }
 
-                spin_unlock(&cqb->lock);
                 DEBUG_LOG("distribute cqe finished\n");
 
                 /* 3. 写数据 */
@@ -2342,12 +2332,7 @@ int scheduler_polling(void *sched_data)
                         break;
                     }
                     route = &sched_group.usr_rc_routes[usr_rc_cnt];
-                    if (unlikely(!smp_load_acquire(&route->valid))) {
-                        pr_warn_ratelimited("inactive hollow RC id %u for srmc %d\n",
-                                            usr_rc_cnt, srmc->srmc_idx);
-                        break;
-                    }
-                    cqb = READ_ONCE(route->cqb);
+                    cqb = smp_load_acquire(&route->cqb);
                     uidx = READ_ONCE(route->uidx);
                     if (unlikely(!cqb ||
                                  uidx == MLX5_IB_DEFAULT_UIDX)) {
