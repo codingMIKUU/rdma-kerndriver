@@ -1468,7 +1468,7 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 		for (si = 0; si < max_t(int, 1, sched_group.num_sched); si++) {
 			err = is_xrc_exists(&sched_group.scheds[si], pd, &dgid,
 					    SRMC_CREATE_FLAG_INIT_QP, 0,
-					    qp->sq.wqe_cnt);
+					    qp->sq.max_post);
 			if (err < 0)
 				return err;
 		}
@@ -2947,6 +2947,7 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 		qp->rq.offset = 0;
 		qp->sq.wqe_shift = ilog2(MLX5_SEND_WQE_BB);
 		qp->sq.offset = qp->rq.wqe_cnt << qp->rq.wqe_shift;
+		qp->sq.max_post = init_attr->cap.max_send_wr;
 
 		err = set_user_buf_size(dev, qp, ucmd, base, init_attr);
 		if (err)
@@ -6091,22 +6092,29 @@ int mlx5_ib_alloc_xrcd(struct ib_xrcd *ibxrcd, struct ib_udata *udata)
 {
 	struct mlx5_ib_dev *dev = to_mdev(ibxrcd->device);
 	struct mlx5_ib_xrcd *xrcd = to_mxrcd(ibxrcd);
+	int err;
 
 	if (!MLX5_CAP_GEN(dev->mdev, xrc))
 		return -EOPNOTSUPP;
 	DEBUG_LOG("server_cb's xrcd is %p\n",xrcd);
-	if (!server.server_cb.xrcd)
-		server.server_cb.xrcd = xrcd;
+	err = mlx5_cmd_xrcd_alloc(dev->mdev, &xrcd->xrcdn, 0);
+	if (!err)
+		cmpxchg(&server.server_cb.xrcd, NULL, ibxrcd);
 
-	return mlx5_cmd_xrcd_alloc(dev->mdev, &xrcd->xrcdn, 0);
+	return err;
 }
 
-int mlx5_ib_dealloc_xrcd(struct ib_xrcd *xrcd, struct ib_udata *udata)
+int mlx5_ib_dealloc_xrcd(struct ib_xrcd *ibxrcd, struct ib_udata *udata)
 {
-	struct mlx5_ib_dev *dev = to_mdev(xrcd->device);
-	u32 xrcdn = to_mxrcd(xrcd)->xrcdn;
+	struct mlx5_ib_dev *dev = to_mdev(ibxrcd->device);
+	u32 xrcdn = to_mxrcd(ibxrcd)->xrcdn;
+	int err;
 
-	return mlx5_cmd_xrcd_dealloc(dev->mdev, xrcdn, 0);
+	err = mlx5_cmd_xrcd_dealloc(dev->mdev, xrcdn, 0);
+	if (!err)
+		cmpxchg(&server.server_cb.xrcd, ibxrcd, NULL);
+
+	return err;
 }
 
 static void mlx5_ib_wq_event(struct mlx5_core_qp *core_qp, int type)

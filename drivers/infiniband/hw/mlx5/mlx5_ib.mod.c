@@ -140,6 +140,7 @@ __used __section(__versions) = {
 	{ 0xc6f46339, "init_timer_key" },
 	{ 0xbd34c34e, "ib_free_cq" },
 	{ 0xf026c585, "sock_create_kern" },
+	{ 0x9fa7184a, "cancel_delayed_work_sync" },
 	{ 0x409bcb62, "mutex_unlock" },
 	{ 0x85df9b6c, "strsep" },
 	{ 0x77815903, "ib_uverbs_flow_resources_free" },
@@ -236,6 +237,7 @@ __used __section(__versions) = {
 	{ 0xf74bb274, "mod_delayed_work_on" },
 	{ 0x6e5f21e4, "ib_umem_odp_unmap_dma_pages" },
 	{ 0x1fd219aa, "mlx5_del_flow_rules" },
+	{ 0xffb7c514, "ida_free" },
 	{ 0xa1c76e0a, "_cond_resched" },
 	{ 0x4d9b652b, "rb_erase" },
 	{ 0xef4907a0, "rdma_user_mmap_entry_get_pgoff" },
@@ -331,8 +333,8 @@ __used __section(__versions) = {
 	{ 0x1ef1e99b, "mlx5_wc_support_get" },
 	{ 0x1000e51, "schedule" },
 	{ 0x8ddd8aad, "schedule_timeout" },
-	{ 0xb8b9f817, "kmalloc_order_trace" },
 	{ 0x1d24c881, "___ratelimit" },
+	{ 0xb8b9f817, "kmalloc_order_trace" },
 	{ 0x4f536e99, "memtrack_free" },
 	{ 0xac5fcec0, "in4_pton" },
 	{ 0x49f1c944, "mlx5_rdma_rn_get_params" },
@@ -474,6 +476,7 @@ __used __section(__versions) = {
 	{ 0x88db9f48, "__check_object_size" },
 	{ 0x17c34c10, "__put_page" },
 	{ 0x93eb6339, "mlx5_eswitch_add_send_to_vport_rule" },
+	{ 0xe7a02573, "ida_alloc_range" },
 	{ 0xe914e41e, "strcpy" },
 	{ 0x587f22d7, "devmap_managed_key" },
 	{ 0x8a35b432, "sme_me_mask" },
@@ -482,4 +485,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "B8B8C6E1FD48531B1AD73E0");
+MODULE_INFO(srcversion, "4525E5B3C0398D47DD0E536");

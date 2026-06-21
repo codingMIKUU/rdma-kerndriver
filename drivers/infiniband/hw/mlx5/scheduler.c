@@ -2934,6 +2934,7 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
 
     DEBUG_LOG("in is_xrc_exists,gid.in_id = %llx, gid.subnet = %llx\n", dgid->global.interface_id, dgid->global.subnet_prefix);
     DEBUG_LOG("gid.raw[15]:%u\n", dgid->raw[15]);
+    pr_info("in is_xrc_exists, sq_depth:%u\n", sq_depth);
     struct mlx5_ib_srmc *srmc;
     int ret = 1;
     int i, j;
