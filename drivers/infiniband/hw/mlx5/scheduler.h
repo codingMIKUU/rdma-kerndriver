@@ -7,11 +7,11 @@
 #include <linux/wait.h>
 #include <rdma/rdma_cm.h>
 
-#define SQ_DEPTH 30000
+#define SQ_DEPTH 35000
 static int debug = 0;
-#define NUM_SRMC 8192
+#define NUM_SRMC 1024
 // 对于接收端，NUM_SRMC等于num_kqps*2才行（因为只有一个调度器，发送端两个调度器全发往它了）
-#define NUM_SQB 1000000
+#define NUM_SQB 35000
 #define NUM_LEVEL 2
 
 #define IP_ADDR "192.168.1.5"
@@ -42,7 +42,7 @@ static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 static const size_t QUEUE_LIMIT = 256 * 1024;
 static const size_t SCHED_SIZE_LIMIT = 8 * 1024;
 
-static u64 LIMIT_BATCHING = 100000;
+static u64 LIMIT_BATCHING = 50;
 
 #define DEBUG_LOG \
     if (debug)    \

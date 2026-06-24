@@ -945,6 +945,60 @@ static inline int srm_poll_srmc_once_debug(struct mlx5_ib_srmc *srmc, struct ib_
     }
 }
 
+static __always_inline u32
+srmc_cq_depth(const struct mlx5_ib_srmc *srmc)
+{
+    if (srmc->ini_cb.cq && srmc->ini_cb.cq->cqe)
+        return srmc->ini_cb.cq->cqe;
+
+    return SQ_DEPTH;
+}
+
+static __always_inline bool
+srmc_cq_full(const struct mlx5_ib_srmc *srmc)
+{
+    return srmc->sig_cnt >= srmc_cq_depth(srmc);
+}
+
+/*
+ * A full shared CQ cannot be deferred to the next scheduler round: another
+ * KQP sharing it could ring its doorbell and overrun the CQ. Keep polling
+ * until the requested resource has space. Periodically reschedule so module
+ * shutdown remains responsive while the next CQE is not visible yet.
+ */
+static __always_inline int srm_poll_until_space(
+    struct mlx5_ib_srmc *cq_srmc,
+    bool drain_all,
+    struct ib_wc *wc,
+    void **cqe,
+    int *free_cqe_idx,
+    int *free_cqe_cnt)
+{
+    unsigned int empty_polls = 0;
+    int polled = 0;
+    int ret;
+
+    while (!kthread_should_stop() &&
+           (drain_all ? cq_srmc->sig_cnt != 0 :
+            srmc_cq_full(cq_srmc))) {
+        ret = srm_poll_srmc_once(cq_srmc, wc, cqe, free_cqe_idx,
+                                 free_cqe_cnt);
+        if (ret > 0) {
+            polled += ret;
+            empty_polls = 0;
+            continue;
+        }
+
+        cpu_relax();
+        if (++empty_polls == 1024) {
+            empty_polls = 0;
+            cond_resched();
+        }
+    }
+
+    return polled;
+}
+
 static inline uint32_t srm_fastrand(uint64_t *seed)
 {
     *seed = *seed * 1103515245 + 12345;
@@ -979,7 +1033,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 32;
+const int num_kqps = 256;
 
 struct mlx5_ib_srm_kqp_stats {
     u64 scans;
@@ -1136,58 +1190,18 @@ static __always_inline int poll_srmc_inline(
         if (unlikely(pre_srmcs[*polling_head] != NULL))
         {
             pr_info("[sched-%d] cq polling queue exceed queue length\n", id);
-            while (pre_srmc->sig_cnt && !kthread_should_stop())
-            {
-                ret = srm_poll_srmc_once(pre_srmc, wc, cqe, free_cqe_idx, free_cqe_cnt);
-                if (ret > 0)
-                    polled += ret;
-                else {
-                    /*
-                     * CQE may not be visible yet. Preserve this SRMC at the
-                     * queue tail instead of dropping it or busy-spinning.
-                     */
-                    pre_srmcs[old_tail] = pre_srmc;
-                    *polling_tail = old_tail;
-                    cond_resched();
-                    return polled;
-                }
-            }
+            polled += srm_poll_until_space(pre_srmc, true, wc, cqe,
+                                           free_cqe_idx, free_cqe_cnt);
             in_queue[pre_srmc->srmc_idx & (CQ_NUM - 1)] = 0; // 位运算优化
         }
-        // 情况2：sig_cnt超过SQ_DEPTH或SQ队列满，需处理至安全范围
-        else if (unlikely(pre_srmc->sig_cnt >= pre_srmc->ini_cb.qp->sq.wqe_cnt ||
-                          (int)(pre_srmc->ini_cb.qp->sq.head -
-                                pre_srmc->ini_cb.qp->sq.tail) >=
-                              pre_srmc->ini_cb.qp->sq.max_post))
+        // 情况2：共享CQ已满，必须poll到至少出现一个空位
+        else if (unlikely(srmc_cq_full(pre_srmc)))
         {
-            if (pre_srmc->sig_cnt >= pre_srmc->ini_cb.qp->sq.wqe_cnt)
-            {
-                pr_info("[sched-%d] cq queue exceed qp depth\n", id);
-            }
-            else
-            {
-                pr_info("[sched-%d] exceed max_post00, sq.head:%d, sq.tail:%d, max_post:%d\n",
-                        id, pre_srmc->ini_cb.qp->sq.head,
-                        pre_srmc->ini_cb.qp->sq.tail,
-                        pre_srmc->ini_cb.qp->sq.max_post);
-            }
-            // 循环处理至sig_cnt < SQ_DEPTH且SQ不满
-            while (!kthread_should_stop() &&
-                   (pre_srmc->sig_cnt >= pre_srmc->ini_cb.qp->sq.wqe_cnt ||
-                   (pre_srmc->ini_cb.qp->sq.head -
-                    pre_srmc->ini_cb.qp->sq.tail) >=
-                       pre_srmc->ini_cb.qp->sq.max_post))
-            {
-                ret = srm_poll_srmc_once(pre_srmc, wc, cqe, free_cqe_idx, free_cqe_cnt);
-                if (ret > 0)
-                    polled += ret;
-                else {
-                    pre_srmcs[old_tail] = pre_srmc;
-                    *polling_tail = old_tail;
-                    cond_resched();
-                    return polled;
-                }
-            }
+            pr_info_ratelimited(
+                "[sched-%d] shared CQ full: pending=%d depth=%u\n",
+                id, pre_srmc->sig_cnt, srmc_cq_depth(pre_srmc));
+            polled += srm_poll_until_space(pre_srmc, false, wc, cqe,
+                                           free_cqe_idx, free_cqe_cnt);
             // 处理完成后判断是否仍有剩余信号
             if (!pre_srmc->sig_cnt)
             {
@@ -2091,8 +2105,9 @@ int scheduler_polling(void *sched_data)
                                        free_cqe_idx, &free_cqe_cnt, id);
                 mlx5_ib_srm_record_cq_poll(&srm_stats, ret, poll_start);
             }
-            if (ret > 0)
+            if (ret > 0) {
                 user_tot_cqes += ret;
+            }
 
             struct mlx5_sq_ctrl_page *ctrl_page;
             u64 credit;
@@ -2199,12 +2214,29 @@ int scheduler_polling(void *sched_data)
                 continue;
             }
 
+            if (unlikely(srmc_cq_full(pre_srmc))) {
+                ret = srm_poll_until_space(pre_srmc, false, wc, cqe,
+                                           free_cqe_idx, &free_cqe_cnt);
+                if (ret > 0) {
+                    user_tot_cqes += ret;
+                }
+                if (kthread_should_stop())
+                    goto out;
+            }
+
             {
+                u32 cq_depth = srmc_cq_depth(pre_srmc);
+                u32 cq_pending = min_t(u32, pre_srmc->sig_cnt, cq_depth);
+                u32 cq_avail = cq_depth - cq_pending;
                 int batch = min_t(u64, free_cqe_cnt, credit);
                 int sent = 0;
                 u64 blocked_token = U64_MAX;
                 bool publish_blocked = false;
                 struct mlx5_wqe_ctrl_seg *last_ctrl = NULL;
+
+                batch = min_t(u32, batch, cq_avail);
+                if (!batch)
+                    continue;
 
                 while (sent < batch) {
                     uint32_t usr_rc_cnt;
@@ -2359,26 +2391,16 @@ int scheduler_polling(void *sched_data)
                 if (!in_queue[cq_idx])
                 {
                     if (pre_srmcs[polling_head] != NULL) {
-                        int old_tail = polling_tail;
-
                         pre_srmc = pre_srmcs[polling_tail];
                         pre_srmcs[polling_tail] = NULL;
                         polling_tail = (polling_tail + 1) % SRMC_POLLING_CNT;
                         pr_info("err:exceed queue length\n");
                         if (pre_srmc) {
-                            while (pre_srmc->sig_cnt &&
-                                   !kthread_should_stop()) {
-                                ret = srm_poll_srmc_once(pre_srmc, wc, cqe,
-                                                         free_cqe_idx,
-                                                         &free_cqe_cnt);
-                                if (ret > 0) {
-                                    user_tot_cqes += ret;
-                                } else {
-                                    pre_srmcs[old_tail] = pre_srmc;
-                                    polling_tail = old_tail;
-                                    cond_resched();
-                                    break;
-                                }
+                            ret = srm_poll_until_space(
+                                pre_srmc, true, wc, cqe, free_cqe_idx,
+                                &free_cqe_cnt);
+                            if (ret > 0) {
+                                user_tot_cqes += ret;
                             }
                             if (!pre_srmc->sig_cnt)
                                 in_queue[pre_srmc->srmc_idx % CQ_NUM] = 0;
@@ -2400,20 +2422,6 @@ int scheduler_polling(void *sched_data)
                 pre_srmc->sig_cnt += sent;
             }
 
-            if (pre_srmc && pre_srmc->sig_cnt &&
-                time_after(jiffies, pre_srmc->last_db_jiffies + HZ) &&
-                time_after(jiffies,
-                           pre_srmc->last_stall_warn_jiffies + HZ)) {
-                pre_srmc->last_stall_warn_jiffies = jiffies;
-                pr_warn(
-                    "hollow RC CQ stalled: cq_srmc=%d sig_cnt=%d kernel_db=%llu user_cqe=%llu sq_head=%u sq_tail=%u last_db=%lu last_cqe=%lu\n",
-                    pre_srmc->srmc_idx, pre_srmc->sig_cnt,
-                    kernel_tot_db, user_tot_cqes,
-                    pre_srmc->ini_cb.qp->sq.head,
-                    pre_srmc->ini_cb.qp->sq.tail,
-                    pre_srmc->last_db_jiffies,
-                    pre_srmc->last_cqe_jiffies);
-            }
             // pre_srmc->cur_cqe++;
         }
         mlx5_ib_srm_report_stats(sched, &srm_stats);
@@ -3621,7 +3629,12 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
 
     // create cq
     memset(&cq_attr, 0, sizeof cq_attr);
-    cq_attr.cqe = cb->txdepth;
+    /*
+     * All scheduler KQPs in this CQ group share one hardware CQ. Its depth
+     * must cover the scheduler-wide completion metadata pool, rather than
+     * only the SQ depth of the first KQP that creates it.
+     */
+    cq_attr.cqe = SQ_DEPTH;
     cq_attr.comp_vector = 0;
     // change to event?
     if (!shared_cq[id][srmc->srmc_idx % CQ_NUM]) {
