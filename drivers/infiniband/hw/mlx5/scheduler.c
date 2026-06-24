@@ -1065,7 +1065,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 256;
+const int num_kqps = 32;
 
 struct mlx5_ib_srm_kqp_stats {
     u64 scans;
