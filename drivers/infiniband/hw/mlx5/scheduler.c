@@ -262,6 +262,8 @@ static inline struct mlx5_sq_ctrl_page *mlx5_sq_ctrl_get_slot(
                pool->pages[page_idx]) + page_off);
 }
 
+struct mlx5_ib_sqbuf *mlx5_ib_find_sqbuf_by_qpn(struct mlx5_ib_sched_group *sched_group, int qpn);
+
 
                                                    
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx)
@@ -289,7 +291,30 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
         return -EFAULT;
     }
     mutex_lock(&sched_group->sq_lock);
+
+    if (sched_group->sqb_cnt >= ARRAY_SIZE(sched_group->sqb_arr)) {
+        mutex_unlock(&sched_group->sq_lock);
+        put_user_pages(pages, npages);
+        kfree(pages);
+        return -ENOSPC;
+    }
+
+    if (mlx5_ib_find_sqbuf_by_qpn(sched_group, qpn)) {
+        mutex_unlock(&sched_group->sq_lock);
+        put_user_pages(pages, npages);
+        kfree(pages);
+        pr_warn_ratelimited("SQ buffer QPN %d is already mapped\n", qpn);
+        return -EEXIST;
+    }
+
     uq = kzalloc(sizeof(struct mlx5_ib_sqbuf), GFP_KERNEL);
+    if (!uq) {
+        mutex_unlock(&sched_group->sq_lock);
+        put_user_pages(pages, npages);
+        kfree(pages);
+        return -ENOMEM;
+    }
+
     uq->qpn = qpn;
     uq->uidx = uidx;
     uq->sq_size = size;
@@ -584,8 +609,12 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
     for (i = 0; i < sched_group->sqb_cnt; i++)
     {
         sqb = sched_group->sqb_arr[i];
-        if (sqb == NULL)
+        if (!sqb)
             continue;
+        if (IS_ERR(sqb)) {
+            sched_group->sqb_arr[i] = NULL;
+            continue;
+        }
         if (sqb->qpn == qpn)
         {
             sched_group->sqb_arr[i] = NULL;
@@ -598,6 +627,9 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
             break;
         }
     }
+    while (sched_group->sqb_cnt &&
+           !sched_group->sqb_arr[sched_group->sqb_cnt - 1])
+        sched_group->sqb_cnt--;
 
     mutex_unlock(&sched_group->sq_lock);
     return 0;
@@ -2668,6 +2700,12 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
         sqb = sched_group->sqb_arr[i];
         if (!sqb)
             continue;
+        if (IS_ERR(sqb)) {
+            pr_warn("mlx5_sched_exit: dropping invalid sqb slot %d: %ld\n",
+                    i, PTR_ERR(sqb));
+            sched_group->sqb_arr[i] = NULL;
+            continue;
+        }
         mlx5_ib_unmap_ubuf(sched_group, sqb->qpn);
     }
     sched_group->sqb_cnt = 0;
