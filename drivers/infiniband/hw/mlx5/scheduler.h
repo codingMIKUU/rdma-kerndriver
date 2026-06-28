@@ -42,7 +42,7 @@ static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 static const size_t QUEUE_LIMIT = 256 * 1024;
 static const size_t SCHED_SIZE_LIMIT = 8 * 1024;
 
-static u64 LIMIT_BATCHING = 1000;
+static u64 LIMIT_BATCHING = 100000000;
 
 #define DEBUG_LOG \
     if (debug)    \
