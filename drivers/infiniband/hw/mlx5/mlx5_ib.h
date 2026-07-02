@@ -566,12 +566,15 @@ struct mlx5_ib_qp {
 	struct mlx5_qp_sq_mmap_entry *sq_mmap_entry;
 	struct mlx5_qp_ctrl_mmap_entry *sq_ctrl_entry;
 	struct mlx5_qp_publish_mmap_entry *sq_publish_entry;
+	struct mlx5_qp_sq_mmap_entry *large_sq_mmap_entry;
+	struct mlx5_qp_publish_mmap_entry *large_sq_publish_entry;
 	u32			sq_ctrl_slot_idx;
 	u16			usr_rc_id;
 	u8			usr_rc_id_valid:1;
 	u8			kernel_db:1;
 	u8			is_srmc_kernel_qp:1;
 	struct mlx5_ib_srmc	*srmc_owner;
+	struct mlx5_ib_srmc	*large_srmc_owner;
 
 	struct list_head	qps_list;
 	struct list_head	cq_recv_list;

@@ -486,6 +486,22 @@ struct mlx5_ib_modify_qp_resp {
 	__u32	kernel_sq_max_gs;
 	__u32	kernel_sq_qp_state_max_gs;
 	__u32	kernel_max_inline_data;
+	__u32	large_sq_state_slot_idx;
+	__u32	large_reserved1;
+	__u64	large_sq_mmap_offset;
+	__u32	large_sq_mmap_len;
+	__u32	large_reserved2;
+	__u64	large_publish_mmap_offset;
+	__u32	large_publish_mmap_len;
+	__u32	large_publish_depth;
+	__u32	large_kernel_qpn;
+	__u32	large_kernel_sq_wqe_cnt;
+	__u32	large_kernel_sq_wqe_shift;
+	__u32	large_kernel_sq_max_post;
+	__u32	large_kernel_sq_max_gs;
+	__u32	large_kernel_sq_qp_state_max_gs;
+	__u32	large_kernel_max_inline_data;
+	__u32	large_reserved3;
 };
 
 enum mlx5_ib_modify_qp_resp_mask {

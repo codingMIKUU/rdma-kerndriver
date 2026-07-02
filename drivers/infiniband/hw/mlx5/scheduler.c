@@ -1193,6 +1193,11 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
 
 const int num_kqps = 256;
 
+static inline int mlx5_srm_effective_kqps(void)
+{
+    return num_kqps * NUM_LEVEL;
+}
+
 struct mlx5_ib_srm_kqp_stats {
     u64 scans;
     u64 active_scans;
@@ -1416,7 +1421,7 @@ static void mlx5_ib_srm_report_stats(
     if (!stats->kqp)
         return;
 
-    for (i = 0; i < min(num_kqps, stats->kqp_cnt); i++) {
+    for (i = 0; i < min(mlx5_srm_effective_kqps(), stats->kqp_cnt); i++) {
         struct mlx5_ib_srm_kqp_stats *k = &stats->kqp[i];
 
         scans += k->scans;
@@ -1506,7 +1511,7 @@ static void mlx5_ib_srm_report_stats(
                             stats->cq_poll_calls)
                 : 0);
 
-    for (i = 0; i < min(num_kqps, stats->kqp_cnt); i++) {
+    for (i = 0; i < min(mlx5_srm_effective_kqps(), stats->kqp_cnt); i++) {
         struct mlx5_ib_srm_kqp_stats *k = &stats->kqp[i];
         struct mlx5_ib_srmc *srmc;
 
@@ -1679,7 +1684,7 @@ static __always_inline struct mlx5_ib_srmc *find_target_srmc(struct mlx5_ib_sche
             }
 
             // 随机选择一个SRMC（负载均衡）
-            uint32_t rd = prandom_u32_max(num_kqps);
+            uint32_t rd = prandom_u32_max(mlx5_srm_effective_kqps());
             j = (j + rd) % NUM_SRMC;
             srmc = sched->srmc_tb[j];
             return srmc;
@@ -2429,7 +2434,7 @@ int scheduler_polling(void *sched_data)
         ret = wait_event_interruptible(sched->init_wait,
             kthread_should_stop() ||
             READ_ONCE(sched->init_error) ||
-            smp_load_acquire(&sched->ready_srmc_cnt) >= num_kqps);
+            smp_load_acquire(&sched->ready_srmc_cnt) >= mlx5_srm_effective_kqps());
         if (ret)
             continue;
         if (kthread_should_stop())
@@ -2494,7 +2499,7 @@ int scheduler_polling(void *sched_data)
                                  kthread_should_stop());
         goto out;
     }
-    srm_stats->kqp_cnt = num_kqps;
+    srm_stats->kqp_cnt = mlx5_srm_effective_kqps();
     srm_stats->kqp = kvcalloc(srm_stats->kqp_cnt,
                               sizeof(*srm_stats->kqp), GFP_KERNEL);
     if (!srm_stats->kqp) {
@@ -2530,7 +2535,7 @@ int scheduler_polling(void *sched_data)
             }
         }
 
-        for (i = 0; i < num_kqps; i++) {
+        for (i = 0; i < mlx5_srm_effective_kqps(); i++) {
 
 
             if (cnt % 1000000 == 0)
@@ -2595,7 +2600,7 @@ int scheduler_polling(void *sched_data)
                                 user_tot_cqes,
                                 pre_srmc->ini_cb.qp->sq.head,
                                 pre_srmc->ini_cb.qp->sq.tail);
-                            for (j = 0; j < num_kqps; j++) {
+                            for (j = 0; j < mlx5_srm_effective_kqps(); j++) {
                                 struct mlx5_ib_srmc *shared_srmc;
                                 struct mlx5_sq_ctrl_page *shared_ctrl;
 
@@ -3418,6 +3423,8 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
 
     if (depth > SQ_DEPTH)
         return -EINVAL;
+    if (mlx5_srm_effective_kqps() > NUM_SRMC)
+        return -EINVAL;
     hash_id = sched_hash_ip((char *)dgid->raw + 12, NUM_SRMC);
     mutex_lock(&sched->srmc_lock);
     for (i = 0; i < NUM_SRMC; i++)
@@ -3445,7 +3452,7 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
             mutex_unlock(&sched->srmc_lock);
             return -1;
         }
-        for (i = 0; i < num_kqps; i++)
+        for (i = 0; i < mlx5_srm_effective_kqps(); i++)
         {
             // srmc no exists
             srmc = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
@@ -3507,12 +3514,12 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
 	    }
 
 	    if (has_srmc && flags == SRMC_CREATE_FLAG_INIT_QP &&
-	        (smp_load_acquire(&sched->ready_srmc_cnt) < num_kqps ||
+	        (smp_load_acquire(&sched->ready_srmc_cnt) < mlx5_srm_effective_kqps() ||
 	         READ_ONCE(sched->init_error))) {
 	        mutex_unlock(&sched->srmc_lock);
 	        ret = wait_event_interruptible_timeout(sched->init_wait,
 	            READ_ONCE(sched->init_error) ||
-	            smp_load_acquire(&sched->ready_srmc_cnt) >= num_kqps,
+	            smp_load_acquire(&sched->ready_srmc_cnt) >= mlx5_srm_effective_kqps(),
 	            msecs_to_jiffies(5000));
 	        if (ret < 0)
 	            return ret;

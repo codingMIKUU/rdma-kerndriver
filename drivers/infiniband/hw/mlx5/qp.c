@@ -101,6 +101,7 @@ struct mlx5_ib_sqd {
 };
 
 extern struct mlx5_ib_sched_group sched_group;
+extern const int num_kqps;
 
 extern struct mlx5_ib_server server;
 
@@ -1158,6 +1159,8 @@ static struct mlx5_ib_srmc *mlx5_ib_find_random_srmc_by_gid(union ib_gid *dgid)
 			if (memcmp(srmc->dgid.raw, dgid->raw,
 				   sizeof(srmc->dgid.raw)) != 0)
 				continue;
+			if (srmc->srmc_idx >= num_kqps)
+				continue;
 			if (!srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
 				continue;
 
@@ -1184,6 +1187,7 @@ static int mlx5_ib_prepare_qp_sq_mmap(struct mlx5_ib_dev *dev,
 				      u64 *mmap_offset, u32 *mmap_len)
 {
 	struct mlx5_ib_qp *sq_qp = qp->srmc_owner ? qp->srmc_owner->ini_cb.qp : qp;
+	struct mlx5_qp_sq_mmap_entry **entry = &qp->sq_mmap_entry;
 	struct mlx5_frag_buf *sq_buf = &sq_qp->buf;
 	size_t sq_bytes = sq_qp->sq.wqe_cnt << sq_qp->sq.wqe_shift;
 	size_t sq_offset = sq_qp->sq.offset;
@@ -1197,9 +1201,9 @@ static int mlx5_ib_prepare_qp_sq_mmap(struct mlx5_ib_dev *dev,
 	if (!sq_buf->frags || !sq_bytes)
 		return -EINVAL;
 
-	if (qp->sq_mmap_entry) {
-		*mmap_offset = mlx5_qp_entry_to_mmap_offset(&qp->sq_mmap_entry->mentry);
-		*mmap_len = qp->sq_mmap_entry->npages * PAGE_SIZE;
+	if (*entry) {
+		*mmap_offset = mlx5_qp_entry_to_mmap_offset(&(*entry)->mentry);
+		*mmap_len = (*entry)->npages * PAGE_SIZE;
 		return 0;
 	}
 
@@ -1234,7 +1238,69 @@ static int mlx5_ib_prepare_qp_sq_mmap(struct mlx5_ib_dev *dev,
 
 	*mmap_offset = mlx5_qp_entry_to_mmap_offset(&sqe->mentry);
 	*mmap_len = npages * PAGE_SIZE;
-	qp->sq_mmap_entry = sqe;
+	*entry = sqe;
+
+	return 0;
+}
+
+static int mlx5_ib_prepare_srmc_sq_mmap(struct mlx5_ib_ucontext *context,
+					struct mlx5_ib_qp *user_qp,
+					struct mlx5_ib_srmc *srmc,
+					struct mlx5_qp_sq_mmap_entry **entry,
+					u64 *mmap_offset, u32 *mmap_len)
+{
+	struct mlx5_ib_qp *sq_qp = srmc ? srmc->ini_cb.qp : user_qp;
+	struct mlx5_frag_buf *sq_buf = &sq_qp->buf;
+	size_t sq_bytes = sq_qp->sq.wqe_cnt << sq_qp->sq.wqe_shift;
+	size_t sq_offset = sq_qp->sq.offset;
+	u32 first_page = sq_offset / PAGE_SIZE;
+	u32 last_page = (sq_offset + sq_bytes - 1) / PAGE_SIZE;
+	u32 npages = last_page - first_page + 1;
+	struct mlx5_qp_sq_mmap_entry *sqe;
+	u32 i;
+	int err;
+
+	if (!sq_buf->frags || !sq_bytes)
+		return -EINVAL;
+
+	if (*entry) {
+		*mmap_offset = mlx5_qp_entry_to_mmap_offset(&(*entry)->mentry);
+		*mmap_len = (*entry)->npages * PAGE_SIZE;
+		return 0;
+	}
+
+	sqe = kzalloc(sizeof(*sqe), GFP_KERNEL);
+	if (!sqe)
+		return -ENOMEM;
+
+	sqe->pages = kcalloc(npages, sizeof(struct page *), GFP_KERNEL);
+	if (!sqe->pages) {
+		kfree(sqe);
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < npages; i++)
+		sqe->pages[i] = virt_to_page(sq_buf->frags[first_page + i].buf);
+
+	sqe->npages = npages;
+	sqe->mentry.mmap_flag = MLX5_IB_MMAP_TYPE_QP_SQ;
+	sqe->mentry.address = 0;
+	sqe->mentry.page_idx = 0;
+
+	err = rdma_user_mmap_entry_insert_range(&context->ibucontext,
+						&sqe->mentry.rdma_entry,
+						npages * PAGE_SIZE,
+						(MLX5_IB_MMAP_OFFSET_START << 16),
+						((MLX5_IB_MMAP_OFFSET_END << 16) + (1UL << 16) - 1));
+	if (err) {
+		kfree(sqe->pages);
+		kfree(sqe);
+		return err;
+	}
+
+	*mmap_offset = mlx5_qp_entry_to_mmap_offset(&sqe->mentry);
+	*mmap_len = npages * PAGE_SIZE;
+	*entry = sqe;
 
 	return 0;
 }
@@ -1414,6 +1480,52 @@ static int mlx5_ib_create_qp_publish_mmap(struct mlx5_ib_ucontext *context,
 	return 0;
 }
 
+static int mlx5_ib_create_srmc_publish_mmap(struct mlx5_ib_ucontext *context,
+					   struct mlx5_ib_qp *qp,
+					   struct mlx5_ib_srmc *srmc,
+					   struct mlx5_qp_publish_mmap_entry **entry,
+					   u64 *mmap_offset, u32 *mmap_len,
+					   u32 *publish_depth)
+{
+	struct mlx5_qp_publish_mmap_entry *publish;
+	int err;
+
+	if (!srmc)
+		return -EINVAL;
+
+	err = mlx5_ib_alloc_srmc_publish(srmc, srmc->ini_cb.qp->sq.wqe_cnt);
+	if (err)
+		return err;
+
+	if (!*entry) {
+		publish = kzalloc(sizeof(*publish), GFP_KERNEL);
+		if (!publish)
+			return -ENOMEM;
+
+		publish->mentry.mmap_flag = MLX5_IB_MMAP_TYPE_QP_PUBLISH;
+		publish->pages = srmc->publish_pages;
+		publish->npages = srmc->publish_npages;
+
+		err = rdma_user_mmap_entry_insert_range(&context->ibucontext,
+								&publish->mentry.rdma_entry,
+								publish->npages * PAGE_SIZE,
+								(MLX5_IB_MMAP_OFFSET_START << 16),
+								((MLX5_IB_MMAP_OFFSET_END << 16) + (1UL << 16) - 1));
+		if (err) {
+			kfree(publish);
+			return err;
+		}
+
+		*entry = publish;
+	}
+
+	publish = *entry;
+	*mmap_offset = mlx5_qp_entry_to_mmap_offset(&publish->mentry);
+	*mmap_len = publish->npages * PAGE_SIZE;
+	*publish_depth = srmc->publish_depth;
+	return 0;
+}
+
 static void mlx5_ib_fill_kernel_qp_info(struct mlx5_ib_qp *qp,
 					 struct mlx5_ib_modify_qp_resp *resp)
 {
@@ -1433,6 +1545,24 @@ static void mlx5_ib_fill_kernel_qp_info(struct mlx5_ib_qp *qp,
 	resp->comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_KERNEL_QP_INFO;
 }
 
+static void mlx5_ib_fill_large_kernel_qp_info(struct mlx5_ib_srmc *srmc,
+					      struct mlx5_ib_modify_qp_resp *resp)
+{
+	struct mlx5_ib_qp *kqp;
+
+	if (!srmc || !srmc->ini_cb.qp)
+		return;
+
+	kqp = srmc->ini_cb.qp;
+	resp->large_kernel_qpn = kqp->ibqp.qp_num;
+	resp->large_kernel_sq_wqe_cnt = kqp->sq.wqe_cnt;
+	resp->large_kernel_sq_wqe_shift = kqp->sq.wqe_shift;
+	resp->large_kernel_sq_max_post = kqp->sq.max_post;
+	resp->large_kernel_sq_max_gs = kqp->sq.max_gs;
+	resp->large_kernel_sq_qp_state_max_gs = kqp->sq.max_gs;
+	resp->large_kernel_max_inline_data = kqp->max_inline_data;
+}
+
 static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 					 struct ib_pd *pd,
 					 struct mlx5_ib_qp *qp,
@@ -1444,6 +1574,7 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 	struct mlx5_ib_ucontext *context;
 	const struct ib_global_route *grh;
 	struct mlx5_ib_srmc *srmc;
+	struct mlx5_ib_srmc *large_srmc;
 	union ib_gid dgid = {};
 	int si;
 	int err;
@@ -1476,10 +1607,21 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 		srmc = mlx5_ib_find_random_srmc_by_gid(&dgid);
 		if (!srmc || !srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
 			return -EINVAL;
+		if (srmc->srmc_idx + num_kqps >= NUM_SRMC)
+			return -EINVAL;
+		large_srmc = sched_group.scheds[0].srmc_by_idx[srmc->srmc_idx + num_kqps];
+		if (!large_srmc || !large_srmc->ini_cb.qp ||
+		    !large_srmc->ini_cb.qp->buf.frags)
+			return -EINVAL;
+		large_srmc->ini_cb.refcnt++;
 		qp->srmc_owner = srmc;
-		pr_info("hollow RC attach: usr_rc=%u srmc=%d kernel_qpn=%u users=%d\n",
+		qp->large_srmc_owner = large_srmc;
+		pr_info("hollow RC attach: usr_rc=%u small_srmc=%d small_qpn=%u large_srmc=%d large_qpn=%u users=%d\n",
 			qp->ibqp.qp_num, srmc->srmc_idx,
-			srmc->ini_cb.qp->ibqp.qp_num, srmc->ini_cb.refcnt);
+			srmc->ini_cb.qp->ibqp.qp_num,
+			large_srmc->srmc_idx,
+			large_srmc->ini_cb.qp->ibqp.qp_num,
+			srmc->ini_cb.refcnt);
 	}
 
 	err = mlx5_ib_modify_qp_sq_mmap(dev, context, qp, resp);
@@ -1489,12 +1631,32 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 	err = mlx5_ib_create_qp_ctrl_mmap(dev, context, qp, resp);
 	if (err)
 		return err;
+	if (!qp->large_srmc_owner)
+		return -EINVAL;
+	resp->large_sq_state_slot_idx = qp->large_srmc_owner->srmc_idx;
 
 	err = mlx5_ib_create_qp_publish_mmap(context, qp, resp);
 	if (err)
 		return err;
 
+	err = mlx5_ib_prepare_srmc_sq_mmap(context, qp, qp->large_srmc_owner,
+					   &qp->large_sq_mmap_entry,
+					   &resp->large_sq_mmap_offset,
+					   &resp->large_sq_mmap_len);
+	if (err)
+		return err;
+
+	err = mlx5_ib_create_srmc_publish_mmap(context, qp,
+					       qp->large_srmc_owner,
+					       &qp->large_sq_publish_entry,
+					       &resp->large_publish_mmap_offset,
+					       &resp->large_publish_mmap_len,
+					       &resp->large_publish_depth);
+	if (err)
+		return err;
+
 	mlx5_ib_fill_kernel_qp_info(qp, resp);
+	mlx5_ib_fill_large_kernel_qp_info(qp->large_srmc_owner, resp);
 	return 0;
 }
 
@@ -1699,11 +1861,26 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 				&qp->sq_publish_entry->mentry.rdma_entry);
 			qp->sq_publish_entry = NULL;
 		}
+		if (qp->large_sq_mmap_entry) {
+			rdma_user_mmap_entry_remove(
+				&qp->large_sq_mmap_entry->mentry.rdma_entry);
+			qp->large_sq_mmap_entry = NULL;
+		}
+		if (qp->large_sq_publish_entry) {
+			rdma_user_mmap_entry_remove(
+				&qp->large_sq_publish_entry->mentry.rdma_entry);
+			qp->large_sq_publish_entry = NULL;
+		}
 
 		if (qp->srmc_owner) {
 			if (qp->srmc_owner->ini_cb.refcnt > 0)
 				qp->srmc_owner->ini_cb.refcnt--;
 			qp->srmc_owner = NULL;
+		}
+		if (qp->large_srmc_owner) {
+			if (qp->large_srmc_owner->ini_cb.refcnt > 0)
+				qp->large_srmc_owner->ini_cb.refcnt--;
+			qp->large_srmc_owner = NULL;
 		}
 		if (qp->usr_rc_id_valid) {
 			mlx5_ib_unbind_usr_rc_cq(&sched_group, qp->usr_rc_id);
