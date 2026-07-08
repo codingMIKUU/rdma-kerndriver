@@ -738,6 +738,73 @@ static void print_wqe_info(void *seg, size_t size)
 //     return ((uint64_t)hi << 32) | lo;
 // }
 
+static inline u32 mlx5_srm_wqe_payload_bytes(struct mlx5_wqe_ctrl_seg *ctrl)
+{
+    struct mlx5_wqe_data_seg *dseg;
+    char *seg;
+    char *end;
+    u32 opmod_idx_opcode;
+    u32 qpn_ds;
+    u32 opcode;
+    u32 ds;
+    u64 bytes = 0;
+
+    opmod_idx_opcode = be32_to_cpu(READ_ONCE(ctrl->opmod_idx_opcode));
+    qpn_ds = be32_to_cpu(READ_ONCE(ctrl->qpn_ds));
+    opcode = opmod_idx_opcode & 0xff;
+    ds = qpn_ds & 0x3f;
+    if (!ds)
+        return 0;
+
+    seg = (char *)ctrl + sizeof(*ctrl);
+    end = (char *)ctrl + ds * 16;
+
+    switch (opcode) {
+    case MLX5_OPCODE_RDMA_WRITE:
+    case MLX5_OPCODE_RDMA_WRITE_IMM:
+    case MLX5_OPCODE_RDMA_READ:
+        seg += sizeof(struct mlx5_wqe_xrc_seg);
+        seg += sizeof(struct mlx5_wqe_raddr_seg);
+        break;
+    case MLX5_OPCODE_SEND:
+    case MLX5_OPCODE_SEND_IMM:
+    case MLX5_OPCODE_SEND_INVAL:
+        seg += sizeof(struct mlx5_wqe_xrc_seg);
+        break;
+    case MLX5_OPCODE_ATOMIC_CS:
+    case MLX5_OPCODE_ATOMIC_FA:
+    case MLX5_OPCODE_ATOMIC_MASKED_CS:
+    case MLX5_OPCODE_ATOMIC_MASKED_FA:
+        seg += sizeof(struct mlx5_wqe_xrc_seg);
+        seg += sizeof(struct mlx5_wqe_raddr_seg);
+        seg += sizeof(struct mlx5_wqe_atomic_seg);
+        break;
+    default:
+        return 0;
+    }
+
+    while (seg + sizeof(__be32) <= end) {
+        u32 byte_count;
+
+        dseg = (struct mlx5_wqe_data_seg *)seg;
+        byte_count = be32_to_cpu(READ_ONCE(dseg->byte_count));
+        if (byte_count & MLX5_INLINE_SEG) {
+            byte_count &= ~MLX5_INLINE_SEG;
+            bytes += byte_count;
+            seg += ALIGN(byte_count + sizeof(dseg->byte_count), 16);
+        } else {
+            if (seg + sizeof(*dseg) > end)
+                break;
+            bytes += byte_count;
+            seg += sizeof(*dseg);
+        }
+        if (bytes > U32_MAX)
+            return U32_MAX;
+    }
+
+    return bytes;
+}
+
 struct mlx5_ib_srm_sched_stats;
 
 #define SRM_CQE_PUBLISH_BATCH 32
@@ -2827,7 +2894,7 @@ int scheduler_polling(void *sched_data)
                     }
 
 #if MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
-                    wqe_bytes = mlx5_srm_publish_bytes(publish_token);
+                    wqe_bytes = mlx5_srm_wqe_payload_bytes(ctrl);
                     if (sent_bytes + wqe_bytes > SCHED_SIZE_LIMIT && sent)
                         break;
 #endif
