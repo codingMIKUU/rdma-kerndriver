@@ -39,10 +39,12 @@ static int debug = 0;
 
 static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 // const size_t MESSAGE_SIZE_THRESHOLD = 1e9;
-static const size_t QUEUE_LIMIT = 256 * 1024;
-static const size_t SCHED_SIZE_LIMIT = 8 * 1024;
+#define MLX5_SRM_SCHED_SIZE_LIMIT (100000 * 1024)
+static const size_t SCHED_SIZE_LIMIT = MLX5_SRM_SCHED_SIZE_LIMIT;
+#define MLX5_SRM_ENABLE_SCHED_SIZE_LIMIT 0
+#define MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE (MLX5_SRM_ENABLE_SCHED_SIZE_LIMIT)
 
-static u64 LIMIT_BATCHING = 250;
+static u64 LIMIT_BATCHING = 1000;
 
 #define DEBUG_LOG \
     if (debug)    \
@@ -70,26 +72,60 @@ struct mlx5_sq_ctrl_page {
 static_assert(sizeof(struct mlx5_sq_ctrl_page) == 128);
 
 #define MLX5_SRM_PUBLISH_USR_BITS 16
+#define MLX5_SRM_PUBLISH_BYTES_BITS 16
+#define MLX5_SRM_PUBLISH_SEQ_BITS 32
 #define MLX5_SRM_PUBLISH_USR_MASK ((1ULL << MLX5_SRM_PUBLISH_USR_BITS) - 1)
-#define MLX5_SRM_PUBLISH_SEQ_MASK ((1ULL << 48) - 1)
+#define MLX5_SRM_PUBLISH_BYTES_MASK ((1ULL << MLX5_SRM_PUBLISH_BYTES_BITS) - 1)
+#define MLX5_SRM_PUBLISH_SEQ_MASK ((1ULL << MLX5_SRM_PUBLISH_SEQ_BITS) - 1)
+#define MLX5_SRM_PUBLISH_BYTES_SHIFT MLX5_SRM_PUBLISH_USR_BITS
+#define MLX5_SRM_PUBLISH_SEQ_SHIFT \
+    (MLX5_SRM_PUBLISH_USR_BITS + MLX5_SRM_PUBLISH_BYTES_BITS)
 
 /* cur_put/op_own are lockless because one scheduler owns all CQ writes. */
 static_assert(NUM_SCHED == 1);
 
-static inline u64 mlx5_srm_publish_token(u64 seq, u16 usr_rc_cnt)
+static inline u64 mlx5_srm_publish_token(u64 seq, u16 usr_rc_cnt, u16 bytes64)
 {
     return ((seq & MLX5_SRM_PUBLISH_SEQ_MASK) <<
-            MLX5_SRM_PUBLISH_USR_BITS) | usr_rc_cnt;
+            MLX5_SRM_PUBLISH_SEQ_SHIFT) |
+           (((u64)bytes64 & MLX5_SRM_PUBLISH_BYTES_MASK) <<
+            MLX5_SRM_PUBLISH_BYTES_SHIFT) |
+           usr_rc_cnt;
 }
 
 static inline u64 mlx5_srm_publish_seq(u64 token)
 {
-    return token >> MLX5_SRM_PUBLISH_USR_BITS;
+    return token >> MLX5_SRM_PUBLISH_SEQ_SHIFT;
+}
+
+static inline u32 mlx5_srm_publish_bytes(u64 token)
+{
+    return ((token >> MLX5_SRM_PUBLISH_BYTES_SHIFT) &
+            MLX5_SRM_PUBLISH_BYTES_MASK) << 6;
 }
 
 static inline u16 mlx5_srm_publish_usr_rc(u64 token)
 {
     return token & MLX5_SRM_PUBLISH_USR_MASK;
+}
+
+#define MLX5_SRM_WRID_KQP_SHIFT 32
+#define MLX5_SRM_WRID_POST_MASK 0xffffffffULL
+
+static inline u64 mlx5_srm_make_wrid(u32 kqp_idx, u64 post_idx)
+{
+    return ((u64)kqp_idx << MLX5_SRM_WRID_KQP_SHIFT) |
+           (post_idx & MLX5_SRM_WRID_POST_MASK);
+}
+
+static inline u32 mlx5_srm_wrid_kqp(u64 wrid)
+{
+    return wrid >> MLX5_SRM_WRID_KQP_SHIFT;
+}
+
+static inline u32 mlx5_srm_wrid_post(u64 wrid)
+{
+    return wrid & MLX5_SRM_WRID_POST_MASK;
 }
 
 struct mlx5_ib_cqbuf
@@ -188,8 +224,6 @@ struct mlx5_ib_srmc
     uint32_t cur_cqe;
     u64 sched_post_idx;
     struct mlx5_wqe_info *wqe_infos;
-    size_t pending_bytes;     // total pending bytes
-    size_t cul_pending_bytes; // next cqe's pending bytes
     int idx;                  // 该srmc在表中的索引
     int srmc_idx;             // 该srmc在创建顺序中排第几个(用于分配cq)
     struct page **publish_pages;

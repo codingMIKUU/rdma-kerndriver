@@ -177,6 +177,16 @@ static bool mlx5_ib_cqb_is_inflight(struct mlx5_ib_sched_group *sched_group,
 
             if (!srmc || !srmc->wqe_infos)
                 continue;
+
+            /*
+             * Fast CQE context is now reconstructed from wr_id/publish token
+             * instead of wqe_infos.  Be conservative while a shared kernel CQ
+             * still has outstanding completions; otherwise a route teardown
+             * could retire the user CQ buffer before its CQEs are published.
+             */
+            if (READ_ONCE(srmc->sig_cnt))
+                return true;
+
             for (k = 0; k < SQ_DEPTH; k++) {
                 struct mlx5_wqe_info *info = &srmc->wqe_infos[k];
 
@@ -287,6 +297,8 @@ static struct mlx5_ib_srmc *mlx5_ib_sched_find_srmc_idx(struct mlx5_ib_sched *sc
 
     return READ_ONCE(sched->srmc_by_idx[srmc_idx]);
 }
+
+static inline int mlx5_srm_effective_kqps(void);
 
 static inline struct mlx5_sq_ctrl_page *mlx5_sq_ctrl_get_slot(
     struct mlx5_qp_ctrl_pool *pool, u32 slot_idx)
@@ -731,9 +743,119 @@ struct mlx5_ib_srm_sched_stats;
 #define SRM_CQE_PUBLISH_BATCH 32
 
 struct mlx5_srm_cqe_publish_entry {
-    int idx;
+    struct mlx5_ib_cqbuf *cqb;
+    struct mlx5_sq_ctrl_page *ctrl_page;
+    u64 wqe_counter;
+    u32 uidx;
     struct mlx5_cqe64 *cqe64;
 };
+
+extern struct mlx5_ib_sched_group sched_group;
+
+static inline bool mlx5_srm_resolve_cqe_ctx(
+    struct mlx5_ib_sched *sched,
+    struct mlx5_qp_ctrl_pool *sq_ctrl_pool,
+    u64 wrid,
+    struct mlx5_srm_cqe_publish_entry *entry)
+{
+    struct mlx5_ib_usr_rc_route *route;
+    struct mlx5_ib_srmc *send_srmc;
+    struct mlx5_ib_cqbuf *cqb;
+    struct mlx5_sq_ctrl_page *ctrl_page;
+    u64 publish_token;
+    u32 kqp_idx;
+    u32 post_idx;
+    u32 slot;
+    u32 seq;
+    u16 usr_rc_cnt;
+    u32 uidx;
+
+    kqp_idx = mlx5_srm_wrid_kqp(wrid);
+    post_idx = mlx5_srm_wrid_post(wrid);
+
+    if (unlikely(kqp_idx >= mlx5_srm_effective_kqps())) {
+        pr_warn_ratelimited("invalid hollow RC wrid kqp %u post %u\n",
+                            kqp_idx, post_idx);
+        return false;
+    }
+
+    send_srmc = mlx5_ib_sched_find_srmc_idx(sched, kqp_idx);
+    if (unlikely(!send_srmc || !send_srmc->ini_cb.qp)) {
+        pr_warn_ratelimited("inactive hollow RC wrid kqp %u post %u\n",
+                            kqp_idx, post_idx);
+        return false;
+    }
+
+    ctrl_page = mlx5_sq_ctrl_get_slot(sq_ctrl_pool, kqp_idx);
+    if (unlikely(!ctrl_page)) {
+        pr_warn_ratelimited("missing hollow RC ctrl page kqp %u post %u\n",
+                            kqp_idx, post_idx);
+        return false;
+    }
+
+    slot = post_idx & (send_srmc->ini_cb.qp->sq.wqe_cnt - 1);
+    publish_token = mlx5_ib_srmc_get_publish_token(send_srmc, slot);
+    if (unlikely(publish_token == U64_MAX)) {
+        pr_warn_ratelimited("missing hollow RC CQE publish token kqp=%u post=%u slot=%u\n",
+                            kqp_idx, post_idx, slot);
+        return false;
+    }
+    seq = mlx5_srm_publish_seq(publish_token);
+    if (unlikely(seq != ((post_idx + 1) & MLX5_SRM_WRID_POST_MASK))) {
+        pr_warn_ratelimited("hollow RC CQE token mismatch kqp=%u post=%u slot=%u token_seq=%u expected=%u\n",
+                            kqp_idx, post_idx, slot, seq,
+                            (post_idx + 1) & MLX5_SRM_WRID_POST_MASK);
+        return false;
+    }
+
+    usr_rc_cnt = mlx5_srm_publish_usr_rc(publish_token);
+    if (unlikely(usr_rc_cnt >= ARRAY_SIZE(sched_group.usr_rc_routes))) {
+        pr_warn_ratelimited("invalid hollow RC CQE usr_rc %u kqp=%u post=%u\n",
+                            usr_rc_cnt, kqp_idx, post_idx);
+        return false;
+    }
+
+    route = &sched_group.usr_rc_routes[usr_rc_cnt];
+    cqb = smp_load_acquire(&route->cqb);
+    uidx = READ_ONCE(route->uidx);
+    if (unlikely(!cqb || uidx == MLX5_IB_DEFAULT_UIDX)) {
+        pr_warn_ratelimited("inactive hollow RC CQE route usr_rc=%u kqp=%u post=%u\n",
+                            usr_rc_cnt, kqp_idx, post_idx);
+        return false;
+    }
+
+    entry->cqb = cqb;
+    entry->ctrl_page = ctrl_page;
+    entry->wqe_counter = post_idx;
+    entry->uidx = uidx;
+    entry->cqe64 = NULL;
+
+    return true;
+}
+
+static inline void mlx5_srm_complete_wrid_ctrl(
+    struct mlx5_ib_sched *sched,
+    struct mlx5_qp_ctrl_pool *sq_ctrl_pool,
+    u64 wrid,
+    struct mlx5_srm_ctrl_complete_entry *complete_cache,
+    int *complete_cache_cnt)
+{
+    struct mlx5_sq_ctrl_page *ctrl_page;
+    u32 kqp_idx;
+    u32 post_idx;
+
+    kqp_idx = mlx5_srm_wrid_kqp(wrid);
+    post_idx = mlx5_srm_wrid_post(wrid);
+    if (kqp_idx >= mlx5_srm_effective_kqps())
+        return;
+
+    ctrl_page = mlx5_sq_ctrl_get_slot(sq_ctrl_pool, kqp_idx);
+    if (!ctrl_page)
+        return;
+
+    mlx5_srm_ctrl_complete_defer(complete_cache, complete_cache_cnt,
+                                 ctrl_page, post_idx);
+}
 
 enum mlx5_ib_srm_cq_phase {
     SRM_CQ_PHASE_KERNEL_POLL,
@@ -768,9 +890,6 @@ static inline void mlx5_srm_flush_cqe_publish_batch(
     int *batch_cnt,
     struct mlx5_srm_ctrl_complete_entry *complete_cache,
     int *complete_cache_cnt,
-    int free_cqe_idx[],
-    int free_base,
-    int *free_added,
     struct mlx5_ib_srm_sched_stats *stats);
 
 // 仅支持64B的标准wqe
@@ -856,20 +975,17 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
         }
     }
 }
-static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc, void **cqe, int free_cqe_idx[], int *free_cqe_cnt,
+static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
+                                     struct mlx5_qp_ctrl_pool *sq_ctrl_pool,
+                                     struct mlx5_ib_srmc *srmc,
+                                     struct ib_wc *wc,
+                                     void **cqe,
                                      struct mlx5_ib_srm_sched_stats *stats)
 {
     DEBUG_LOG("in srm_poll_srmc_once,sig_cnt:%d\n", srmc->sig_cnt);
-    struct mlx5_ib_sqbuf *sqb;
     struct mlx5_ib_cqbuf *cqb;
-    void *ucqe;
-    int qpn;
-    int cqn = -1;
-    struct mlx5_cqe64 *ucqe64, *cqe64;
-    int op_own;
-    int uidx, idx;
     int cqe_num;
-    int i, j;
+    int i;
     u64 phase_start;
     u64 iter_start;
     u64 total_start = srm_stats_enable ? ktime_get_ns() : 0;
@@ -879,8 +995,6 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
     struct mlx5_srm_cqe_publish_entry publish_batch[SRM_CQE_PUBLISH_BATCH];
     struct mlx5_ib_cqbuf *publish_cqb = NULL;
     int publish_batch_cnt = 0;
-    int free_base = *free_cqe_cnt;
-    int free_added = 0;
 
     if (srmc->sig_cnt)
     {
@@ -901,55 +1015,46 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
             //  cnt2++;
             for (i = 0; i < cqe_num; i++)
             {
+                struct mlx5_srm_cqe_publish_entry entry;
+
                 iter_start = srm_stats_enable ? ktime_get_ns() : 0;
-                // cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
-                //  Two attr to change
-                idx = wc[i].wr_id;
-                if (idx < 0 || idx >= SQ_DEPTH) {
-                    mlx5_ib_srm_record_cq_phase(stats,
-                                                SRM_CQ_PHASE_LOOP_BASE,
-                                                iter_start);
-                    pr_warn_ratelimited("invalid scheduler CQ info idx %d\n", idx);
-                    continue;
-                }
-                // qpn = (wc.wr_id >> 32) & 0xffffff; // wr_id high 32 bits is qpn,low  32 bits is wqe_counter
-                //qpn = srmc->wqe_infos[idx].qpn;
-                // DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[i].status, srmc->wqe_infos[idx].pending_bytes);
-                // DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%llu\n", qpn,
-                //           srmc->wqe_infos[idx].wqe_counter);
                 mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_LOOP_BASE,
                                             iter_start);
                 phase_start = srm_stats_enable ? ktime_get_ns() : 0;
-                cqb = srmc->wqe_infos[idx].cqb;
-                if (cqb == NULL)
-                {
-                    pr_err("Unexpected:No cqn found for scheduler info idx %d\n", idx);
+
+                if (!mlx5_srm_resolve_cqe_ctx(sched, sq_ctrl_pool,
+                                              wc[i].wr_id, &entry)) {
+                    mlx5_srm_complete_wrid_ctrl(
+                        sched, sq_ctrl_pool, wc[i].wr_id, complete_cache,
+                        &complete_cache_cnt);
+                    mlx5_ib_srm_record_cq_phase(stats,
+                                                SRM_CQ_PHASE_INFO_LOOKUP,
+                                                phase_start);
                     continue;
                 }
+
+                cqb = entry.cqb;
                 mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_INFO_LOOKUP,
                                             phase_start);
                 if (publish_cqb != cqb ||
                     publish_batch_cnt == SRM_CQE_PUBLISH_BATCH) {
                     mlx5_srm_flush_cqe_publish_batch(
                         srmc, publish_cqb, publish_batch, &publish_batch_cnt,
-                        complete_cache, &complete_cache_cnt, free_cqe_idx,
-                        free_base, &free_added, stats);
+                        complete_cache, &complete_cache_cnt, stats);
                     publish_cqb = cqb;
                 }
 
-                publish_batch[publish_batch_cnt].idx = idx;
-                publish_batch[publish_batch_cnt].cqe64 = cqe[i];
+                entry.cqe64 = cqe[i];
+                publish_batch[publish_batch_cnt] = entry;
                 publish_batch_cnt++;
             }
             mlx5_srm_flush_cqe_publish_batch(
                 srmc, publish_cqb, publish_batch, &publish_batch_cnt,
-                complete_cache, &complete_cache_cnt, free_cqe_idx, free_base,
-                &free_added, stats);
+                complete_cache, &complete_cache_cnt, stats);
             phase_start = srm_stats_enable ? ktime_get_ns() : 0;
             mlx5_srm_ctrl_complete_flush(complete_cache, &complete_cache_cnt);
             mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_CTRL_COMPLETE,
                                         phase_start);
-            *free_cqe_cnt = free_base + free_added;
             mlx5_ib_srm_record_cq_post_poll(stats, post_poll_start);
         } else {
             mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_KERNEL_POLL,
@@ -1119,12 +1224,12 @@ srmc_cq_full(const struct mlx5_ib_srmc *srmc)
  * shutdown remains responsive while the next CQE is not visible yet.
  */
 static __always_inline int srm_poll_until_space(
+    struct mlx5_ib_sched *sched,
+    struct mlx5_qp_ctrl_pool *sq_ctrl_pool,
     struct mlx5_ib_srmc *cq_srmc,
     bool drain_all,
     struct ib_wc *wc,
     void **cqe,
-    int *free_cqe_idx,
-    int *free_cqe_cnt,
     struct mlx5_ib_srm_sched_stats *stats)
 {
     unsigned int empty_polls = 0;
@@ -1137,8 +1242,8 @@ static __always_inline int srm_poll_until_space(
            (drain_all ? cq_srmc->sig_cnt != 0 :
             srmc_cq_full(cq_srmc))) {
         drain_polls++;
-        ret = srm_poll_srmc_once(cq_srmc, wc, cqe, free_cqe_idx,
-                                 free_cqe_cnt, stats);
+        ret = srm_poll_srmc_once(sched, sq_ctrl_pool, cq_srmc, wc, cqe,
+                                 stats);
         if (ret > 0) {
             polled += ret;
             empty_polls = 0;
@@ -1191,7 +1296,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 256;
+const int num_kqps = 32;
 
 static inline int mlx5_srm_effective_kqps(void)
 {
@@ -1288,9 +1393,6 @@ static inline void mlx5_srm_flush_cqe_publish_batch(
     int *batch_cnt,
     struct mlx5_srm_ctrl_complete_entry *complete_cache,
     int *complete_cache_cnt,
-    int free_cqe_idx[],
-    int free_base,
-    int *free_added,
     struct mlx5_ib_srm_sched_stats *stats)
 {
     struct mlx5_cqe64 *ucqe64;
@@ -1300,7 +1402,6 @@ static inline void mlx5_srm_flush_cqe_publish_batch(
     u32 cur_put;
     u8 op_own;
     int i;
-    int idx;
 
     if (!*batch_cnt)
         return;
@@ -1309,13 +1410,12 @@ static inline void mlx5_srm_flush_cqe_publish_batch(
     cur_put = cqb->cur_put;
     op_own = cqb->op_own;
     for (i = 0; i < *batch_cnt; i++) {
-        idx = batch[i].idx;
         cqe64 = batch[i].cqe64;
         ucqe64 = cqb->buf + (cur_put << 6);
         ucqe = ucqe64;
 
         memcpy(ucqe, cqe64, sizeof(*ucqe64) - 1);
-        ucqe64->srqn = htonl(srmc->wqe_infos[idx].uidx);
+        ucqe64->srqn = htonl(batch[i].uidx);
         smp_store_release(&ucqe64->op_own,
                           (cqe64->op_own & (~0xf)) | op_own);
 
@@ -1332,19 +1432,12 @@ static inline void mlx5_srm_flush_cqe_publish_batch(
 
     phase_start = srm_stats_enable ? ktime_get_ns() : 0;
     for (i = 0; i < *batch_cnt; i++) {
-        idx = batch[i].idx;
         mlx5_srm_ctrl_complete_defer(
             complete_cache, complete_cache_cnt,
-            srmc->wqe_infos[idx].ctrl_page,
-            srmc->wqe_infos[idx].wqe_counter);
+            batch[i].ctrl_page,
+            batch[i].wqe_counter);
     }
     mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_CTRL_COMPLETE,
-                                phase_start);
-
-    phase_start = srm_stats_enable ? ktime_get_ns() : 0;
-    for (i = 0; i < *batch_cnt; i++)
-        free_cqe_idx[free_base + (*free_added)++] = batch[i].idx;
-    mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_RECYCLE,
                                 phase_start);
 
     *batch_cnt = 0;
@@ -1557,14 +1650,14 @@ static void mlx5_ib_srm_report_stats(
 }
 
 static __always_inline int poll_srmc_inline(
+    struct mlx5_ib_sched *sched,
+    struct mlx5_qp_ctrl_pool *sq_ctrl_pool,
     struct mlx5_ib_srmc **pre_srmcs,
     int *polling_tail,
     int *polling_head,
     u8 *in_queue,
     struct ib_wc *wc,
     void **cqe,
-    int *free_cqe_idx,
-    int *free_cqe_cnt,
     int id,
     struct mlx5_ib_srm_sched_stats *stats)
 {
@@ -1591,7 +1684,7 @@ static __always_inline int poll_srmc_inline(
     // 执行一次poll操作
     if (srm_stats_enable)
         queue_ns += ktime_get_ns() - queue_start;
-    ret = srm_poll_srmc_once(pre_srmc, wc, cqe, free_cqe_idx, free_cqe_cnt,
+    ret = srm_poll_srmc_once(sched, sq_ctrl_pool, pre_srmc, wc, cqe,
                              stats);
     queue_start = srm_stats_enable ? ktime_get_ns() : 0;
     if (ret > 0)
@@ -1606,8 +1699,8 @@ static __always_inline int poll_srmc_inline(
             pr_info("[sched-%d] cq polling queue exceed queue length\n", id);
             if (srm_stats_enable)
                 queue_ns += ktime_get_ns() - queue_start;
-            polled += srm_poll_until_space(pre_srmc, true, wc, cqe,
-                                           free_cqe_idx, free_cqe_cnt,
+            polled += srm_poll_until_space(sched, sq_ctrl_pool, pre_srmc,
+                                           true, wc, cqe,
                                            stats);
             queue_start = srm_stats_enable ? ktime_get_ns() : 0;
             in_queue[pre_srmc->srmc_idx & (CQ_NUM - 1)] = 0; // 位运算优化
@@ -1620,8 +1713,8 @@ static __always_inline int poll_srmc_inline(
                 id, pre_srmc->sig_cnt, srmc_cq_depth(pre_srmc));
             if (srm_stats_enable)
                 queue_ns += ktime_get_ns() - queue_start;
-            polled += srm_poll_until_space(pre_srmc, false, wc, cqe,
-                                           free_cqe_idx, free_cqe_cnt,
+            polled += srm_poll_until_space(sched, sq_ctrl_pool, pre_srmc,
+                                           false, wc, cqe,
                                            stats);
             queue_start = srm_stats_enable ? ktime_get_ns() : 0;
             // 处理完成后判断是否仍有剩余信号
@@ -2406,9 +2499,7 @@ int scheduler_polling(void *sched_data)
 
     struct mlx5_ib_srmc *cq_srmc_tb[CQ_NUM] = {0}; // 保存每个cq对应srmc代表
 
-    int *free_cqe_idx, free_cqe_cnt;
-    free_cqe_idx = kvcalloc(SQ_DEPTH, sizeof(*free_cqe_idx), GFP_KERNEL);
-    if (!cqe || !wc || !pre_srmcs || !in_queue || !free_cqe_idx) {
+    if (!cqe || !wc || !pre_srmcs || !in_queue) {
         pr_err("scheduler thread %d: temporary buffer allocation failed\n",
                id);
         WRITE_ONCE(sched->init_error, -ENOMEM);
@@ -2417,13 +2508,6 @@ int scheduler_polling(void *sched_data)
                                  kthread_should_stop());
         goto out;
     }
-    free_cqe_cnt = SQ_DEPTH;
-    for (i = 0; i < SQ_DEPTH; i++)
-    {
-        free_cqe_idx[i] = i;
-    }
-
-
 
     uint32_t level_wqe_cnt, wqe_cnt, user_threads_idx;
     int sending_case; // 对应新的wqe个数和旧的wqe个数的几种情况,0~2代表三种情况，3代表应该break了
@@ -2546,10 +2630,10 @@ int scheduler_polling(void *sched_data)
             {
                 u64 poll_start = srm_stats_enable ? ktime_get_ns() : 0;
 
-                ret = poll_srmc_inline(pre_srmcs, &polling_tail,
+                ret = poll_srmc_inline(sched, sq_ctrl_pool, pre_srmcs,
+                                       &polling_tail,
                                        &polling_head, in_queue, wc, cqe,
-                                       free_cqe_idx, &free_cqe_cnt, id,
-                                       srm_stats);
+                                       id, srm_stats);
                 mlx5_ib_srm_record_cq_poll(srm_stats, ret, poll_start);
             }
             if (ret > 0) {
@@ -2576,10 +2660,10 @@ int scheduler_polling(void *sched_data)
 
                 if (srm_stats_enable)
                     srm_stats->kqp[i].credit_stalls++;
-                ret = poll_srmc_inline(pre_srmcs, &polling_tail,
+                ret = poll_srmc_inline(sched, sq_ctrl_pool, pre_srmcs,
+                                       &polling_tail,
                                        &polling_head, in_queue, wc, cqe,
-                                       free_cqe_idx, &free_cqe_cnt, id,
-                                       srm_stats);
+                                       id, srm_stats);
                 mlx5_ib_srm_record_cq_poll(srm_stats, ret, poll_start);
                 if (ret > 0) {
                     user_tot_cqes += ret;
@@ -2643,14 +2727,6 @@ int scheduler_polling(void *sched_data)
             if (!credit)
                 continue;
 
-            if (free_cqe_cnt <= 0)
-            {
-                if (srm_stats_enable)
-                    srm_stats->kqp[i].free_cqe_stalls++;
-                pr_err("free_cqe_cnt <= 0, cq exceed\n");
-                goto err;
-            }
-
             cq_idx = srmc->srmc_idx % (CQ_NUM);
             if (cq_srmc_tb[cq_idx] == NULL)
                 cq_srmc_tb[cq_idx] = srmc;
@@ -2663,8 +2739,8 @@ int scheduler_polling(void *sched_data)
             }
 
             if (unlikely(srmc_cq_full(pre_srmc))) {
-                ret = srm_poll_until_space(pre_srmc, false, wc, cqe,
-                                           free_cqe_idx, &free_cqe_cnt,
+                ret = srm_poll_until_space(sched, sq_ctrl_pool, pre_srmc,
+                                           false, wc, cqe,
                                            srm_stats);
                 if (ret > 0) {
                     user_tot_cqes += ret;
@@ -2677,8 +2753,11 @@ int scheduler_polling(void *sched_data)
                 u32 cq_depth = srmc_cq_depth(pre_srmc);
                 u32 cq_pending = min_t(u32, pre_srmc->sig_cnt, cq_depth);
                 u32 cq_avail = cq_depth - cq_pending;
-                int batch = min_t(u64, free_cqe_cnt, credit);
+                int batch = credit;
                 int sent = 0;
+#if MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
+                size_t sent_bytes = 0;
+#endif
                 u64 blocked_token = U64_MAX;
                 bool publish_blocked = false;
                 struct mlx5_wqe_ctrl_seg *last_ctrl = NULL;
@@ -2695,6 +2774,9 @@ int scheduler_polling(void *sched_data)
                     u32 qpn_ds;
                     u16 wqe_idx;
                     u32 wqe_qpn;
+#if MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
+                    u32 wqe_bytes;
+#endif
 
                     idx = srmc->sched_post_idx &
                           (srmc->ini_cb.qp->sq.wqe_cnt - 1);
@@ -2744,17 +2826,18 @@ int scheduler_polling(void *sched_data)
                         break;
                     }
 
-                    idx = free_cqe_idx[--free_cqe_cnt];
-                    pre_srmc->wqe_infos[idx].usr_rc_cnt = usr_rc_cnt;
-                    pre_srmc->wqe_infos[idx].uidx = uidx;
-                    pre_srmc->wqe_infos[idx].wqe_counter =
-                        srmc->sched_post_idx;
-                    pre_srmc->wqe_infos[idx].cqb = cqb;
-                    pre_srmc->wqe_infos[idx].ctrl_page = ctrl_page;
+#if MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
+                    wqe_bytes = mlx5_srm_publish_bytes(publish_token);
+                    if (sent_bytes + wqe_bytes > SCHED_SIZE_LIMIT && sent)
+                        break;
+#endif
 
                     srmc->ini_cb.qp->sq.wrid[
                         srmc->sched_post_idx & (srmc->ini_cb.qp->sq.wqe_cnt - 1)] =
-                        idx;
+                        mlx5_srm_make_wrid(i, srmc->sched_post_idx);
+#if MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
+                    sent_bytes += wqe_bytes;
+#endif
                     srmc->sched_post_idx++;
                     srmc->ini_cb.qp->sq.cur_post++;
                     last_ctrl = ctrl;
@@ -2845,8 +2928,8 @@ int scheduler_polling(void *sched_data)
                         pr_info("err:exceed queue length\n");
                         if (pre_srmc) {
                             ret = srm_poll_until_space(
-                                pre_srmc, true, wc, cqe, free_cqe_idx,
-                                &free_cqe_cnt, srm_stats);
+                                sched, sq_ctrl_pool, pre_srmc, true, wc,
+                                cqe, srm_stats);
                             if (ret > 0) {
                                 user_tot_cqes += ret;
                             }
@@ -2901,7 +2984,6 @@ out:
     kvfree(wc);
     kvfree(pre_srmcs);
     kvfree(in_queue);
-    kvfree(free_cqe_idx);
     kvfree(level_qp_st_arr);
 
     // // 文件
@@ -2921,7 +3003,6 @@ err:
     kvfree(wc);
     kvfree(pre_srmcs);
     kvfree(in_queue);
-    kvfree(free_cqe_idx);
     kvfree(level_qp_st_arr);
 
     // // 文件
