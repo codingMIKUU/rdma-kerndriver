@@ -1363,11 +1363,11 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 32;
+const int num_kqps = 256;
 
 static inline int mlx5_srm_effective_kqps(void)
 {
-    return num_kqps * NUM_LEVEL;
+    return num_kqps * MLX5_SRM_KERNEL_QP_LEVELS;
 }
 
 struct mlx5_ib_srm_kqp_stats {
@@ -2640,6 +2640,15 @@ int scheduler_polling(void *sched_data)
     uint32_t real_num_threads = 17; 
     struct mlx5_qp_ctrl_pool *sq_ctrl_pool = NULL;
     u64 observed_route_epoch = atomic64_read(&sched_group.route_epoch);
+#if MLX5_SRM_ENABLE_DB_BATCH_LOG
+    u64 db_batch_log_scans = 0;
+    u64 db_batch_log_calls = 0;
+    u64 db_batch_log_wqes = 0;
+    u64 db_batch_log_max = 0;
+    u64 db_batch_log_large_calls = 0;
+    u64 db_batch_log_large_wqes = 0;
+    u64 db_batch_log_large_max = 0;
+#endif
 
     srm_stats = kvzalloc(sizeof(*srm_stats), GFP_KERNEL);
     if (!srm_stats) {
@@ -2694,7 +2703,8 @@ int scheduler_polling(void *sched_data)
                 cnt++;
                 msleep(0);
             }
-            {
+
+            if(i%3==0){
                 u64 poll_start = srm_stats_enable ? ktime_get_ns() : 0;
 
                 ret = poll_srmc_inline(sched, sq_ctrl_pool, pre_srmcs,
@@ -2702,10 +2712,11 @@ int scheduler_polling(void *sched_data)
                                        &polling_head, in_queue, wc, cqe,
                                        id, srm_stats);
                 mlx5_ib_srm_record_cq_poll(srm_stats, ret, poll_start);
-            }
-            if (ret > 0) {
+                if (ret > 0) {
                 user_tot_cqes += ret;
+                }
             }
+
 
             struct mlx5_sq_ctrl_page *ctrl_page;
             u64 credit;
@@ -2718,6 +2729,35 @@ int scheduler_polling(void *sched_data)
                 continue;
             if (srm_stats_enable)
                 srm_stats->kqp[i].scans++;
+#if MLX5_SRM_ENABLE_DB_BATCH_LOG
+            db_batch_log_scans++;
+            if (unlikely(db_batch_log_scans >= MLX5_SRM_DB_BATCH_LOG_INTERVAL)) {
+                pr_info("hollow RC db batch sched=%d scans=%llu db_calls=%llu db_wqes=%llu db_avg_x100=%llu db_max=%llu large_db_calls=%llu large_db_wqes=%llu large_db_avg_x100=%llu large_db_max=%llu large_limit_active=%d large_limit=%u\n",
+                        id, db_batch_log_scans,
+                        db_batch_log_calls, db_batch_log_wqes,
+                        db_batch_log_calls ?
+                            div64_u64(db_batch_log_wqes * 100,
+                                      db_batch_log_calls) :
+                            0,
+                        db_batch_log_max,
+                        db_batch_log_large_calls,
+                        db_batch_log_large_wqes,
+                        db_batch_log_large_calls ?
+                            div64_u64(db_batch_log_large_wqes * 100,
+                                      db_batch_log_large_calls) :
+                            0,
+                        db_batch_log_large_max,
+                        MLX5_SRM_LARGE_DB_LIMIT_ACTIVE,
+                        (u32)MLX5_SRM_LARGE_DB_LIMIT);
+                db_batch_log_scans = 0;
+                db_batch_log_calls = 0;
+                db_batch_log_wqes = 0;
+                db_batch_log_max = 0;
+                db_batch_log_large_calls = 0;
+                db_batch_log_large_wqes = 0;
+                db_batch_log_large_max = 0;
+            }
+#endif
 
             stuck_cnt = 0;
             inflight = kernel_tot_db - user_tot_cqes;
@@ -2830,6 +2870,10 @@ int scheduler_polling(void *sched_data)
                 struct mlx5_wqe_ctrl_seg *last_ctrl = NULL;
 
                 batch = min_t(u32, batch, cq_avail);
+#if MLX5_SRM_LARGE_DB_LIMIT_ACTIVE
+                if (srmc->srmc_idx >= num_kqps)
+                    batch = min_t(u32, batch, LARGE_DB_LIMIT);
+#endif
                 if (!batch)
                     continue;
 
@@ -2976,6 +3020,18 @@ int scheduler_polling(void *sched_data)
                 mlx5r_ring_db(srmc->ini_cb.qp, sent, last_ctrl);
                 pre_srmc->last_db_jiffies = jiffies;
                 kernel_tot_db += sent;
+#if MLX5_SRM_ENABLE_DB_BATCH_LOG
+                db_batch_log_calls++;
+                db_batch_log_wqes += sent;
+                if (sent > db_batch_log_max)
+                    db_batch_log_max = sent;
+                if (srmc->srmc_idx >= num_kqps) {
+                    db_batch_log_large_calls++;
+                    db_batch_log_large_wqes += sent;
+                    if (sent > db_batch_log_large_max)
+                        db_batch_log_large_max = sent;
+                }
+#endif
                 if (srm_stats_enable) {
                     struct mlx5_ib_srm_kqp_stats *kstats =
                         &srm_stats->kqp[i];

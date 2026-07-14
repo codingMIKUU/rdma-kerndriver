@@ -41,6 +41,7 @@
 #include <rdma/rdma_counter.h>
 #include <linux/atomic.h>
 #include <linux/idr.h>
+#include <linux/jhash.h>
 #include <linux/mlx5/fs.h>
 #include "mlx5_ib.h"
 #include "mlx5_ib_ext.h"
@@ -1139,10 +1140,13 @@ static u64 mlx5_qp_entry_to_mmap_offset(struct mlx5_user_mmap_entry *entry)
 	       << PAGE_SHIFT;
 }
 
-static struct mlx5_ib_srmc *mlx5_ib_find_random_srmc_by_gid(union ib_gid *dgid)
+static struct mlx5_ib_srmc *
+mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 {
 	struct mlx5_ib_srmc *selected = NULL;
 	u32 seen = 0;
+	u32 target;
+	u32 hash;
 	int si;
 	int i;
 
@@ -1165,8 +1169,33 @@ static struct mlx5_ib_srmc *mlx5_ib_find_random_srmc_by_gid(union ib_gid *dgid)
 				continue;
 
 			seen++;
-			if (!selected || get_random_u32() % seen == 0)
+		}
+
+		if (!seen) {
+			mutex_unlock(&sched->srmc_lock);
+			continue;
+		}
+
+		hash = jhash(dgid->raw, sizeof(dgid->raw), 0x5a17c9e3);
+		hash = jhash_2words(hash, usr_rc_id, 0x9e3779b9);
+		target = hash % seen;
+		seen = 0;
+		for (i = 0; i < NUM_SRMC; i++) {
+			struct mlx5_ib_srmc *srmc = sched->srmc_tb[i];
+
+			if (!srmc)
+				continue;
+			if (memcmp(srmc->dgid.raw, dgid->raw,
+				   sizeof(srmc->dgid.raw)) != 0)
+				continue;
+			if (srmc->srmc_idx >= num_kqps)
+				continue;
+			if (!srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
+				continue;
+			if (seen++ == target) {
 				selected = srmc;
+				break;
+			}
 		}
 
 		if (selected) {
@@ -1574,7 +1603,7 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 	struct mlx5_ib_ucontext *context;
 	const struct ib_global_route *grh;
 	struct mlx5_ib_srmc *srmc;
-	struct mlx5_ib_srmc *large_srmc;
+	struct mlx5_ib_srmc *large_srmc = NULL;
 	union ib_gid dgid = {};
 	int si;
 	int err;
@@ -1604,25 +1633,38 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 				return err;
 		}
 
-		srmc = mlx5_ib_find_random_srmc_by_gid(&dgid);
+		srmc = mlx5_ib_find_pseudo_random_srmc_by_gid(
+			&dgid, qp->usr_rc_id_valid ?
+			       qp->usr_rc_id : qp->ibqp.qp_num);
 		if (!srmc || !srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
 			return -EINVAL;
-		if (srmc->srmc_idx + num_kqps >= NUM_SRMC)
-			return -EINVAL;
-		large_srmc = sched_group.scheds[0].srmc_by_idx[srmc->srmc_idx + num_kqps];
-		if (!large_srmc || !large_srmc->ini_cb.qp ||
-		    !large_srmc->ini_cb.qp->buf.frags)
-			return -EINVAL;
-		large_srmc->ini_cb.refcnt++;
+
+		if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
+			if (srmc->srmc_idx + num_kqps >= NUM_SRMC)
+				return -EINVAL;
+			large_srmc = sched_group.scheds[0].srmc_by_idx[
+				srmc->srmc_idx + num_kqps];
+			if (!large_srmc || !large_srmc->ini_cb.qp ||
+			    !large_srmc->ini_cb.qp->buf.frags)
+				return -EINVAL;
+			large_srmc->ini_cb.refcnt++;
+			qp->large_srmc_owner = large_srmc;
+		}
+
 		qp->srmc_owner = srmc;
-		qp->large_srmc_owner = large_srmc;
-		pr_info("hollow RC attach: usr_rc=%u small_srmc=%d small_qpn=%u large_srmc=%d large_qpn=%u users=%d\n",
-			qp->ibqp.qp_num, srmc->srmc_idx,
-			srmc->ini_cb.qp->ibqp.qp_num,
-			large_srmc->srmc_idx,
-			large_srmc->ini_cb.qp->ibqp.qp_num,
-			srmc->ini_cb.refcnt);
-	}
+		if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP)
+			pr_info("hollow RC attach: usr_rc=%u small_srmc=%d small_qpn=%u large_srmc=%d large_qpn=%u users=%d\n",
+				qp->ibqp.qp_num, srmc->srmc_idx,
+				srmc->ini_cb.qp->ibqp.qp_num,
+				large_srmc->srmc_idx,
+				large_srmc->ini_cb.qp->ibqp.qp_num,
+				srmc->ini_cb.refcnt);
+		else
+			pr_info("hollow RC attach: usr_rc=%u srmc=%d qpn=%u users=%d\n",
+				qp->ibqp.qp_num, srmc->srmc_idx,
+				srmc->ini_cb.qp->ibqp.qp_num,
+				srmc->ini_cb.refcnt);
+		}
 
 	err = mlx5_ib_modify_qp_sq_mmap(dev, context, qp, resp);
 	if (err)
@@ -1631,32 +1673,37 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 	err = mlx5_ib_create_qp_ctrl_mmap(dev, context, qp, resp);
 	if (err)
 		return err;
-	if (!qp->large_srmc_owner)
-		return -EINVAL;
-	resp->large_sq_state_slot_idx = qp->large_srmc_owner->srmc_idx;
 
 	err = mlx5_ib_create_qp_publish_mmap(context, qp, resp);
 	if (err)
 		return err;
 
-	err = mlx5_ib_prepare_srmc_sq_mmap(context, qp, qp->large_srmc_owner,
-					   &qp->large_sq_mmap_entry,
-					   &resp->large_sq_mmap_offset,
-					   &resp->large_sq_mmap_len);
-	if (err)
-		return err;
-
-	err = mlx5_ib_create_srmc_publish_mmap(context, qp,
-					       qp->large_srmc_owner,
-					       &qp->large_sq_publish_entry,
-					       &resp->large_publish_mmap_offset,
-					       &resp->large_publish_mmap_len,
-					       &resp->large_publish_depth);
-	if (err)
-		return err;
-
 	mlx5_ib_fill_kernel_qp_info(qp, resp);
-	mlx5_ib_fill_large_kernel_qp_info(qp->large_srmc_owner, resp);
+
+	if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
+		if (!qp->large_srmc_owner)
+			return -EINVAL;
+		resp->large_sq_state_slot_idx = qp->large_srmc_owner->srmc_idx;
+
+		err = mlx5_ib_prepare_srmc_sq_mmap(context, qp,
+						   qp->large_srmc_owner,
+						   &qp->large_sq_mmap_entry,
+						   &resp->large_sq_mmap_offset,
+						   &resp->large_sq_mmap_len);
+		if (err)
+			return err;
+
+		err = mlx5_ib_create_srmc_publish_mmap(
+			context, qp, qp->large_srmc_owner,
+			&qp->large_sq_publish_entry,
+			&resp->large_publish_mmap_offset,
+			&resp->large_publish_mmap_len,
+			&resp->large_publish_depth);
+		if (err)
+			return err;
+
+		mlx5_ib_fill_large_kernel_qp_info(qp->large_srmc_owner, resp);
+	}
 	return 0;
 }
 
@@ -1841,6 +1888,8 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 {
 	struct mlx5_ib_ucontext *context = rdma_udata_to_drv_context(
 		udata, struct mlx5_ib_ucontext, ibucontext);
+	struct mlx5_ib_srmc *srmc_owner;
+	struct mlx5_ib_srmc *large_srmc_owner;
 
 	if (udata) {
 		/* User QP */
@@ -1872,16 +1921,15 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 			qp->large_sq_publish_entry = NULL;
 		}
 
-		if (qp->srmc_owner) {
-			if (qp->srmc_owner->ini_cb.refcnt > 0)
-				qp->srmc_owner->ini_cb.refcnt--;
+		srmc_owner = qp->srmc_owner;
+		large_srmc_owner = qp->large_srmc_owner;
+		if (srmc_owner && srmc_owner->ini_cb.refcnt > 0)
+			srmc_owner->ini_cb.refcnt--;
+		if (large_srmc_owner && large_srmc_owner != srmc_owner &&
+		    large_srmc_owner->ini_cb.refcnt > 0)
+			large_srmc_owner->ini_cb.refcnt--;
 			qp->srmc_owner = NULL;
-		}
-		if (qp->large_srmc_owner) {
-			if (qp->large_srmc_owner->ini_cb.refcnt > 0)
-				qp->large_srmc_owner->ini_cb.refcnt--;
 			qp->large_srmc_owner = NULL;
-		}
 		if (qp->usr_rc_id_valid) {
 			mlx5_ib_unbind_usr_rc_cq(&sched_group, qp->usr_rc_id);
 			ida_free(&mlx5_usr_rc_ida, qp->usr_rc_id);
