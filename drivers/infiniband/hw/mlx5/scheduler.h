@@ -57,7 +57,7 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
 #define MLX5_SRM_ENABLE_DB_BATCH_LOG 0
 #define MLX5_SRM_DB_BATCH_LOG_INTERVAL (1ULL << 20)
 
-static u64 LIMIT_BATCHING = 250;
+static u64 LIMIT_BATCHING = 1000;
 #define DEBUG_LOG \
     if (debug)    \
     printk

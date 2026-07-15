@@ -2704,7 +2704,7 @@ int scheduler_polling(void *sched_data)
                 msleep(0);
             }
 
-            if(i%3==0){
+            {
                 u64 poll_start = srm_stats_enable ? ktime_get_ns() : 0;
 
                 ret = poll_srmc_inline(sched, sq_ctrl_pool, pre_srmcs,
