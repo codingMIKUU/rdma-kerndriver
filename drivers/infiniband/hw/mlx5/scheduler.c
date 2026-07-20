@@ -65,6 +65,17 @@ static void mlx5_ib_srm_cb_wake_all(struct srm_cb *cb)
     if (cb && READ_ONCE(cb->sem_initialized))
         wake_up_all(&cb->sem);
 }
+
+static bool mlx5_ib_srmc_is_invalid(struct mlx5_ib_srmc *srmc,
+                                    const char *where, int slot)
+{
+    if (!IS_ERR(srmc))
+        return false;
+
+    pr_warn_ratelimited("%s: dropping invalid srmc slot %d: %ld\n",
+                        where, slot, PTR_ERR(srmc));
+    return true;
+}
 extern struct mlx5_uars_page *mlx5_get_uars_page_by_index(struct mlx5_core_dev *mdev,
                                                    int uar_index);
 
@@ -981,6 +992,10 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
             break;
         }
         srmc = sched->srmc_tb[i];
+        if (mlx5_ib_srmc_is_invalid(srmc, "srm_poll_once", i)) {
+            sched->srmc_tb[i] = NULL;
+            continue;
+        }
         if (srmc == NULL)
         {
             continue;
@@ -1828,6 +1843,10 @@ static __always_inline struct mlx5_ib_srmc *find_target_srmc(struct mlx5_ib_sche
     {
         int j = (i + (*hash_id)) % NUM_SRMC;
         srmc = sched->srmc_tb[j];
+        if (mlx5_ib_srmc_is_invalid(srmc, "find_target_srmc", j)) {
+            sched->srmc_tb[j] = NULL;
+            continue;
+        }
         if (!srmc)
         {
             pr_err("Unexpected:No srmc found for this wr\n");
@@ -1847,6 +1866,10 @@ static __always_inline struct mlx5_ib_srmc *find_target_srmc(struct mlx5_ib_sche
             uint32_t rd = prandom_u32_max(mlx5_srm_effective_kqps());
             j = (j + rd) % NUM_SRMC;
             srmc = sched->srmc_tb[j];
+            if (mlx5_ib_srmc_is_invalid(srmc, "find_target_srmc random", j)) {
+                sched->srmc_tb[j] = NULL;
+                return NULL;
+            }
             return srmc;
         }
     }
@@ -2681,6 +2704,10 @@ int scheduler_polling(void *sched_data)
             for (j = 0; j < NUM_SRMC; j++) {
                 struct mlx5_ib_srmc *tmp = sched->srmc_tb[j];
 
+                if (mlx5_ib_srmc_is_invalid(tmp, "scheduler_polling ctrl pool", j)) {
+                    sched->srmc_tb[j] = NULL;
+                    continue;
+                }
                 if (tmp && tmp->ini_cb.qp) {
                     if (tmp->ini_cb.qp->sq_ctrl_entry)
                         sq_ctrl_pool =
@@ -3352,6 +3379,10 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
             mutex_lock(&sched->srmc_lock);
             srmc = sched->srmc_tb[j];
             sched->srmc_tb[j] = NULL;
+            if (mlx5_ib_srmc_is_invalid(srmc, "mlx5_sched_exit", j)) {
+                mutex_unlock(&sched->srmc_lock);
+                continue;
+            }
             if (srmc && srmc->srmc_idx >= 0 &&
                 srmc->srmc_idx < NUM_SRMC &&
                 sched->srmc_by_idx[srmc->srmc_idx] == srmc)
@@ -3551,6 +3582,11 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
         for (j = 0; j < NUM_SRMC; j++) {
             mutex_lock(&sched->srmc_lock);
             srmc = sched->srmc_tb[j];
+            if (mlx5_ib_srmc_is_invalid(srmc, "mlx5_ib_server_exit wake", j)) {
+                sched->srmc_tb[j] = NULL;
+                mutex_unlock(&sched->srmc_lock);
+                continue;
+            }
             if (srmc) {
                 srmc->tgt_cb.state = ERROR;
                 srmc->tgt_cb.cm_error = -ESHUTDOWN;
@@ -3578,6 +3614,11 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
         for (j = 0; j < NUM_SRMC; j++) {
             mutex_lock(&sched->srmc_lock);
             srmc = sched->srmc_tb[j];
+            if (mlx5_ib_srmc_is_invalid(srmc, "mlx5_ib_server_exit destroy", j)) {
+                sched->srmc_tb[j] = NULL;
+                mutex_unlock(&sched->srmc_lock);
+                continue;
+            }
             cb = srmc ? &srmc->tgt_cb : NULL;
             mutex_unlock(&sched->srmc_lock);
             if (!cb || !cb->cm_id)
@@ -3635,6 +3676,10 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
     {
         j = (hash_id + i) % NUM_SRMC;
         srmc = sched->srmc_tb[j];
+        if (mlx5_ib_srmc_is_invalid(srmc, "is_xrc_exists", j)) {
+            sched->srmc_tb[j] = NULL;
+            break;
+        }
         if (srmc == NULL)
         {
             break;
@@ -3887,6 +3932,11 @@ int srm_create_connection(struct server_conn_info *conn_info)
     {
         j = (hash_id + i) % NUM_SRMC;
         srmc = sched->srmc_tb[j];
+        if (mlx5_ib_srmc_is_invalid(srmc, "srm_create_connection lookup", j)) {
+            sched->srmc_tb[j] = NULL;
+            srmc = NULL;
+            break;
+        }
         if (srmc == NULL)
         {
             break;
@@ -3902,6 +3952,11 @@ int srm_create_connection(struct server_conn_info *conn_info)
     {
         j = (j + 1) % NUM_SRMC;
         srmc = sched->srmc_tb[j];
+        if (mlx5_ib_srmc_is_invalid(srmc, "srm_create_connection probe", j)) {
+            sched->srmc_tb[j] = NULL;
+            srmc = NULL;
+            break;
+        }
         cnt++;
         if (cnt > NUM_SRMC)
         {

@@ -1159,6 +1159,12 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 
 			if (!srmc)
 				continue;
+			if (IS_ERR(srmc)) {
+				pr_warn_ratelimited("hollow RC attach: dropping invalid srmc slot %d: %ld\n",
+						    i, PTR_ERR(srmc));
+				sched->srmc_tb[i] = NULL;
+				continue;
+			}
 
 			if (memcmp(srmc->dgid.raw, dgid->raw,
 				   sizeof(srmc->dgid.raw)) != 0)
@@ -1185,6 +1191,12 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 
 			if (!srmc)
 				continue;
+			if (IS_ERR(srmc)) {
+				pr_warn_ratelimited("hollow RC attach: dropping invalid srmc slot %d: %ld\n",
+						    i, PTR_ERR(srmc));
+				sched->srmc_tb[i] = NULL;
+				continue;
+			}
 			if (memcmp(srmc->dgid.raw, dgid->raw,
 				   sizeof(srmc->dgid.raw)) != 0)
 				continue;
