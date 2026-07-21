@@ -1378,7 +1378,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 32;
+const int num_kqps = 256;
 
 static inline int mlx5_srm_effective_kqps(void)
 {
@@ -3394,14 +3394,17 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
 
             mlx5_ib_destroy_srmc_ini(srmc);
             mlx5_ib_free_srmc_publish(srmc);
-            for (k = 0; k < SQ_DEPTH; k++) {
-                if (srmc->wqe_infos[k].valid &&
-                    srmc->wqe_infos[k].cqb) {
-                    srmc->wqe_infos[k].cqb = NULL;
-                    srmc->wqe_infos[k].valid = 0;
+            if (srmc->wqe_infos) {
+                for (k = 0; k < SQ_DEPTH; k++) {
+                    if (srmc->wqe_infos[k].valid &&
+                        srmc->wqe_infos[k].cqb) {
+                        srmc->wqe_infos[k].cqb = NULL;
+                        srmc->wqe_infos[k].valid = 0;
+                    }
                 }
+                kvfree(srmc->wqe_infos);
+                srmc->wqe_infos = NULL;
             }
-            kvfree(srmc->wqe_infos);
             kfree(srmc);
         }
         memset(sched->srmc_by_idx, 0, sizeof(sched->srmc_by_idx));
