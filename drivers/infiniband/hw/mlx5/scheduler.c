@@ -27,6 +27,7 @@
 #include <linux/compiler.h>
 #include <linux/random.h>
 #include <linux/jiffies.h>
+#include <linux/bitmap.h>
 
 // 文件操作
 #include <linux/fs.h>
@@ -53,6 +54,37 @@ static bool srm_stats_enable;
 module_param_named(srm_stats_enable, srm_stats_enable, bool, 0644);
 MODULE_PARM_DESC(srm_stats_enable,
                  "Enable one-second hollow RC scheduler statistics");
+
+static bool srm_reroute_enable = false;
+module_param_named(srm_reroute_enable, srm_reroute_enable, bool, 0644);
+static uint srm_reroute_interval_ms = 10;
+module_param_named(srm_reroute_interval_ms, srm_reroute_interval_ms, uint,
+                   0644);
+static uint srm_reroute_ratio_gap = 200;
+module_param_named(srm_reroute_ratio_gap, srm_reroute_ratio_gap, uint, 0644);
+static uint srm_reroute_consecutive_windows = 3;
+module_param_named(srm_reroute_consecutive_windows,
+                   srm_reroute_consecutive_windows, uint, 0644);
+static uint srm_reroute_cooldown_ms = 1000;
+module_param_named(srm_reroute_cooldown_ms, srm_reroute_cooldown_ms, uint,
+                   0644);
+static u8 srm_paths_per_ip = MLX5_SRM_DEFAULT_PATHS_PER_IP;
+module_param_named(srm_paths_per_ip, srm_paths_per_ip, byte, 0444);
+MODULE_PARM_DESC(srm_paths_per_ip,
+                 "Hollow RC kernel paths per logical IP (load-time only)");
+
+/*
+ * Keep accounting until an in-progress migration finishes even if rerouting
+ * is disabled at runtime. With rerouting disabled, or with only one path, the
+ * steady-state per-WQE/CQE hot paths skip byte and inflight counter updates.
+ */
+static inline bool
+mlx5_srm_reroute_tracking_active(const struct mlx5_ib_srmc *srmc)
+{
+    return unlikely((READ_ONCE(srm_reroute_enable) &&
+                     READ_ONCE(srm_paths_per_ip) > 1) ||
+                    READ_ONCE(srmc->migrate_peer));
+}
 
 static void mlx5_ib_srm_cb_init_waitqueue(struct srm_cb *cb)
 {
@@ -296,6 +328,31 @@ static u64 mlx5_ib_srmc_get_publish_token(struct mlx5_ib_srmc *srmc,
     entry = (u64 *)((char *)page_address(srmc->publish_pages[page_idx]) +
                     page_off);
     return smp_load_acquire(entry);
+}
+
+static bool mlx5_ib_srmc_set_publish_token(struct mlx5_ib_srmc *srmc,
+                                           u32 idx, u64 token)
+{
+    size_t off;
+    u32 page_idx;
+    u32 page_off;
+    u64 *entry;
+
+    if (!srmc || !srmc->publish_pages || !srmc->publish_depth)
+        return false;
+
+    idx &= srmc->publish_depth - 1;
+    off = (size_t)idx * sizeof(*entry);
+    page_idx = off / PAGE_SIZE;
+    page_off = off % PAGE_SIZE;
+    if (page_idx >= srmc->publish_npages ||
+        !srmc->publish_pages[page_idx])
+        return false;
+
+    entry = (u64 *)((char *)page_address(srmc->publish_pages[page_idx]) +
+                    page_off);
+    smp_store_release(entry, token);
+    return true;
 }
 
 static struct mlx5_ib_srmc *mlx5_ib_sched_find_srmc_idx(struct mlx5_ib_sched *sched,
@@ -825,6 +882,10 @@ struct mlx5_srm_cqe_publish_entry {
     struct mlx5_sq_ctrl_page *ctrl_page;
     u64 wqe_counter;
     u32 uidx;
+    u16 usr_rc_cnt;
+    u8 path_idx;
+    u32 user_qpn;
+    u32 user_wqe_counter;
     struct mlx5_cqe64 *cqe64;
 };
 
@@ -906,7 +967,41 @@ static inline bool mlx5_srm_resolve_cqe_ctx(
     entry->ctrl_page = ctrl_page;
     entry->wqe_counter = post_idx;
     entry->uidx = uidx;
+    entry->usr_rc_cnt = usr_rc_cnt;
+    entry->path_idx = send_srmc->path_idx;
+    entry->user_qpn = 0;
+    entry->user_wqe_counter = 0;
     entry->cqe64 = NULL;
+
+    if (send_srmc->migrate_meta) {
+        struct mlx5_srm_migrate_meta *meta =
+            &send_srmc->migrate_meta[slot];
+
+        if (READ_ONCE(meta->valid) &&
+            READ_ONCE(meta->dest_post_idx) == post_idx) {
+            entry->user_qpn = READ_ONCE(meta->source_qpn);
+            entry->user_wqe_counter = READ_ONCE(meta->source_post_idx);
+            WRITE_ONCE(meta->valid, 0);
+            if (send_srmc->migrated_outstanding)
+                send_srmc->migrated_outstanding--;
+        }
+    }
+
+    if (mlx5_srm_reroute_tracking_active(send_srmc)) {
+        u32 payload_bytes = mlx5_srm_publish_bytes(publish_token);
+
+        send_srmc->completed_bytes += payload_bytes;
+        if (send_srmc->inflight_bytes >= payload_bytes)
+            send_srmc->inflight_bytes -= payload_bytes;
+        else
+            send_srmc->inflight_bytes = 0;
+        if (send_srmc->inflight_wqes)
+            send_srmc->inflight_wqes--;
+    }
+    if (unlikely(send_srmc->migrate_source &&
+                 send_srmc->migrate_user_inflight &&
+                 send_srmc->migrate_user_inflight[usr_rc_cnt]))
+        send_srmc->migrate_user_inflight[usr_rc_cnt]--;
 
     return true;
 }
@@ -1378,11 +1473,697 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 256;
+const int num_kqps = 128;
 
+/* Return the number of physical kernel-QP paths in each logical-IP pool. */
+u8 mlx5_srm_get_paths_per_ip(void)
+{
+    return READ_ONCE(srm_paths_per_ip);
+}
+
+/* Calculate all physical KQPs that must be created, including spare paths. */
 static inline int mlx5_srm_effective_kqps(void)
 {
-    return num_kqps * MLX5_SRM_KERNEL_QP_LEVELS;
+    return num_kqps * READ_ONCE(srm_paths_per_ip) *
+           MLX5_SRM_KERNEL_QP_LEVELS;
+}
+
+/*
+ * Check whether every user-reserved WQE in the frozen migration range has
+ * published its ready token.  Freezing prevents new reservations, but users
+ * that reserved before the freeze may still be finishing their WQE writes.
+ */
+static bool mlx5_srm_migration_tokens_ready(struct mlx5_ib_srmc *src)
+{
+    u64 post_idx;
+
+    for (post_idx = src->db_stop_idx;
+         post_idx < src->migrate_end_idx; post_idx++) {
+        u32 slot = post_idx & (src->publish_depth - 1);
+        u64 token = mlx5_ib_srmc_get_publish_token(src, slot);
+
+        if (mlx5_srm_publish_seq(token) !=
+            ((post_idx + 1) & MLX5_SRM_PUBLISH_SEQ_MASK))
+            return false;
+    }
+    return true;
+}
+
+/*
+ * Validate the WQEs that will be moved before modifying either SQ.  Migration
+ * currently supports only unsigned, one-BB WQEs because each source slot is
+ * copied to exactly one destination slot.
+ */
+static int mlx5_srm_validate_migration_wqes(struct mlx5_ib_srmc *src)
+{
+    u64 post_idx;
+
+    if (!src || !src->ini_cb.qp || !src->publish_depth)
+        return -EINVAL;
+    if (src->ini_cb.qp->flags_en & MLX5_QP_FLAG_SIGNATURE)
+        return -EOPNOTSUPP;
+
+    for (post_idx = src->db_stop_idx;
+         post_idx < src->migrate_end_idx; post_idx++) {
+        struct mlx5_wqe_ctrl_seg *ctrl;
+        u32 slot = post_idx & (src->ini_cb.qp->sq.wqe_cnt - 1);
+        u64 token = mlx5_ib_srmc_get_publish_token(src, slot);
+        u32 qpn_ds;
+        u32 ds;
+
+        if (mlx5_srm_publish_seq(token) !=
+            ((post_idx + 1) & MLX5_SRM_PUBLISH_SEQ_MASK))
+            return -EAGAIN;
+
+        ctrl = mlx5_frag_buf_get_wqe(&src->ini_cb.qp->sq.fbc, slot);
+        qpn_ds = be32_to_cpu(READ_ONCE(ctrl->qpn_ds));
+        ds = qpn_ds & 0xff;
+        if (DIV_ROUND_UP(ds * 16, MLX5_SEND_WQE_BB) != 1) {
+            pr_warn_ratelimited(
+                "hollow RC migration only supports one-BB WQEs: src=%d post=%llu ds=%u\n",
+                src->srmc_idx, post_idx, ds);
+            return -EOPNOTSUPP;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * Build a per-user snapshot of source WQEs that were already doorbelled but
+ * have not completed.  This is done once after freezing, replacing the old
+ * per-WQE path_inflight maintenance on the normal send/completion paths.
+ */
+static int mlx5_srm_snapshot_migration_inflight(
+    struct mlx5_ib_srmc *src, struct mlx5_sq_ctrl_page *src_ctrl)
+{
+    u64 cons_idx;
+    u64 post_idx;
+
+    if (!src || !src_ctrl || !src->migrate_user_inflight ||
+        !src->publish_depth || !src->ini_cb.qp)
+        return -EINVAL;
+
+    cons_idx = smp_load_acquire(&src_ctrl->cons_idx);
+    if (cons_idx > src->db_stop_idx ||
+        src->db_stop_idx - cons_idx > src->ini_cb.qp->sq.wqe_cnt)
+        return -EINVAL;
+
+    memset(src->migrate_user_inflight, 0,
+           NUM_SQB * sizeof(*src->migrate_user_inflight));
+    for (post_idx = cons_idx; post_idx < src->db_stop_idx; post_idx++) {
+        u32 slot = post_idx & (src->publish_depth - 1);
+        u64 token = mlx5_ib_srmc_get_publish_token(src, slot);
+        u16 usr_rc_cnt;
+
+        if (mlx5_srm_publish_seq(token) !=
+            ((post_idx + 1) & MLX5_SRM_PUBLISH_SEQ_MASK))
+            return -EAGAIN;
+        usr_rc_cnt = mlx5_srm_publish_usr_rc(token);
+        if (usr_rc_cnt >= NUM_SQB)
+            return -EINVAL;
+        src->migrate_user_inflight[usr_rc_cnt]++;
+    }
+
+    return 0;
+}
+
+/*
+ * Turn the source copies of migrated, not-yet-doorbelled WQEs into NOPs.
+ * This prevents the operations from being executed twice if the retired SQ
+ * later advances across these slots when it is reused.
+ */
+static void mlx5_srm_retire_migrated_source_wqes(
+    struct mlx5_ib_srmc *src)
+{
+    u64 post_idx;
+
+    for (post_idx = src->db_stop_idx;
+         post_idx < src->migrate_end_idx; post_idx++) {
+        struct mlx5_wqe_ctrl_seg *ctrl;
+        u32 slot = post_idx & (src->ini_cb.qp->sq.wqe_cnt - 1);
+        u32 opmod_idx_opcode;
+
+        ctrl = mlx5_frag_buf_get_wqe(&src->ini_cb.qp->sq.fbc, slot);
+        opmod_idx_opcode =
+            be32_to_cpu(READ_ONCE(ctrl->opmod_idx_opcode));
+        WRITE_ONCE(ctrl->fm_ce_se, 0);
+        WRITE_ONCE(ctrl->opmod_idx_opcode,
+                   cpu_to_be32((opmod_idx_opcode & 0xffffff00) |
+                               MLX5_OPCODE_NOP));
+    }
+
+    /* A later doorbell may make the HCA consume these retired slots. */
+    wmb();
+}
+
+/*
+ * Copy one ready source WQE to its reserved destination slot, rewrite the
+ * hardware WQE index and QPN, republish its token, and record enough metadata
+ * to restore the source QPN/counter when its CQE is returned to userspace.
+ */
+static int mlx5_srm_copy_migrated_wqe(struct mlx5_ib_srmc *src,
+                                      struct mlx5_ib_srmc *dst,
+                                      u64 src_post, u64 dst_post)
+{
+    struct mlx5_srm_migrate_meta *meta;
+    struct mlx5_wqe_ctrl_seg *src_ctrl;
+    struct mlx5_wqe_ctrl_seg *dst_ctrl;
+    u64 src_token;
+    u64 dst_token;
+    u32 opmod_idx_opcode;
+    u32 qpn_ds;
+    u32 src_slot;
+    u32 dst_slot;
+    u32 ds;
+    u32 bytes;
+    u16 usr_rc_cnt;
+
+    src_slot = src_post & (src->ini_cb.qp->sq.wqe_cnt - 1);
+    dst_slot = dst_post & (dst->ini_cb.qp->sq.wqe_cnt - 1);
+    src_ctrl = mlx5_frag_buf_get_wqe(&src->ini_cb.qp->sq.fbc, src_slot);
+    dst_ctrl = mlx5_frag_buf_get_wqe(&dst->ini_cb.qp->sq.fbc, dst_slot);
+    src_token = mlx5_ib_srmc_get_publish_token(src, src_slot);
+    if (mlx5_srm_publish_seq(src_token) !=
+        ((src_post + 1) & MLX5_SRM_PUBLISH_SEQ_MASK))
+        return -EAGAIN;
+
+    qpn_ds = be32_to_cpu(READ_ONCE(src_ctrl->qpn_ds));
+    ds = qpn_ds & 0xff;
+    if (DIV_ROUND_UP(ds * 16, MLX5_SEND_WQE_BB) != 1) {
+        pr_warn_ratelimited("hollow RC migration only supports one-BB WQEs: src=%d post=%llu ds=%u\n",
+                            src->srmc_idx, src_post, ds);
+        return -EOPNOTSUPP;
+    }
+
+    memcpy(dst_ctrl, src_ctrl, MLX5_SEND_WQE_BB);
+    opmod_idx_opcode = be32_to_cpu(dst_ctrl->opmod_idx_opcode);
+    opmod_idx_opcode = (opmod_idx_opcode & 0xff0000ff) |
+                       (((u32)dst_post & 0xffff) << 8);
+    dst_ctrl->opmod_idx_opcode = cpu_to_be32(opmod_idx_opcode);
+    dst_ctrl->qpn_ds = cpu_to_be32((qpn_ds & 0xff) |
+        (dst->ini_cb.qp->ibqp.qp_num << 8));
+
+    usr_rc_cnt = mlx5_srm_publish_usr_rc(src_token);
+    bytes = mlx5_srm_publish_bytes(src_token);
+    dst_token = mlx5_srm_publish_token(dst_post + 1, usr_rc_cnt, bytes);
+
+    meta = &dst->migrate_meta[dst_slot];
+    WRITE_ONCE(meta->source_qpn, src->ini_cb.qp->ibqp.qp_num);
+    WRITE_ONCE(meta->source_post_idx, (u32)src_post);
+    WRITE_ONCE(meta->dest_post_idx, (u32)dst_post);
+    smp_store_release(&meta->valid, 1);
+    if (!mlx5_ib_srmc_set_publish_token(dst, dst_slot, dst_token))
+        return -EINVAL;
+    return 0;
+}
+
+/*
+ * Copy the complete frozen pending range.  Users without old source inflight
+ * are placed first so that destination.migration_ready can expose them
+ * immediately; users that still depend on source completions are placed last.
+ */
+static int mlx5_srm_progress_migration(struct mlx5_ib_srmc *src)
+{
+    struct mlx5_ib_srmc *dst = src->migrate_peer;
+    u64 dst_post;
+    u64 src_post;
+    int blocked_pass;
+
+    if (!src->migrate_source ||
+        src->migrate_state != MLX5_SRM_PATH_COPYING || !dst)
+        return 0;
+    if (!mlx5_srm_migration_tokens_ready(src))
+        return -EAGAIN;
+
+    bitmap_zero(src->migrate_blocked_users, NUM_SQB);
+    for (src_post = src->db_stop_idx;
+         src_post < src->migrate_end_idx; src_post++) {
+        u32 slot = src_post & (src->publish_depth - 1);
+        u64 token = mlx5_ib_srmc_get_publish_token(src, slot);
+        u16 usr_rc_cnt = mlx5_srm_publish_usr_rc(token);
+
+        if (usr_rc_cnt < NUM_SQB &&
+            src->migrate_user_inflight[usr_rc_cnt])
+            __set_bit(usr_rc_cnt, src->migrate_blocked_users);
+    }
+
+    dst_post = src->migrate_dst_start;
+    for (blocked_pass = 0; blocked_pass < 2; blocked_pass++) {
+        for (src_post = src->db_stop_idx;
+             src_post < src->migrate_end_idx; src_post++) {
+            u32 slot = src_post & (src->publish_depth - 1);
+            u64 token = mlx5_ib_srmc_get_publish_token(src, slot);
+            u16 usr_rc_cnt = mlx5_srm_publish_usr_rc(token);
+            bool blocked = usr_rc_cnt < NUM_SQB &&
+                           test_bit(usr_rc_cnt,
+                                    src->migrate_blocked_users);
+            int ret;
+
+            if (blocked != !!blocked_pass)
+                continue;
+            ret = mlx5_srm_copy_migrated_wqe(src, dst, src_post,
+                                              dst_post++);
+            if (ret)
+                return ret;
+        }
+        if (!blocked_pass)
+            dst->migrate_ready_idx = dst_post;
+    }
+
+    dst->migrate_end_idx = dst_post;
+    dst->migrated_outstanding = dst_post - src->migrate_dst_start;
+    mlx5_srm_retire_migrated_source_wqes(src);
+    dst->migrate_state = MLX5_SRM_PATH_DRAINING;
+    src->migrate_state = MLX5_SRM_PATH_DRAINING;
+    src->migrate_copied = src->migrate_end_idx - src->db_stop_idx;
+    return 0;
+}
+
+/*
+ * Extend the destination's contiguous doorbell-ready prefix as old source
+ * CQEs reduce migrate_user_inflight[].  Stop at the first user that still has
+ * an ordering dependency; the scheduler can continue scanning other KQPs.
+ */
+static void mlx5_srm_advance_migration_ready(
+    struct mlx5_qp_ctrl_pool *pool, struct mlx5_ib_srmc *dst)
+{
+    struct mlx5_ib_srmc *src = dst->migrate_peer;
+    struct mlx5_sq_ctrl_page *dst_ctrl;
+    u64 ready;
+    u64 old_ready;
+
+    if (!src || !src->migrate_source ||
+        dst->migrate_state != MLX5_SRM_PATH_DRAINING)
+        return;
+    if (src->path_idx >= MLX5_IB_SRM_MAX_PATHS_PER_IP)
+        return;
+
+    dst_ctrl = mlx5_sq_ctrl_get_slot(pool, dst->srmc_idx);
+    if (!dst_ctrl)
+        return;
+
+    old_ready = dst->migrate_ready_idx;
+    ready = old_ready;
+    while (ready < dst->migrate_end_idx) {
+        u32 slot = ready & (dst->publish_depth - 1);
+        u64 token = mlx5_ib_srmc_get_publish_token(dst, slot);
+        u16 usr_rc_cnt;
+
+        if (mlx5_srm_publish_seq(token) !=
+            ((ready + 1) & MLX5_SRM_PUBLISH_SEQ_MASK))
+            break;
+
+        usr_rc_cnt = mlx5_srm_publish_usr_rc(token);
+        if (unlikely(usr_rc_cnt >=
+                     ARRAY_SIZE(sched_group.usr_rc_routes))) {
+            pr_warn_ratelimited(
+                "hollow RC migration invalid usr_rc=%u dst=%d post=%llu\n",
+                usr_rc_cnt, dst->srmc_idx, ready);
+            break;
+        }
+        if (src->migrate_user_inflight[usr_rc_cnt])
+            break;
+        ready++;
+    }
+
+    if (ready != old_ready) {
+        dst->migrate_ready_idx = ready;
+        smp_store_release(&dst_ctrl->migration_ready, ready);
+    }
+}
+
+/*
+ * Recycle a quiesced source path only after every migrated destination WQE has
+ * completed.  The exact cmpxchg safely removes FROZEN and makes the old source
+ * an INACTIVE spare for a later reroute.
+ */
+static void mlx5_srm_release_retired_source(
+    struct mlx5_qp_ctrl_pool *pool, struct mlx5_ib_srmc *dst)
+{
+    struct mlx5_ib_srmc *src = dst->migrate_peer;
+    struct mlx5_sq_ctrl_page *src_ctrl;
+    u64 frozen_resv;
+
+    if (!src || !src->migrate_source ||
+        src->migrate_state != MLX5_SRM_PATH_QUIESCED ||
+        dst->migrated_outstanding)
+        return;
+
+    src_ctrl = mlx5_sq_ctrl_get_slot(pool, src->srmc_idx);
+    if (!src_ctrl)
+        return;
+
+    frozen_resv = src->migrate_end_idx | MLX5_SRM_RESV_FROZEN;
+    if (cmpxchg(&src_ctrl->resv_idx, frozen_resv,
+                src->migrate_end_idx) != frozen_resv)
+        return;
+    WRITE_ONCE(src_ctrl->path_state, MLX5_SRM_PATH_INACTIVE);
+    WRITE_ONCE(src_ctrl->replacement_path, U8_MAX);
+    src->migrate_state = MLX5_SRM_PATH_INACTIVE;
+    src->migrate_source = 0;
+    src->migrate_peer = NULL;
+    dst->migrate_peer = NULL;
+
+    pr_info("hollow RC reroute complete logical_ip=%u old_path=%u new_path=%u moved=%llu\n",
+            src->logical_ip_idx, src->path_idx, dst->path_idx,
+            src->migrate_copied);
+}
+
+/*
+ * Finish draining the old hardware path after all source inflight WQEs have
+ * completed.  The destination becomes ACTIVE, while the source remains
+ * QUIESCED and frozen until all copied WQEs also complete.
+ */
+static void mlx5_srm_finish_migration(struct mlx5_qp_ctrl_pool *pool,
+                                      struct mlx5_ib_srmc *dst)
+{
+    struct mlx5_ib_srmc *src = dst->migrate_peer;
+    struct mlx5_sq_ctrl_page *src_ctrl;
+    struct mlx5_sq_ctrl_page *dst_ctrl;
+
+    if (!src || !src->migrate_source || src->inflight_wqes)
+        return;
+
+    src_ctrl = mlx5_sq_ctrl_get_slot(pool, src->srmc_idx);
+    dst_ctrl = mlx5_sq_ctrl_get_slot(pool, dst->srmc_idx);
+    if (!src_ctrl || !dst_ctrl)
+        return;
+    if (smp_load_acquire(&src_ctrl->resv_idx) !=
+        (src->migrate_end_idx | MLX5_SRM_RESV_FROZEN))
+        return;
+
+    dst->migrate_ready_idx = dst->migrate_end_idx;
+    dst->migrate_state = MLX5_SRM_PATH_ACTIVE;
+    WRITE_ONCE(dst_ctrl->path_state, MLX5_SRM_PATH_ACTIVE);
+    smp_store_release(&dst_ctrl->migration_ready,
+                      dst->migrate_ready_idx);
+
+    src->sched_post_idx = src->migrate_end_idx;
+    src->ini_cb.qp->sq.cur_post = src->migrate_end_idx;
+    smp_store_release(&src_ctrl->cons_idx, src->migrate_end_idx);
+    WRITE_ONCE(src_ctrl->path_state, MLX5_SRM_PATH_QUIESCED);
+    src->migrate_state = MLX5_SRM_PATH_QUIESCED;
+    mlx5_srm_release_retired_source(pool, dst);
+}
+
+/*
+ * Abort a migration that failed after freezing but before publishing a new
+ * active path.  Unfreeze only if resv_idx still exactly matches the captured
+ * frozen boundary, so a concurrent userspace rollback cannot be overwritten.
+ */
+static bool mlx5_srm_progress_abort_freeze(
+    struct mlx5_qp_ctrl_pool *pool, struct mlx5_ib_srmc *src)
+{
+    struct mlx5_sq_ctrl_page *src_ctrl;
+    u64 frozen_resv;
+
+    if (!src || src->migrate_state != MLX5_SRM_PATH_FREEZE_REQ)
+        return false;
+    src_ctrl = mlx5_sq_ctrl_get_slot(pool, src->srmc_idx);
+    if (!src_ctrl)
+        return false;
+
+    frozen_resv = src->migrate_end_idx | MLX5_SRM_RESV_FROZEN;
+    if (cmpxchg(&src_ctrl->resv_idx, frozen_resv,
+                src->migrate_end_idx) != frozen_resv)
+        return false;
+
+    src->migrate_state = MLX5_SRM_PATH_ACTIVE;
+    WRITE_ONCE(src_ctrl->path_state, MLX5_SRM_PATH_ACTIVE);
+    return true;
+}
+
+/*
+ * Freeze the source, snapshot its ordering dependencies, reserve one
+ * contiguous destination range, and atomically publish the replacement through
+ * active_path[] plus route_generation.  Copying may complete immediately or be
+ * continued later by the active destination in the scheduler loop.
+ */
+static int mlx5_srm_start_migration(struct mlx5_ib_sched *sched,
+                                    struct mlx5_qp_ctrl_pool *pool,
+                                    struct mlx5_ib_srmc *src,
+                                    struct mlx5_ib_srmc *dst)
+{
+    struct mlx5_sq_ctrl_page *route_ctrl;
+    struct mlx5_sq_ctrl_page *src_ctrl;
+    struct mlx5_sq_ctrl_page *dst_ctrl;
+    u64 src_resv;
+    u64 dst_resv;
+    u64 dst_cons;
+    u64 move_nr;
+    u64 next;
+    bool dst_was_active;
+    int active_slot = -1;
+    int ret;
+    int slot;
+
+    if (!src || !dst || src == dst || src->logical_ip_idx !=
+        dst->logical_ip_idx || src->path_count != dst->path_count)
+        return -EINVAL;
+    if (!src->publish_pages || !src->publish_depth ||
+        !dst->publish_pages || !dst->publish_depth)
+        return -EINVAL;
+    if (src->migrate_state != MLX5_SRM_PATH_ACTIVE)
+        return -EBUSY;
+    dst_was_active = dst->migrate_state == MLX5_SRM_PATH_ACTIVE;
+    if (dst->migrate_state != MLX5_SRM_PATH_INACTIVE &&
+        !(src->path_count == 2 && dst_was_active))
+        return -EBUSY;
+    if (dst->migrate_peer)
+        return -EBUSY;
+
+    src_ctrl = mlx5_sq_ctrl_get_slot(pool, src->srmc_idx);
+    dst_ctrl = mlx5_sq_ctrl_get_slot(pool, dst->srmc_idx);
+    route_ctrl = mlx5_sq_ctrl_get_slot(
+        pool, src->logical_ip_idx * src->path_count);
+    if (!src_ctrl || !dst_ctrl || !route_ctrl)
+        return -EINVAL;
+
+    for (slot = 0; slot < 2; slot++)
+        if (READ_ONCE(route_ctrl->active_path[slot]) == src->path_idx)
+            active_slot = slot;
+    if (active_slot < 0)
+        return -EINVAL;
+
+    if (!dst->migrate_meta) {
+        dst->migrate_meta = kvcalloc(dst->ini_cb.qp->sq.wqe_cnt,
+                                     sizeof(*dst->migrate_meta),
+                                     GFP_KERNEL);
+        if (!dst->migrate_meta)
+            return -ENOMEM;
+    }
+    if (!src->migrate_blocked_users) {
+        src->migrate_blocked_users = bitmap_zalloc(NUM_SQB, GFP_KERNEL);
+        if (!src->migrate_blocked_users)
+            return -ENOMEM;
+    }
+    if (!src->migrate_user_inflight) {
+        src->migrate_user_inflight =
+            kvcalloc(NUM_SQB, sizeof(*src->migrate_user_inflight),
+                     GFP_KERNEL);
+        if (!src->migrate_user_inflight)
+            return -ENOMEM;
+    }
+
+    for (;;) {
+        src_resv = smp_load_acquire(&src_ctrl->resv_idx);
+        if (src_resv & MLX5_SRM_RESV_FROZEN)
+            return -EBUSY;
+        next = src_resv | MLX5_SRM_RESV_FROZEN;
+        if (cmpxchg(&src_ctrl->resv_idx, src_resv, next) == src_resv)
+            break;
+        cpu_relax();
+    }
+
+    src->db_stop_idx = src->sched_post_idx;
+    src->migrate_end_idx = src_resv & MLX5_SRM_RESV_INDEX_MASK;
+    move_nr = src->migrate_end_idx - src->db_stop_idx;
+    ret = mlx5_srm_snapshot_migration_inflight(src, src_ctrl);
+    if (ret)
+        goto err_unfreeze;
+    ret = mlx5_srm_validate_migration_wqes(src);
+    if (ret)
+        goto err_unfreeze;
+
+    for (;;) {
+        dst_resv = smp_load_acquire(&dst_ctrl->resv_idx);
+        if (dst_resv & MLX5_SRM_RESV_FROZEN) {
+            ret = -ENOSPC;
+            goto err_unfreeze;
+        }
+        dst_cons = smp_load_acquire(&dst_ctrl->cons_idx);
+        if (!dst_was_active &&
+            (dst_resv != dst_cons || dst_resv != dst->sched_post_idx)) {
+            ret = -ENOSPC;
+            goto err_unfreeze;
+        }
+        if ((dst_resv - dst_cons) + move_nr >=
+            (dst->ini_cb.qp->sq.wqe_cnt * 2) / 3) {
+            ret = -ENOSPC;
+            goto err_unfreeze;
+        }
+        if (cmpxchg(&dst_ctrl->resv_idx, dst_resv,
+                    dst_resv + move_nr) == dst_resv)
+            break;
+        cpu_relax();
+    }
+
+    src->migrate_dst_start = dst_resv;
+    src->migrate_peer = dst;
+    src->migrate_source = 1;
+    src->migrate_state = MLX5_SRM_PATH_COPYING;
+    dst->migrate_peer = src;
+    dst->migrate_state = MLX5_SRM_PATH_COPYING;
+    dst->migrate_ready_idx = dst_resv;
+    dst->migrate_end_idx = dst_resv + move_nr;
+    smp_store_release(&src_ctrl->replacement_path, dst->path_idx);
+    WRITE_ONCE(src_ctrl->path_state, MLX5_SRM_PATH_COPYING);
+    WRITE_ONCE(dst_ctrl->path_state, MLX5_SRM_PATH_COPYING);
+    WRITE_ONCE(dst_ctrl->migration_end, dst->migrate_end_idx);
+    WRITE_ONCE(dst_ctrl->migration_ready, dst->migrate_ready_idx);
+    smp_store_release(&route_ctrl->active_path[active_slot], dst->path_idx);
+    smp_store_release(&route_ctrl->route_generation,
+                      READ_ONCE(route_ctrl->route_generation) + 1);
+    src->last_switch_jiffies = jiffies;
+    dst->last_switch_jiffies = jiffies;
+
+    pr_info("hollow RC reroute start logical_ip=%u old_path=%u new_path=%u db_stop=%llu migrate_end=%llu move=%llu\n",
+            src->logical_ip_idx, src->path_idx, dst->path_idx,
+            src->db_stop_idx, src->migrate_end_idx, move_nr);
+    return mlx5_srm_progress_migration(src);
+
+err_unfreeze:
+    src->migrate_end_idx = src_resv;
+    src->migrate_state = MLX5_SRM_PATH_FREEZE_REQ;
+    WRITE_ONCE(src_ctrl->path_state, MLX5_SRM_PATH_FREEZE_REQ);
+    return ret;
+}
+
+/*
+ * Periodically compare the completion efficiency of the two active paths in
+ * every logical-IP pool.  After enough bad windows, select the less efficient
+ * path as the source and an INACTIVE path (or the other active path when only
+ * two exist) as its replacement.
+ */
+static void mlx5_srm_detect_reroute(struct mlx5_ib_sched *sched,
+                                    struct mlx5_qp_ctrl_pool *pool,
+                                    u64 elapsed_ns)
+{
+    u8 path_count = READ_ONCE(srm_paths_per_ip);
+    int logical;
+    int path;
+
+    if (!srm_reroute_enable || path_count < 2 || !elapsed_ns)
+        return;
+
+    for (logical = 0; logical < num_kqps; logical++) {
+        struct mlx5_sq_ctrl_page *route_ctrl;
+        struct mlx5_ib_srmc *active[2];
+        struct mlx5_ib_srmc *poor;
+        struct mlx5_ib_srmc *good;
+        struct mlx5_ib_srmc *spare = NULL;
+        u64 posted[2];
+        u64 completed[2];
+        u64 inflight[2];
+        u64 inflight_growth[2];
+        u32 ratio[2];
+        bool efficiency_bad;
+        int poor_slot;
+
+        route_ctrl = mlx5_sq_ctrl_get_slot(pool, logical * path_count);
+        if (!route_ctrl)
+            continue;
+        active[0] = mlx5_ib_sched_find_srmc_idx(
+            sched, logical * path_count +
+                   READ_ONCE(route_ctrl->active_path[0]));
+        active[1] = mlx5_ib_sched_find_srmc_idx(
+            sched, logical * path_count +
+                   READ_ONCE(route_ctrl->active_path[1]));
+        if (!active[0] || !active[1] || active[0] == active[1])
+            continue;
+        if (active[0]->migrate_peer || active[1]->migrate_peer)
+            continue;
+
+        for (path = 0; path < 2; path++) {
+            posted[path] = active[path]->posted_bytes -
+                           active[path]->prev_posted_bytes;
+            completed[path] = active[path]->completed_bytes -
+                              active[path]->prev_completed_bytes;
+            inflight[path] = active[path]->inflight_bytes;
+            inflight_growth[path] = inflight[path] >
+                                    active[path]->prev_inflight_bytes ?
+                inflight[path] - active[path]->prev_inflight_bytes : 0;
+            ratio[path] = posted[path] ?
+                min_t(u64, 1000,
+                      div64_u64(completed[path] * 1000,
+                                posted[path])) : 1000;
+        }
+
+        poor_slot = ratio[0] <= ratio[1] ? 0 : 1;
+        poor = active[poor_slot];
+        good = active[poor_slot ^ 1];
+        efficiency_bad = posted[poor_slot] &&
+            posted[poor_slot ^ 1] &&
+            ratio[poor_slot ^ 1] - ratio[poor_slot] >=
+                srm_reroute_ratio_gap;
+        if (!efficiency_bad ||
+            time_before(jiffies, poor->last_switch_jiffies +
+                         msecs_to_jiffies(srm_reroute_cooldown_ms))) {
+            poor->bad_windows = 0;
+            continue;
+        }
+
+        if (path_count == 2) {
+            spare = good;
+        } else {
+            for (path = 0; path < path_count; path++) {
+                struct mlx5_ib_srmc *candidate =
+                    mlx5_ib_sched_find_srmc_idx(
+                        sched, logical * path_count + path);
+
+                if (candidate && candidate->migrate_state ==
+                                     MLX5_SRM_PATH_INACTIVE) {
+                    spare = candidate;
+                    break;
+                }
+            }
+        }
+        if (!spare)
+            continue;
+
+        if (++poor->bad_windows < srm_reroute_consecutive_windows)
+            continue;
+        poor->bad_windows = 0;
+        pr_info("hollow RC reroute detect logical_ip=%d poor_path=%u posted=%llu completed=%llu ratio=%u inflight=%llu growth=%llu good_path=%u posted=%llu completed=%llu ratio=%u inflight=%llu\n",
+                logical, poor->path_idx, posted[poor_slot],
+                completed[poor_slot], ratio[poor_slot],
+                inflight[poor_slot], inflight_growth[poor_slot],
+                good->path_idx, posted[poor_slot ^ 1],
+                completed[poor_slot ^ 1], ratio[poor_slot ^ 1],
+                inflight[poor_slot ^ 1]);
+        {
+            int ret = mlx5_srm_start_migration(sched, pool, poor, spare);
+
+            if (ret && ret != -EAGAIN)
+                pr_warn_ratelimited("hollow RC reroute failed logical_ip=%d old_path=%u new_path=%u err=%d\n",
+                                    logical, poor->path_idx,
+                                    spare->path_idx, ret);
+        }
+    }
+
+    for (logical = 0; logical < num_kqps; logical++) {
+        for (path = 0; path < path_count; path++) {
+            struct mlx5_ib_srmc *srmc = mlx5_ib_sched_find_srmc_idx(
+                sched, logical * path_count + path);
+
+            if (!srmc)
+                continue;
+            srmc->prev_posted_bytes = srmc->posted_bytes;
+            srmc->prev_completed_bytes = srmc->completed_bytes;
+            srmc->prev_inflight_bytes = srmc->inflight_bytes;
+        }
+    }
 }
 
 struct mlx5_ib_srm_kqp_stats {
@@ -1497,6 +2278,15 @@ static inline void mlx5_srm_flush_cqe_publish_batch(
         ucqe = ucqe64;
 
         memcpy(ucqe, cqe64, sizeof(*ucqe64) - 1);
+        if (batch[i].user_qpn) {
+            u32 sop_drop_qpn = be32_to_cpu(ucqe64->sop_drop_qpn);
+
+            sop_drop_qpn = (sop_drop_qpn & 0xff000000) |
+                           (batch[i].user_qpn & 0x00ffffff);
+            ucqe64->sop_drop_qpn = cpu_to_be32(sop_drop_qpn);
+            ucqe64->wqe_counter =
+                cpu_to_be16((u16)batch[i].user_wqe_counter);
+        }
         ucqe64->srqn = htonl(batch[i].uidx);
         smp_store_release(&ucqe64->op_own,
                           (cqe64->op_own & (~0xf)) | op_own);
@@ -2522,7 +3312,7 @@ int scheduler_polling(void *sched_data)
     memset(gid.raw, 0, sizeof(gid.raw));
     memset(gid.raw + 10, 0xff, 2); // 高80位为0，中16位全1，低32位为ip地址，此为gid格式
 
-    unsigned long tfree = 1, cnt = 0, cnt_c;
+    unsigned long tfree = 1, cnt_c;
     // int cnt3 = 0;
     kfree(sched_id);
 
@@ -2663,6 +3453,8 @@ int scheduler_polling(void *sched_data)
     uint32_t real_num_threads = 17; 
     struct mlx5_qp_ctrl_pool *sq_ctrl_pool = NULL;
     u64 observed_route_epoch = atomic64_read(&sched_group.route_epoch);
+    unsigned long last_reroute_check = jiffies;
+    u64 last_reroute_check_ns = ktime_get_ns();
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
     u64 db_batch_log_scans = 0;
     u64 db_batch_log_calls = 0;
@@ -2722,16 +3514,49 @@ int scheduler_polling(void *sched_data)
             }
         }
 
-        for (i = 0; i < mlx5_srm_effective_kqps(); i++) {
+        {
+            u8 scan_path_count = READ_ONCE(srm_paths_per_ip);
+            int active_paths = min_t(int, 2, scan_path_count);
+            int active_kqps = num_kqps * active_paths;
+            int scan_active_slot = 0;
+            int scan_route_idx = 0;
+            struct mlx5_sq_ctrl_page *scan_route_ctrl = NULL;
+            int scan;
 
+            for (scan = 0; scan < active_kqps; scan++) {
+            struct mlx5_sq_ctrl_page *ctrl_page;
+            u64 credit;
 
-            if (cnt % 1000000 == 0)
-            {
-                cnt++;
-                msleep(0);
+            if (likely(scan_path_count == 1)) {
+                i = scan;
+            } else {
+                int active_slot = scan_active_slot;
+                int route_idx = scan_route_idx;
+                u8 path_idx;
+
+                if (!active_slot)
+                    scan_route_ctrl = mlx5_sq_ctrl_get_slot(
+                        sq_ctrl_pool, route_idx);
+
+                scan_active_slot++;
+                if (scan_active_slot == active_paths) {
+                    scan_active_slot = 0;
+                    scan_route_idx += scan_path_count;
+                }
+
+                if (!scan_route_ctrl)
+                    continue;
+                path_idx = READ_ONCE(
+                    scan_route_ctrl->active_path[active_slot]);
+                if (path_idx >= scan_path_count)
+                    continue;
+                if (active_slot &&
+                    path_idx == READ_ONCE(
+                        scan_route_ctrl->active_path[0]))
+                    continue;
+                i = route_idx + path_idx;
             }
-
-            {
+            if(scan%2==0){
                 u64 poll_start = srm_stats_enable ? ktime_get_ns() : 0;
 
                 ret = poll_srmc_inline(sched, sq_ctrl_pool, pre_srmcs,
@@ -2743,16 +3568,44 @@ int scheduler_polling(void *sched_data)
                 user_tot_cqes += ret;
                 }
             }
-
-
-            struct mlx5_sq_ctrl_page *ctrl_page;
-            u64 credit;
-
             ctrl_page = mlx5_sq_ctrl_get_slot(sq_ctrl_pool, i);
             if (!ctrl_page)
                 continue;
             srmc = mlx5_ib_sched_find_srmc_idx(sched, i);
             if (!srmc || !srmc->ini_cb.qp)
+                continue;
+            if (srmc->migrate_state == MLX5_SRM_PATH_FREEZE_REQ) {
+                mlx5_srm_progress_abort_freeze(sq_ctrl_pool, srmc);
+                continue;
+            }
+            if (!srmc->migrate_source && srmc->migrate_peer &&
+                srmc->migrate_peer->migrate_source &&
+                srmc->migrate_peer->migrate_state ==
+                    MLX5_SRM_PATH_COPYING) {
+                struct mlx5_ib_srmc *migration_src =
+                    srmc->migrate_peer;
+                int migrate_ret =
+                    mlx5_srm_progress_migration(migration_src);
+
+                if (migrate_ret && migrate_ret != -EAGAIN)
+                    pr_warn_ratelimited("hollow RC migration stalled logical_ip=%u old_path=%u new_path=%u err=%d\n",
+                                        migration_src->logical_ip_idx,
+                                        migration_src->path_idx,
+                                        srmc->path_idx,
+                                        migrate_ret);
+            }
+            if (!srmc->migrate_source &&
+                srmc->migrate_state == MLX5_SRM_PATH_DRAINING) {
+                mlx5_srm_advance_migration_ready(sq_ctrl_pool, srmc);
+                mlx5_srm_finish_migration(sq_ctrl_pool, srmc);
+            }
+            if (!srmc->migrate_source &&
+                srmc->migrate_state == MLX5_SRM_PATH_ACTIVE &&
+                srmc->migrate_peer && !srmc->migrated_outstanding)
+                mlx5_srm_release_retired_source(sq_ctrl_pool, srmc);
+            if (srmc->migrate_source ||
+                srmc->migrate_state == MLX5_SRM_PATH_COPYING ||
+                srmc->migrate_state == MLX5_SRM_PATH_INACTIVE)
                 continue;
             if (srm_stats_enable)
                 srm_stats->kqp[i].scans++;
@@ -2897,8 +3750,18 @@ int scheduler_polling(void *sched_data)
                 struct mlx5_wqe_ctrl_seg *last_ctrl = NULL;
 
                 batch = min_t(u32, batch, cq_avail);
+                if (srmc->migrate_state == MLX5_SRM_PATH_DRAINING &&
+                    srmc->migrate_peer) {
+                    if (srmc->sched_post_idx >=
+                        srmc->migrate_ready_idx)
+                        continue;
+                    batch = min_t(u64, batch,
+                        srmc->migrate_ready_idx -
+                        srmc->sched_post_idx);
+                }
 #if MLX5_SRM_LARGE_DB_LIMIT_ACTIVE
-                if (srmc->srmc_idx >= num_kqps)
+                if (srmc->srmc_idx >=
+                    num_kqps * READ_ONCE(srm_paths_per_ip))
                     batch = min_t(u32, batch, LARGE_DB_LIMIT);
 #endif
                 if (!batch)
@@ -2912,6 +3775,7 @@ int scheduler_polling(void *sched_data)
                     u32 qpn_ds;
                     u16 wqe_idx;
                     u32 wqe_qpn;
+                    u32 token_bytes;
 #if MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
                     u32 wqe_bytes;
 #endif
@@ -2931,6 +3795,9 @@ int scheduler_polling(void *sched_data)
                     }
                     usr_rc_cnt =
                         mlx5_srm_publish_usr_rc(publish_token);
+#if MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
+                    token_bytes = mlx5_srm_publish_bytes(publish_token);
+#endif
                     opmod_idx_opcode = be32_to_cpu(READ_ONCE(ctrl->opmod_idx_opcode));
                     qpn_ds = be32_to_cpu(READ_ONCE(ctrl->qpn_ds));
                     wqe_idx = opmod_idx_opcode >> 8;
@@ -2965,7 +3832,7 @@ int scheduler_polling(void *sched_data)
                     }
 
 #if MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
-                    wqe_bytes = mlx5_srm_wqe_payload_bytes(ctrl);
+                    wqe_bytes = token_bytes;
                     if (sent_bytes + wqe_bytes > SCHED_SIZE_LIMIT && sent)
                         break;
 #endif
@@ -2978,12 +3845,22 @@ int scheduler_polling(void *sched_data)
 #endif
                     srmc->sched_post_idx++;
                     srmc->ini_cb.qp->sq.cur_post++;
+                    if (mlx5_srm_reroute_tracking_active(srmc)) {
+#if !MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
+                        token_bytes =
+                            mlx5_srm_publish_bytes(publish_token);
+#endif
+                        srmc->posted_bytes += token_bytes;
+                        srmc->inflight_bytes += token_bytes;
+                        srmc->inflight_wqes++;
+                    }
                     last_ctrl = ctrl;
                     sent++;
                 }
 
                 if (!sent) {
-                    u64 resv = smp_load_acquire(&ctrl_page->resv_idx);
+                    u64 resv = smp_load_acquire(&ctrl_page->resv_idx) &
+                               MLX5_SRM_RESV_INDEX_MASK;
 
                     if (publish_blocked && resv > srmc->sched_post_idx) {
                         u64 gap_slot = srmc->sched_post_idx;
@@ -3028,7 +3905,6 @@ int scheduler_polling(void *sched_data)
                         srmc->publish_gap_jiffies = 0;
                         srmc->publish_gap_slot = U64_MAX;
                     }
-                    cnt++;
                     continue;
                 }
 
@@ -3052,7 +3928,9 @@ int scheduler_polling(void *sched_data)
                 db_batch_log_wqes += sent;
                 if (sent > db_batch_log_max)
                     db_batch_log_max = sent;
-                if (srmc->srmc_idx >= num_kqps) {
+                if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP &&
+                    srmc->srmc_idx >=
+                        num_kqps * READ_ONCE(srm_paths_per_ip)) {
                     db_batch_log_large_calls++;
                     db_batch_log_large_wqes += sent;
                     if (sent > db_batch_log_large_max)
@@ -3113,6 +3991,22 @@ int scheduler_polling(void *sched_data)
             }
 
             // pre_srmc->cur_cqe++;
+            }
+        }
+        if (unlikely(++poll_round >= MLX5_SRM_RESCHED_SCAN_INTERVAL)) {
+            poll_round = 0;
+            cond_resched();
+        }
+        if (srm_reroute_enable && sq_ctrl_pool &&
+            time_after_eq(jiffies, last_reroute_check +
+                msecs_to_jiffies(max_t(uint, 1,
+                    srm_reroute_interval_ms)))) {
+            u64 now_ns = ktime_get_ns();
+
+            mlx5_srm_detect_reroute(sched, sq_ctrl_pool,
+                                    now_ns - last_reroute_check_ns);
+            last_reroute_check = jiffies;
+            last_reroute_check_ns = now_ns;
         }
         mlx5_ib_srm_report_stats(sched, srm_stats);
         {
@@ -3405,6 +4299,12 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
                 kvfree(srmc->wqe_infos);
                 srmc->wqe_infos = NULL;
             }
+            kvfree(srmc->migrate_meta);
+            srmc->migrate_meta = NULL;
+            bitmap_free(srmc->migrate_blocked_users);
+            srmc->migrate_blocked_users = NULL;
+            kvfree(srmc->migrate_user_inflight);
+            srmc->migrate_user_inflight = NULL;
             kfree(srmc);
         }
         memset(sched->srmc_by_idx, 0, sizeof(sched->srmc_by_idx));
@@ -3656,7 +4556,8 @@ void mlx5_ib_gid2ip(char addr[4], union ib_gid *gid)
     memcpy(addr, gid->raw + 12, 4);
 }
 // return 0 means xrc exists, other means xrc not exists
-int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *dgid, int flags, int qpn, u32 sq_depth)
+int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd,
+                  union ib_gid *dgid, int flags, int qpn, u32 sq_depth)
 {
 
     DEBUG_LOG("in is_xrc_exists,gid.in_id = %llx, gid.subnet = %llx\n", dgid->global.interface_id, dgid->global.subnet_prefix);
@@ -3668,8 +4569,12 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
     int hash_id;
     int has_srmc = 0;
     u32 depth = sq_depth ? sq_depth : SQ_DEPTH;
+    u8 paths_per_ip = mlx5_srm_get_paths_per_ip();
 
     if (depth > SQ_DEPTH)
+        return -EINVAL;
+    if (!paths_per_ip ||
+        paths_per_ip > MLX5_IB_SRM_MAX_PATHS_PER_IP)
         return -EINVAL;
     if (mlx5_srm_effective_kqps() > NUM_SRMC)
         return -EINVAL;
@@ -3714,21 +4619,19 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
                 wake_up_all(&sched->init_wait);
                 break;
             }
-            srmc->wqe_infos = kvcalloc(SQ_DEPTH,
-                                       sizeof(*srmc->wqe_infos),
-                                       GFP_KERNEL);
-            if (!srmc->wqe_infos) {
-                kfree(srmc);
-                ret = -ENOMEM;
-                WRITE_ONCE(sched->init_error, ret);
-                wake_up_all(&sched->init_wait);
-                break;
-            }
             memcpy(srmc->dgid.raw, dgid->raw, sizeof(srmc->dgid.raw));
             if (flags == SRMC_CREATE_FLAG_INIT_QP)
                 srmc->ini_cb.refcnt = 0;
             srmc->idx = j;
             srmc->srmc_idx = i;
+            srmc->logical_ip_idx = i / paths_per_ip;
+            srmc->path_idx = i % paths_per_ip;
+            srmc->path_count = paths_per_ip;
+            srmc->migrate_state =
+                srmc->path_idx < min_t(u8, 2, paths_per_ip) ?
+                    MLX5_SRM_PATH_ACTIVE : MLX5_SRM_PATH_INACTIVE;
+            srmc->migrate_dst_path = U8_MAX;
+            srmc->db_stop_idx = U64_MAX;
 
             sched->srmc_tb[j] = srmc;
             sched->srmc_cnt++;
@@ -3758,6 +4661,33 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
             }
 
             WRITE_ONCE(sched->srmc_by_idx[srmc->srmc_idx], srmc);
+            {
+                struct mlx5_ib_dev *dev =
+                    to_mdev(srmc->ini_cb.qp->ibqp.device);
+                struct mlx5_sq_ctrl_page *path_ctrl =
+                    mlx5_sq_ctrl_get_slot(&dev->sq_ctrl_pool,
+                                           srmc->srmc_idx);
+
+                if (!path_ctrl) {
+                    ret = -EINVAL;
+                    WRITE_ONCE(sched->init_error, ret);
+                    wake_up_all(&sched->init_wait);
+                    break;
+                }
+                WRITE_ONCE(path_ctrl->logical_ip_idx,
+                           srmc->logical_ip_idx);
+                WRITE_ONCE(path_ctrl->path_idx, srmc->path_idx);
+                WRITE_ONCE(path_ctrl->path_count, paths_per_ip);
+                WRITE_ONCE(path_ctrl->path_state,
+                           srmc->migrate_state);
+                WRITE_ONCE(path_ctrl->replacement_path, U8_MAX);
+                if (!srmc->path_idx) {
+                    WRITE_ONCE(path_ctrl->active_path[0], 0);
+                    WRITE_ONCE(path_ctrl->active_path[1],
+                               paths_per_ip > 1 ? 1 : 0);
+                    smp_store_release(&path_ctrl->route_generation, 1);
+                }
+            }
             smp_store_release(&sched->ready_srmc_cnt,
                               sched->ready_srmc_cnt + 1);
             wake_up_all(&sched->init_wait);
@@ -3769,14 +4699,12 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
 	        (smp_load_acquire(&sched->ready_srmc_cnt) < mlx5_srm_effective_kqps() ||
 	         READ_ONCE(sched->init_error))) {
 	        mutex_unlock(&sched->srmc_lock);
-	        ret = wait_event_interruptible_timeout(sched->init_wait,
+	        ret = wait_event_interruptible(sched->init_wait,
 	            READ_ONCE(sched->init_error) ||
-	            smp_load_acquire(&sched->ready_srmc_cnt) >= mlx5_srm_effective_kqps(),
-	            msecs_to_jiffies(5000));
+	            smp_load_acquire(&sched->ready_srmc_cnt) >=
+	                mlx5_srm_effective_kqps());
 	        if (ret < 0)
 	            return ret;
-	        if (!ret)
-	            return -ETIMEDOUT;
 	        ret = READ_ONCE(sched->init_error);
 	        if (ret)
 	            return ret;

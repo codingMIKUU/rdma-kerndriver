@@ -4487,6 +4487,7 @@ static int mlx5_ib_stage_init_init(struct mlx5_ib_dev *dev)
 	xa_init(&dev->odp_mkeys);
 	xa_init(&dev->sig_mrs);
 	atomic_set(&dev->mkey_var, 0);
+	BUILD_BUG_ON(PAGE_SIZE % sizeof(struct mlx5_sq_ctrl_page));
 	dev->sq_ctrl_pool.slot_cnt = MAX_USER_XRC_QP_PER_SRM;
 	dev->sq_ctrl_pool.slot_stride = sizeof(struct mlx5_sq_ctrl_page);
 	dev->sq_ctrl_pool.npages = DIV_ROUND_UP((u64)dev->sq_ctrl_pool.slot_cnt *

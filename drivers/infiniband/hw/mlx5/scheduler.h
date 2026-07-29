@@ -9,7 +9,7 @@
 
 #define SQ_DEPTH 35000
 static int debug = 0;
-#define NUM_SRMC 1024
+#define NUM_SRMC 4096
 // 对于接收端，NUM_SRMC等于num_kqps*2才行（因为只有一个调度器，发送端两个调度器全发往它了）
 #define NUM_SQB 35000
 #define NUM_LEVEL 2
@@ -22,6 +22,19 @@ static int debug = 0;
 #define SRMC_POLLING_CNT 8192
 #define WQES_ARR_SZ 31
 #define NUM_SCHED 1
+
+#define MLX5_SRM_DEFAULT_PATHS_PER_IP 4
+#define MLX5_SRM_RESV_FROZEN (1ULL << 63)
+#define MLX5_SRM_RESV_INDEX_MASK (MLX5_SRM_RESV_FROZEN - 1)
+
+enum mlx5_srm_path_state {
+    MLX5_SRM_PATH_ACTIVE = 0,
+    MLX5_SRM_PATH_FREEZE_REQ,
+    MLX5_SRM_PATH_QUIESCED,
+    MLX5_SRM_PATH_COPYING,
+    MLX5_SRM_PATH_DRAINING,
+    MLX5_SRM_PATH_INACTIVE,
+};
 
 // 2. 位运算替代取模（需确保CQ_NUM是2的幂，如16、32）
 #define CQ_NUM_POWER 0 // 示例：CQ_NUM=2^4=16
@@ -36,8 +49,7 @@ static int debug = 0;
 
 #define MAX_USER_THREADS_NUM 17
 #define MAX_SRM_APPS_NUM 4
-#define MAX_USER_XRC_QP_PER_SRM 2048
-#define MAX_USER_XRC_QP_PER_SRM 2048
+#define MAX_USER_XRC_QP_PER_SRM NUM_SRMC
 
 
 static const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
@@ -54,10 +66,12 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
     (MLX5_SRM_ENABLE_LARGE_KERNEL_QP && \
      MLX5_SRM_ENABLE_LARGE_DB_LIMIT && (MLX5_SRM_LARGE_DB_LIMIT > 0))
 
-#define MLX5_SRM_ENABLE_DB_BATCH_LOG 1
+#define MLX5_SRM_ENABLE_DB_BATCH_LOG 0
 #define MLX5_SRM_DB_BATCH_LOG_INTERVAL (1ULL << 20)
 
-static u64 LIMIT_BATCHING = 1000;
+#define MLX5_SRM_RESCHED_SCAN_INTERVAL (1U << 10)
+
+static u64 LIMIT_BATCHING = 250;
 #define DEBUG_LOG \
     if (debug)    \
     printk
@@ -80,30 +94,60 @@ struct mlx5_sq_ctrl_page {
     __u8 resv_pad[56];
     __u64 cons_idx;
     __u8 cons_pad[56];
+    __u32 route_generation;
+    __u16 logical_ip_idx;
+    __u8 path_idx;
+    __u8 path_count;
+    __u8 active_path[2];
+    __u8 path_state;
+    __u8 replacement_path;
+    __u32 route_flags;
+    __u64 migration_end;
+    __u64 migration_ready;
+    __u8 route_pad[96];
 } CACHELINE_ALIGNED_USER;
-static_assert(sizeof(struct mlx5_sq_ctrl_page) == 128);
+static_assert(sizeof(struct mlx5_sq_ctrl_page) == 256);
 
 #define MLX5_SRM_PUBLISH_USR_BITS 16
 #define MLX5_SRM_PUBLISH_USR_MASK ((1ULL << MLX5_SRM_PUBLISH_USR_BITS) - 1)
-#define MLX5_SRM_PUBLISH_SEQ_MASK ((1ULL << 48) - 1)
+#define MLX5_SRM_PUBLISH_BYTES_BITS 16
+#define MLX5_SRM_PUBLISH_BYTES_SHIFT MLX5_SRM_PUBLISH_USR_BITS
+#define MLX5_SRM_PUBLISH_BYTES_MASK ((1ULL << MLX5_SRM_PUBLISH_BYTES_BITS) - 1)
+#define MLX5_SRM_PUBLISH_SEQ_SHIFT 32
+#define MLX5_SRM_PUBLISH_SEQ_MASK 0xffffffffULL
+#define MLX5_SRM_PUBLISH_BYTE_GRANULARITY 64
 
 /* cur_put/op_own are lockless because one scheduler owns all CQ writes. */
 static_assert(NUM_SCHED == 1);
 
-static inline u64 mlx5_srm_publish_token(u64 seq, u16 usr_rc_cnt)
+static inline u64 mlx5_srm_publish_token(u64 seq, u16 usr_rc_cnt,
+                                         u32 payload_bytes)
 {
+    u64 units = min_t(u64,
+                      DIV_ROUND_UP(payload_bytes,
+                                   MLX5_SRM_PUBLISH_BYTE_GRANULARITY),
+                      MLX5_SRM_PUBLISH_BYTES_MASK);
+
     return ((seq & MLX5_SRM_PUBLISH_SEQ_MASK) <<
-            MLX5_SRM_PUBLISH_USR_BITS) | usr_rc_cnt;
+            MLX5_SRM_PUBLISH_SEQ_SHIFT) |
+           (units << MLX5_SRM_PUBLISH_BYTES_SHIFT) | usr_rc_cnt;
 }
 
 static inline u64 mlx5_srm_publish_seq(u64 token)
 {
-    return token >> MLX5_SRM_PUBLISH_USR_BITS;
+    return token >> MLX5_SRM_PUBLISH_SEQ_SHIFT;
 }
 
 static inline u16 mlx5_srm_publish_usr_rc(u64 token)
 {
     return token & MLX5_SRM_PUBLISH_USR_MASK;
+}
+
+static inline u32 mlx5_srm_publish_bytes(u64 token)
+{
+    return ((token >> MLX5_SRM_PUBLISH_BYTES_SHIFT) &
+            MLX5_SRM_PUBLISH_BYTES_MASK) *
+           MLX5_SRM_PUBLISH_BYTE_GRANULARITY;
 }
 
 #define MLX5_SRM_WRID_KQP_SHIFT 32
@@ -212,6 +256,14 @@ struct mlx5_wqe_info
     u8 valid;
     u8 flags;
 };
+
+struct mlx5_srm_migrate_meta {
+    u32 source_qpn;
+    u32 source_post_idx;
+    u32 dest_post_idx;
+    u8 valid;
+};
+
 struct mlx5_ib_srmc
 {
     struct srm_cb ini_cb;
@@ -223,6 +275,31 @@ struct mlx5_ib_srmc
     struct mlx5_wqe_info *wqe_infos;
     int idx;                  // 该srmc在表中的索引
     int srmc_idx;             // 该srmc在创建顺序中排第几个(用于分配cq)
+    u16 logical_ip_idx;
+    u8 path_idx;
+    u8 path_count;
+    u64 db_stop_idx;
+    u64 migrate_end_idx;
+    u64 migrate_ready_idx;
+    u8 migrate_state;
+    u8 migrate_dst_path;
+    u64 posted_bytes;
+    u64 completed_bytes;
+    u64 prev_posted_bytes;
+    u64 prev_completed_bytes;
+    u64 prev_inflight_bytes;
+    u64 inflight_bytes;
+    u64 inflight_wqes;
+    u64 migrate_dst_start;
+    u64 migrate_copied;
+    u64 migrated_outstanding;
+    struct mlx5_ib_srmc *migrate_peer;
+    struct mlx5_srm_migrate_meta *migrate_meta;
+    unsigned long *migrate_blocked_users;
+    u32 *migrate_user_inflight;
+    unsigned long last_switch_jiffies;
+    u8 bad_windows;
+    u8 migrate_source;
     struct page **publish_pages;
     u32 publish_npages;
     u32 publish_depth;
@@ -336,7 +413,9 @@ void mlx5_ib_sched_stop(struct mlx5_ib_sched_group *sched_group);
 void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group);
 // flags == 1: check ini, flags == 2: check tgt
 // If no exists, return -1 and create the srmc, if init qp then create kernel qp;else return 1 and add the refcnt of that qp
-int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *dgid, int flags, int qpn, u32 sq_depth);
+u8 mlx5_srm_get_paths_per_ip(void);
+int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd,
+                  union ib_gid *dgid, int flags, int qpn, u32 sq_depth);
 
 int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn);
 int mlx5_ib_destroy_srmc(struct mlx5_ib_sched *sched, int ah_id);

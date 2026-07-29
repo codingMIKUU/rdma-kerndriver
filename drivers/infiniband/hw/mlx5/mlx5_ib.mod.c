@@ -38,7 +38,6 @@ __used __section(__versions) = {
 	{ 0x6c59aa8d, "mlx5_lag_is_active" },
 	{ 0x4ef31583, "rdma_nl_put_driver_string" },
 	{ 0xeb233a45, "__kmalloc" },
-	{ 0xf9a482f9, "msleep" },
 	{ 0xfcf72b8, "mlx5_eq_destroy_generic" },
 	{ 0xd0c07a29, "mlx5_alloc_bfreg" },
 	{ 0x1ed8b599, "__x86_indirect_thunk_r8" },
@@ -378,6 +377,7 @@ __used __section(__versions) = {
 	{ 0x83be47e0, "get_device" },
 	{ 0x50cac0bf, "uverbs_finalize_uobj_create" },
 	{ 0x20ff59cc, "kernel_recvmsg" },
+	{ 0x592e3c58, "param_ops_byte" },
 	{ 0xfd1fbfdc, "backport_xa_find_after" },
 	{ 0x4302d0eb, "free_pages" },
 	{ 0x3eeb2322, "__wake_up" },
@@ -451,6 +451,7 @@ __used __section(__versions) = {
 	{ 0x2e3e308a, "uverbs_idr_class" },
 	{ 0x77bc13a0, "strim" },
 	{ 0x5410cf91, "mlx5_rsc_dump_cmd_create" },
+	{ 0x7f02188f, "__msecs_to_jiffies" },
 	{ 0xa2b15ec5, "uverbs_get_flags32" },
 	{ 0x687b41c, "mlx5_lag_query_cong_counters" },
 	{ 0xb8dbc2bb, "rdma_reject_msg" },
@@ -484,4 +485,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "18F943F4EE504936C0B3E9C");
+MODULE_INFO(srcversion, "6E90D05564D70FBE62451FC");

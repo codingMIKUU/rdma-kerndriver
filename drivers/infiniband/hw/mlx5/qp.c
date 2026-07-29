@@ -1140,86 +1140,62 @@ static u64 mlx5_qp_entry_to_mmap_offset(struct mlx5_user_mmap_entry *entry)
 	       << PAGE_SHIFT;
 }
 
-static struct mlx5_ib_srmc *
-mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
+/*
+ * Deterministically assign one hollow userspace RC QP to a logical-IP pool
+ * using its destination GID and kernel-allocated user RC id, then return all
+ * physical KQP owners in that pool.  The application does not provide path
+ * counts or physical indices.
+ */
+static int mlx5_ib_find_srm_path_group(
+	union ib_gid *dgid, u32 usr_rc_id, u8 path_count,
+	struct mlx5_ib_srmc **owners, u16 *logical_ip_idx)
 {
-	struct mlx5_ib_srmc *selected = NULL;
-	u32 seen = 0;
-	u32 target;
 	u32 hash;
+	u32 logical;
+	u32 base;
 	int si;
-	int i;
+	int path;
+
+	if (!path_count || path_count > MLX5_IB_SRM_MAX_PATHS_PER_IP)
+		return -EINVAL;
+
+	hash = jhash(dgid->raw, sizeof(dgid->raw), 0x5a17c9e3);
+	hash = jhash_2words(hash, usr_rc_id, 0x9e3779b9);
+	logical = hash % num_kqps;
+	base = logical * path_count;
 
 	for (si = 0; si < max_t(int, 1, sched_group.num_sched); si++) {
 		struct mlx5_ib_sched *sched = &sched_group.scheds[si];
 
 		mutex_lock(&sched->srmc_lock);
-		for (i = 0; i < NUM_SRMC; i++) {
-			struct mlx5_ib_srmc *srmc = sched->srmc_tb[i];
+		for (path = 0; path < path_count; path++) {
+			struct mlx5_ib_srmc *srmc;
 
-			if (!srmc)
-				continue;
-			if (IS_ERR(srmc)) {
-				pr_warn_ratelimited("hollow RC attach: dropping invalid srmc slot %d: %ld\n",
-						    i, PTR_ERR(srmc));
-				sched->srmc_tb[i] = NULL;
-				continue;
-			}
-
-			if (memcmp(srmc->dgid.raw, dgid->raw,
-				   sizeof(srmc->dgid.raw)) != 0)
-				continue;
-			if (srmc->srmc_idx >= num_kqps)
-				continue;
-			if (!srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
-				continue;
-
-			seen++;
-		}
-
-		if (!seen) {
-			mutex_unlock(&sched->srmc_lock);
-			continue;
-		}
-
-		hash = jhash(dgid->raw, sizeof(dgid->raw), 0x5a17c9e3);
-		hash = jhash_2words(hash, usr_rc_id, 0x9e3779b9);
-		target = hash % seen;
-		seen = 0;
-		for (i = 0; i < NUM_SRMC; i++) {
-			struct mlx5_ib_srmc *srmc = sched->srmc_tb[i];
-
-			if (!srmc)
-				continue;
-			if (IS_ERR(srmc)) {
-				pr_warn_ratelimited("hollow RC attach: dropping invalid srmc slot %d: %ld\n",
-						    i, PTR_ERR(srmc));
-				sched->srmc_tb[i] = NULL;
-				continue;
-			}
-			if (memcmp(srmc->dgid.raw, dgid->raw,
-				   sizeof(srmc->dgid.raw)) != 0)
-				continue;
-			if (srmc->srmc_idx >= num_kqps)
-				continue;
-			if (!srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
-				continue;
-			if (seen++ == target) {
-				selected = srmc;
+			srmc = READ_ONCE(sched->srmc_by_idx[base + path]);
+			if (!srmc || IS_ERR(srmc) || !srmc->ini_cb.qp ||
+			    !srmc->ini_cb.qp->buf.frags ||
+			    srmc->logical_ip_idx != logical ||
+			    srmc->path_idx != path ||
+			    memcmp(srmc->dgid.raw, dgid->raw,
+				   sizeof(srmc->dgid.raw)))
 				break;
-			}
+			owners[path] = srmc;
 		}
 
-		if (selected) {
-			selected->ini_cb.refcnt++;
+		if (path == path_count) {
+			for (path = 0; path < path_count; path++)
+				owners[path]->ini_cb.refcnt++;
+			*logical_ip_idx = logical;
 			mutex_unlock(&sched->srmc_lock);
-			return selected;
+			return 0;
 		}
 
 		mutex_unlock(&sched->srmc_lock);
 	}
 
-	return NULL;
+	memset(owners, 0,
+	       sizeof(*owners) * MLX5_IB_SRM_MAX_PATHS_PER_IP);
+	return -ENOENT;
 }
 
 static int mlx5_ib_prepare_qp_sq_mmap(struct mlx5_ib_dev *dev,
@@ -1616,6 +1592,7 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 	const struct ib_global_route *grh;
 	struct mlx5_ib_srmc *srmc;
 	struct mlx5_ib_srmc *large_srmc = NULL;
+	int path;
 	union ib_gid dgid = {};
 	int si;
 	int err;
@@ -1638,18 +1615,23 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 
 	if (!qp->srmc_owner) {
 		for (si = 0; si < max_t(int, 1, sched_group.num_sched); si++) {
-			err = is_xrc_exists(&sched_group.scheds[si], pd, &dgid,
-					    SRMC_CREATE_FLAG_INIT_QP, 0,
-					    qp->sq.max_post);
+				err = is_xrc_exists(&sched_group.scheds[si], pd, &dgid,
+						    SRMC_CREATE_FLAG_INIT_QP, 0,
+						    qp->sq.max_post);
 			if (err < 0)
 				return err;
 		}
 
-		srmc = mlx5_ib_find_pseudo_random_srmc_by_gid(
-			&dgid, qp->usr_rc_id_valid ?
-			       qp->usr_rc_id : qp->ibqp.qp_num);
-		if (!srmc || !srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
-			return -EINVAL;
+		err = mlx5_ib_find_srm_path_group(
+			&dgid,
+			qp->usr_rc_id_valid ? qp->usr_rc_id : qp->ibqp.qp_num,
+			qp->srm_paths_per_ip, qp->srm_path_owners,
+			&qp->srm_logical_ip_idx);
+		if (err)
+			return err;
+
+		qp->srm_path_count = qp->srm_paths_per_ip;
+		srmc = qp->srm_path_owners[0];
 
 		if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
 			if (srmc->srmc_idx + num_kqps >= NUM_SRMC)
@@ -1672,8 +1654,9 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 				large_srmc->ini_cb.qp->ibqp.qp_num,
 				srmc->ini_cb.refcnt);
 		else
-			pr_info("hollow RC attach: usr_rc=%u srmc=%d qpn=%u users=%d\n",
-				qp->ibqp.qp_num, srmc->srmc_idx,
+			pr_info("hollow RC attach: usr_rc=%u logical_ip=%u paths=%u base_srmc=%d base_qpn=%u users=%d\n",
+				qp->ibqp.qp_num, qp->srm_logical_ip_idx,
+				qp->srm_path_count, srmc->srmc_idx,
 				srmc->ini_cb.qp->ibqp.qp_num,
 				srmc->ini_cb.refcnt);
 		}
@@ -1691,6 +1674,51 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 		return err;
 
 	mlx5_ib_fill_kernel_qp_info(qp, resp);
+
+	resp->srm_logical_ip_idx = qp->srm_logical_ip_idx;
+	resp->srm_path_count = qp->srm_path_count;
+	resp->srm_route_slot_idx = qp->srm_path_owners[0]->srmc_idx;
+	for (path = 0; path < qp->srm_path_count; path++) {
+		struct mlx5_ib_srm_path_resp *path_resp = &resp->srm_paths[path];
+		struct mlx5_ib_srmc *path_srmc = qp->srm_path_owners[path];
+		struct mlx5_ib_qp *kqp = path_srmc->ini_cb.qp;
+
+		path_resp->sq_state_slot_idx = path_srmc->srmc_idx;
+		path_resp->kernel_qpn = kqp->ibqp.qp_num;
+		path_resp->kernel_sq_wqe_cnt = kqp->sq.wqe_cnt;
+		path_resp->kernel_sq_wqe_shift = kqp->sq.wqe_shift;
+		path_resp->kernel_sq_max_post = kqp->sq.max_post;
+		path_resp->kernel_sq_max_gs = kqp->sq.max_gs;
+		path_resp->kernel_sq_qp_state_max_gs = kqp->sq.max_gs;
+		path_resp->kernel_max_inline_data = kqp->max_inline_data;
+
+		if (!path) {
+			path_resp->sq_mmap_offset = resp->sq_mmap_offset;
+			path_resp->sq_mmap_len = resp->sq_mmap_len;
+			path_resp->publish_mmap_offset = resp->publish_mmap_offset;
+			path_resp->publish_mmap_len = resp->publish_mmap_len;
+			path_resp->publish_depth = resp->publish_depth;
+			continue;
+		}
+
+		err = mlx5_ib_prepare_srmc_sq_mmap(
+			context, qp, path_srmc,
+			&qp->srm_path_sq_entries[path],
+			&path_resp->sq_mmap_offset,
+			&path_resp->sq_mmap_len);
+		if (err)
+			return err;
+
+		err = mlx5_ib_create_srmc_publish_mmap(
+			context, qp, path_srmc,
+			&qp->srm_path_publish_entries[path],
+			&path_resp->publish_mmap_offset,
+			&path_resp->publish_mmap_len,
+			&path_resp->publish_depth);
+		if (err)
+			return err;
+	}
+	resp->comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_SRM_PATH_POOL;
 
 	if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
 		if (!qp->large_srmc_owner)
@@ -1902,6 +1930,7 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 		udata, struct mlx5_ib_ucontext, ibucontext);
 	struct mlx5_ib_srmc *srmc_owner;
 	struct mlx5_ib_srmc *large_srmc_owner;
+	int path;
 
 	if (udata) {
 		/* User QP */
@@ -1932,6 +1961,18 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 				&qp->large_sq_publish_entry->mentry.rdma_entry);
 			qp->large_sq_publish_entry = NULL;
 		}
+		for (path = 1; path < qp->srm_path_count; path++) {
+			if (qp->srm_path_sq_entries[path]) {
+				rdma_user_mmap_entry_remove(
+					&qp->srm_path_sq_entries[path]->mentry.rdma_entry);
+				qp->srm_path_sq_entries[path] = NULL;
+			}
+			if (qp->srm_path_publish_entries[path]) {
+				rdma_user_mmap_entry_remove(
+					&qp->srm_path_publish_entries[path]->mentry.rdma_entry);
+				qp->srm_path_publish_entries[path] = NULL;
+			}
+		}
 
 		srmc_owner = qp->srmc_owner;
 		large_srmc_owner = qp->large_srmc_owner;
@@ -1940,8 +1981,16 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 		if (large_srmc_owner && large_srmc_owner != srmc_owner &&
 		    large_srmc_owner->ini_cb.refcnt > 0)
 			large_srmc_owner->ini_cb.refcnt--;
-			qp->srmc_owner = NULL;
-			qp->large_srmc_owner = NULL;
+		for (path = 1; path < qp->srm_path_count; path++) {
+			if (qp->srm_path_owners[path] &&
+			    qp->srm_path_owners[path]->ini_cb.refcnt > 0)
+				qp->srm_path_owners[path]->ini_cb.refcnt--;
+			qp->srm_path_owners[path] = NULL;
+		}
+		qp->srm_path_owners[0] = NULL;
+		qp->srm_path_count = 0;
+		qp->srmc_owner = NULL;
+		qp->large_srmc_owner = NULL;
 		if (qp->usr_rc_id_valid) {
 			mlx5_ib_unbind_usr_rc_cq(&sched_group, qp->usr_rc_id);
 			ida_free(&mlx5_usr_rc_ida, qp->usr_rc_id);
@@ -3189,6 +3238,10 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 		err = set_user_buf_size(dev, qp, ucmd, base, init_attr);
 		if (err)
 			return err;
+		qp->srm_paths_per_ip = mlx5_srm_get_paths_per_ip();
+		if (!qp->srm_paths_per_ip ||
+		    qp->srm_paths_per_ip > MLX5_IB_SRM_MAX_PATHS_PER_IP)
+			return -EINVAL;
 
 		params->resp.bfreg_index = MLX5_IB_INVALID_BFREG;
 		err = ida_alloc_range(&mlx5_usr_rc_ida, 0, NUM_SQB - 1,
