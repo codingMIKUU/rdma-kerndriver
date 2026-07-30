@@ -1378,11 +1378,12 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 256;
+const int num_kqps = 32;
 
 static inline int mlx5_srm_effective_kqps(void)
 {
-    return num_kqps * MLX5_SRM_KERNEL_QP_LEVELS;
+    return num_kqps * MLX5_SRM_PATHS_PER_IP *
+           MLX5_SRM_KERNEL_QP_LEVELS;
 }
 
 struct mlx5_ib_srm_kqp_stats {
@@ -2898,7 +2899,8 @@ int scheduler_polling(void *sched_data)
 
                 batch = min_t(u32, batch, cq_avail);
 #if MLX5_SRM_LARGE_DB_LIMIT_ACTIVE
-                if (srmc->srmc_idx >= num_kqps)
+                if (srmc->srmc_idx >=
+                    num_kqps * MLX5_SRM_PATHS_PER_IP)
                     batch = min_t(u32, batch, LARGE_DB_LIMIT);
 #endif
                 if (!batch)
@@ -3052,7 +3054,9 @@ int scheduler_polling(void *sched_data)
                 db_batch_log_wqes += sent;
                 if (sent > db_batch_log_max)
                     db_batch_log_max = sent;
-                if (srmc->srmc_idx >= num_kqps) {
+                if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP &&
+                    srmc->srmc_idx >=
+                        num_kqps * MLX5_SRM_PATHS_PER_IP) {
                     db_batch_log_large_calls++;
                     db_batch_log_large_wqes += sent;
                     if (sent > db_batch_log_large_max)
@@ -3729,6 +3733,9 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
                 srmc->ini_cb.refcnt = 0;
             srmc->idx = j;
             srmc->srmc_idx = i;
+            srmc->logical_ip_idx = i / MLX5_SRM_PATHS_PER_IP;
+            srmc->path_idx = i % MLX5_SRM_PATHS_PER_IP;
+            srmc->path_count = MLX5_SRM_PATHS_PER_IP;
 
             sched->srmc_tb[j] = srmc;
             sched->srmc_cnt++;

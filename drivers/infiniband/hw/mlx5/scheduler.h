@@ -22,6 +22,7 @@ static int debug = 0;
 #define SRMC_POLLING_CNT 8192
 #define WQES_ARR_SZ 31
 #define NUM_SCHED 1
+#define MLX5_SRM_PATHS_PER_IP 2
 
 // 2. 位运算替代取模（需确保CQ_NUM是2的幂，如16、32）
 #define CQ_NUM_POWER 0 // 示例：CQ_NUM=2^4=16
@@ -223,6 +224,9 @@ struct mlx5_ib_srmc
     struct mlx5_wqe_info *wqe_infos;
     int idx;                  // 该srmc在表中的索引
     int srmc_idx;             // 该srmc在创建顺序中排第几个(用于分配cq)
+    u16 logical_ip_idx;
+    u8 path_idx;
+    u8 path_count;
     struct page **publish_pages;
     u32 publish_npages;
     u32 publish_depth;
