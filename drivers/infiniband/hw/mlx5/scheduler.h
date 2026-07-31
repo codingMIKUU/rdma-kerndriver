@@ -24,6 +24,14 @@ static int debug = 0;
 #define NUM_SCHED 1
 #define MLX5_SRM_PATHS_PER_IP 2
 
+/*
+ * Keep creating both physical paths in either mode.  When disabled, the
+ * scheduler hot loop visits only path 0 of every logical IP.
+ */
+#ifndef MLX5_SRM_ENABLE_STATIC_DUAL_PATH_SCAN
+#define MLX5_SRM_ENABLE_STATIC_DUAL_PATH_SCAN 1
+#endif
+
 // 2. 位运算替代取模（需确保CQ_NUM是2的幂，如16、32）
 #define CQ_NUM_POWER 0 // 示例：CQ_NUM=2^4=16
 #define CQ_NUM (1 << CQ_NUM_POWER)

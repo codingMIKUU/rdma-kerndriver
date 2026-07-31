@@ -1386,6 +1386,27 @@ static inline int mlx5_srm_effective_kqps(void)
            MLX5_SRM_KERNEL_QP_LEVELS;
 }
 
+static inline int mlx5_srm_sched_scan_kqps(void)
+{
+    return num_kqps *
+           (MLX5_SRM_ENABLE_STATIC_DUAL_PATH_SCAN ?
+                MLX5_SRM_PATHS_PER_IP : 1) *
+           MLX5_SRM_KERNEL_QP_LEVELS;
+}
+
+static inline int mlx5_srm_sched_scan_idx(int scan)
+{
+#if MLX5_SRM_ENABLE_STATIC_DUAL_PATH_SCAN
+    return scan;
+#else
+    int level = scan / num_kqps;
+    int logical_ip = scan % num_kqps;
+
+    return level * num_kqps * MLX5_SRM_PATHS_PER_IP +
+           logical_ip * MLX5_SRM_PATHS_PER_IP;
+#endif
+}
+
 struct mlx5_ib_srm_kqp_stats {
     u64 scans;
     u64 active_scans;
@@ -2485,6 +2506,7 @@ int scheduler_polling(void *sched_data)
     int op_own;
     int uidx, idx;
     int i, j, k;
+    int scan;
 
     void *seg, *useg;
     struct mlx5_wqe_ctrl_seg *ctrl, *uctrl;
@@ -2723,7 +2745,8 @@ int scheduler_polling(void *sched_data)
             }
         }
 
-        for (i = 0; i < mlx5_srm_effective_kqps(); i++) {
+        for (scan = 0; scan < mlx5_srm_sched_scan_kqps(); scan++) {
+            i = mlx5_srm_sched_scan_idx(scan);
 
 
             if (cnt % 1000000 == 0)
