@@ -103,8 +103,8 @@ static void *next_cqe_sw(struct mlx5_ib_cq *cq)
     return get_sw_cqe(cq, cq->mcq.cons_index);
 }
 
-static inline void mlx5_ib_srmc_advance_sq_tail(struct mlx5_ib_wq *wq,
-						u16 wqe_ctr)
+static inline u32 mlx5_ib_srmc_advance_sq_tail(struct mlx5_ib_wq *wq,
+					       u16 wqe_ctr)
 {
 	unsigned completed = (wq->tail & ~0xffffU) | wqe_ctr;
 
@@ -112,6 +112,7 @@ static inline void mlx5_ib_srmc_advance_sq_tail(struct mlx5_ib_wq *wq,
 		completed += 1U << 16;
 
 	wq->tail = completed + 1;
+	return completed;
 }
 
 static enum ib_wc_opcode get_umr_comp(struct mlx5_ib_wq *wq, int idx)
@@ -626,6 +627,7 @@ static int mlx5_poll_one_with_cqe(struct mlx5_ib_cq *cq,
 	uint8_t opcode;
 	uint32_t qpn;
 	u16 wqe_ctr;
+	u32 completed;
 	int idx;
 	DEBUG_LOG("2\n");
 repoll:
@@ -675,8 +677,14 @@ repoll:
 		idx = wqe_ctr & (wq->wqe_cnt - 1);
 		handle_good_req(wc, cqe64, wq, idx);
 		if ((*cur_qp)->is_srmc_kernel_qp) {
-			wc->wr_id = wq->wrid[idx];
-			mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
+			completed = mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
+#if MLX5_SRM_ENABLE_FARM
+			if ((*cur_qp)->srmc_owner)
+				wc->wr_id = mlx5_srm_make_wrid(
+					(*cur_qp)->srmc_owner->srmc_idx, completed);
+			else
+#endif
+				wc->wr_id = wq->wrid[idx];
 			wc->status = IB_WC_SUCCESS;
 		} else {
 			handle_atomics(*cur_qp, cqe64, wq->last_poll, idx);
@@ -715,11 +723,20 @@ repoll:
 			wq = &(*cur_qp)->sq;
 			wqe_ctr = be16_to_cpu(cqe64->wqe_counter);
 			idx = wqe_ctr & (wq->wqe_cnt - 1);
-			wc->wr_id = wq->wrid[idx];
-			if ((*cur_qp)->is_srmc_kernel_qp)
-				mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
-			else
+			if ((*cur_qp)->is_srmc_kernel_qp) {
+				completed = mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
+#if MLX5_SRM_ENABLE_FARM
+				if ((*cur_qp)->srmc_owner)
+					wc->wr_id = mlx5_srm_make_wrid(
+						(*cur_qp)->srmc_owner->srmc_idx,
+						completed);
+				else
+#endif
+					wc->wr_id = wq->wrid[idx];
+			} else {
+				wc->wr_id = wq->wrid[idx];
 				wq->tail = wq->wqe_head[idx] + 1;
+			}
 		} else {
 			struct mlx5_ib_srq *srq;
 

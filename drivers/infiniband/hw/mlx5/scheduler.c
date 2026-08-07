@@ -1077,22 +1077,30 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
     struct mlx5_srm_cqe_publish_entry publish_batch[SRM_CQE_PUBLISH_BATCH];
     struct mlx5_ib_cqbuf *publish_cqb = NULL;
     int publish_batch_cnt = 0;
+#if MLX5_SRM_ENABLE_FARM
+    int poll_budget = MLX5_SRM_FARM_CQ_POLL_BATCH;
+#else
+    int poll_budget = srmc->sig_cnt;
+#endif
 
-    if (srmc->sig_cnt)
+    if (poll_budget)
     {
         DEBUG_LOG("distributing cqe\n");
 
         // memset(&wc, 1, sizeof wc);
         cqe_num = 0;
         phase_start = srm_stats_enable ? ktime_get_ns() : 0;
-        if ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe)))
+        if ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq,
+						 poll_budget, wc, cqe)))
         {
             mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_KERNEL_POLL,
                                         phase_start);
             post_poll_start = srm_stats_enable ? ktime_get_ns() : 0;
             srmc->last_cqe_jiffies = jiffies;
             // 减去sig_cnt
+#if !MLX5_SRM_ENABLE_FARM
             srmc->sig_cnt -= cqe_num;
+#endif
             // pr_info("sig_cnt cqe_num:%d,sig_cnt:%d\n", cqe_num, srmc->sig_cnt);
             //  cnt2++;
             for (i = 0; i < cqe_num; i++)
@@ -2467,8 +2475,109 @@ static __always_inline bool srm_poll_latency_once(
     return false;
 }
 
+#if MLX5_SRM_ENABLE_FARM
+static int scheduler_farm_polling(void *sched_data)
+{
+    struct mlx5_ib_sched_id *sched_id = sched_data;
+    struct mlx5_ib_sched *sched = sched_id->sched;
+    struct mlx5_ib_srmc *cq_srmc_tb[CQ_NUM] = { 0 };
+    struct mlx5_qp_ctrl_pool *sq_ctrl_pool = NULL;
+    struct ib_wc *wc;
+    void **cqe;
+    u64 observed_route_epoch;
+    u32 rounds = 0;
+    int ret;
+    int i;
+
+    kfree(sched_id);
+    wc = kvcalloc(MLX5_SRM_FARM_CQ_POLL_BATCH, sizeof(*wc), GFP_KERNEL);
+    cqe = kvcalloc(MLX5_SRM_FARM_CQ_POLL_BATCH, sizeof(*cqe), GFP_KERNEL);
+    if (!wc || !cqe) {
+        WRITE_ONCE(sched->init_error, -ENOMEM);
+        wake_up_all(&sched->init_wait);
+        wait_event_interruptible(sched->init_wait, kthread_should_stop());
+        goto out;
+    }
+
+    while (!kthread_should_stop()) {
+        ret = wait_event_interruptible(
+            sched->init_wait,
+            kthread_should_stop() || READ_ONCE(sched->init_error) ||
+            smp_load_acquire(&sched->ready_srmc_cnt) >=
+                mlx5_srm_effective_kqps());
+        if (ret)
+            continue;
+        if (kthread_should_stop())
+            goto out;
+        if (READ_ONCE(sched->init_error)) {
+            wait_event_interruptible(sched->init_wait,
+                                     kthread_should_stop());
+            goto out;
+        }
+        break;
+    }
+
+    for (i = 0; i < mlx5_srm_effective_kqps(); i++) {
+        struct mlx5_ib_srmc *srmc =
+            mlx5_ib_sched_find_srmc_idx(sched, i);
+        int cq_idx;
+
+        if (!srmc || !srmc->ini_cb.qp || !srmc->ini_cb.cq)
+            continue;
+        if (!sq_ctrl_pool) {
+            struct mlx5_ib_dev *dev =
+                to_mdev(srmc->ini_cb.qp->ibqp.device);
+
+            sq_ctrl_pool = dev ? &dev->sq_ctrl_pool : NULL;
+        }
+        cq_idx = CQ_MOD(srmc->srmc_idx);
+        if (!cq_srmc_tb[cq_idx])
+            cq_srmc_tb[cq_idx] = srmc;
+    }
+    if (!sq_ctrl_pool) {
+        WRITE_ONCE(sched->init_error, -ENODEV);
+        wake_up_all(&sched->init_wait);
+        wait_event_interruptible(sched->init_wait, kthread_should_stop());
+        goto out;
+    }
+
+    observed_route_epoch = atomic64_read(&sched_group.route_epoch);
+    smp_store_release(&sched->quiescent_epoch, observed_route_epoch);
+    pr_info("scheduler %d: FARM mode, kernel CQ distribution only\n",
+            sched->id);
+
+    while (!kthread_should_stop()) {
+        for (i = 0; i < CQ_NUM; i++) {
+            u64 route_epoch;
+
+            if (cq_srmc_tb[i])
+                srm_poll_srmc_once(sched, sq_ctrl_pool,
+                                   cq_srmc_tb[i], wc, cqe, NULL);
+
+            route_epoch = atomic64_read(&sched_group.route_epoch);
+            if (unlikely(route_epoch != observed_route_epoch)) {
+                observed_route_epoch = route_epoch;
+                smp_store_release(&sched->quiescent_epoch, route_epoch);
+            }
+        }
+        if (unlikely(++rounds == (1U << 16))) {
+            rounds = 0;
+            cond_resched();
+        }
+    }
+
+out:
+    kvfree(cqe);
+    kvfree(wc);
+    return 0;
+}
+#endif
+
 int scheduler_polling(void *sched_data)
 {
+#if MLX5_SRM_ENABLE_FARM
+    return scheduler_farm_polling(sched_data);
+#else
     extern struct mlx5_ib_sched_group sched_group;
     int ret;
     struct mlx5_ib_sched_id *sched_id = (struct mlx5_ib_sched_id *)sched_data;
@@ -3159,6 +3268,7 @@ err:
     // filp_close(filp, NULL);
     // kfree(buf);
     return -1;
+#endif
 }
 
 int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
@@ -4411,8 +4521,17 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
     init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     ret = rdma_create_qp(cb->cm_id, cb->pd, &init_attr);
     if (!ret) {
+		struct mlx5_sq_ctrl_page *ctrl_page;
+
         cb->qp = to_mqp(cb->cm_id->qp);
         cb->qp->is_srmc_kernel_qp = 1;
+		cb->qp->srmc_owner = srmc;
+		ctrl_page = mlx5_sq_ctrl_get_slot(&dev->sq_ctrl_pool,
+					       srmc->srmc_idx);
+		if (ctrl_page) {
+			WRITE_ONCE(ctrl_page->farm_lock, 0);
+			WRITE_ONCE(ctrl_page->farm_bf_offset, cb->qp->bf.offset);
+		}
     } else {
         pr_err("rdma_create_qp failed,error:%d\n", ret);
         goto err1;

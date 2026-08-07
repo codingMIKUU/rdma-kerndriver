@@ -14,6 +14,8 @@ static int debug = 0;
 #define NUM_SQB 35000
 #define NUM_LEVEL 2
 #define MLX5_SRM_ENABLE_LARGE_KERNEL_QP 0
+#define MLX5_SRM_ENABLE_FARM 1
+#define MLX5_SRM_FARM_CQ_POLL_BATCH 64
 #define MLX5_SRM_KERNEL_QP_LEVELS \
     (MLX5_SRM_ENABLE_LARGE_KERNEL_QP ? NUM_LEVEL : 1)
 
@@ -77,7 +79,9 @@ struct srm_qp_entry{
 
 struct mlx5_sq_ctrl_page {
     __u64 resv_idx;
-    __u8 resv_pad[56];
+    __u32 farm_lock;
+    __u32 farm_bf_offset;
+    __u8 resv_pad[48];
     __u64 cons_idx;
     __u8 cons_pad[56];
 } CACHELINE_ALIGNED_USER;

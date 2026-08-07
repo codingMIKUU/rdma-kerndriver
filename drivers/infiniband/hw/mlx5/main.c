@@ -2382,6 +2382,16 @@ static void mlx5_ib_mmap_free(struct rdma_user_mmap_entry *entry)
 		kfree(publish);
 		break;
 	}
+	case MLX5_IB_MMAP_TYPE_QP_FARM_UAR:
+		kfree(mentry);
+		break;
+	case MLX5_IB_MMAP_TYPE_QP_FARM_DB: {
+		struct mlx5_qp_farm_db_mmap_entry *farm_db =
+			container_of(mentry, struct mlx5_qp_farm_db_mmap_entry,
+				     mentry);
+		kfree(farm_db);
+		break;
+	}
 	default:
 		WARN_ON(true);
 	}
@@ -2574,9 +2584,21 @@ static int mlx5_ib_mmap_offset(struct mlx5_ib_dev *dev,
 		rdma_user_mmap_entry_put(&mentry->rdma_entry);
 		return ret;
 	}
+	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_QP_FARM_DB) {
+		struct mlx5_qp_farm_db_mmap_entry *farm_db =
+			container_of(mentry, struct mlx5_qp_farm_db_mmap_entry,
+				     mentry);
+
+		ret = dma_mmap_coherent(&dev->mdev->pdev->dev, vma,
+					farm_db->cpu_addr, farm_db->dma_addr,
+					PAGE_SIZE);
+		rdma_user_mmap_entry_put(&mentry->rdma_entry);
+		return ret;
+	}
 	pfn = (mentry->address >> PAGE_SHIFT);
 	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_VAR ||
-		mentry->mmap_flag == MLX5_IB_MMAP_TYPE_UAR_NC)
+		mentry->mmap_flag == MLX5_IB_MMAP_TYPE_UAR_NC ||
+		mentry->mmap_flag == MLX5_IB_MMAP_TYPE_QP_FARM_UAR)
 		prot = pgprot_noncached(vma->vm_page_prot);
 	else
 		prot = pgprot_writecombine(vma->vm_page_prot);

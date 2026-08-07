@@ -1586,6 +1586,79 @@ static void mlx5_ib_fill_kernel_qp_info(struct mlx5_ib_qp *qp,
 	resp->comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_KERNEL_QP_INFO;
 }
 
+static int mlx5_ib_prepare_farm_db_mmaps(
+	struct mlx5_ib_dev *dev, struct mlx5_ib_ucontext *context,
+	struct mlx5_ib_qp *qp, struct mlx5_ib_modify_qp_resp *resp)
+{
+	struct mlx5_qp_farm_db_mmap_entry *db_entry;
+	struct mlx5_user_mmap_entry *uar_entry;
+	struct mlx5_ib_qp *kqp;
+	unsigned int fw_uars_per_page;
+	size_t db_offset;
+	int err;
+
+	if (!qp->srmc_owner || !qp->srmc_owner->ini_cb.qp)
+		return -EINVAL;
+	kqp = qp->srmc_owner->ini_cb.qp;
+	if (!kqp->bf.bfreg || !kqp->bf.bfreg->up || !kqp->db.db)
+		return -EINVAL;
+
+	if (!qp->farm_uar_mmap_entry) {
+		uar_entry = kzalloc(sizeof(*uar_entry), GFP_KERNEL);
+		if (!uar_entry)
+			return -ENOMEM;
+
+		fw_uars_per_page = MLX5_CAP_GEN(dev->mdev, uar_4k) ?
+			MLX5_UARS_IN_PAGE : 1;
+		uar_entry->mmap_flag = MLX5_IB_MMAP_TYPE_QP_FARM_UAR;
+		uar_entry->address = dev->mdev->bar_addr +
+			(kqp->bf.bfreg->up->index / fw_uars_per_page) * PAGE_SIZE;
+		err = rdma_user_mmap_entry_insert_range(
+			&context->ibucontext, &uar_entry->rdma_entry, PAGE_SIZE,
+			(MLX5_IB_MMAP_OFFSET_START << 16),
+			((MLX5_IB_MMAP_OFFSET_END << 16) + (1UL << 16) - 1));
+		if (err) {
+			kfree(uar_entry);
+			return err;
+		}
+		qp->farm_uar_mmap_entry = uar_entry;
+	}
+
+	if (!qp->farm_db_mmap_entry) {
+		db_entry = kzalloc(sizeof(*db_entry), GFP_KERNEL);
+		if (!db_entry)
+			return -ENOMEM;
+
+		db_offset = kqp->db.index * cache_line_size();
+		db_entry->mentry.mmap_flag = MLX5_IB_MMAP_TYPE_QP_FARM_DB;
+		db_entry->cpu_addr = (char *)kqp->db.db - db_offset;
+		db_entry->dma_addr = kqp->db.dma - db_offset;
+		err = rdma_user_mmap_entry_insert_range(
+			&context->ibucontext, &db_entry->mentry.rdma_entry, PAGE_SIZE,
+			(MLX5_IB_MMAP_OFFSET_START << 16),
+			((MLX5_IB_MMAP_OFFSET_END << 16) + (1UL << 16) - 1));
+		if (err) {
+			kfree(db_entry);
+			return err;
+		}
+		qp->farm_db_mmap_entry = db_entry;
+	}
+
+	resp->farm_uar_mmap_offset = mlx5_qp_entry_to_mmap_offset(
+		qp->farm_uar_mmap_entry);
+	resp->farm_uar_mmap_len = PAGE_SIZE;
+	resp->farm_uar_reg_offset =
+		(char __iomem *)kqp->bf.bfreg->map -
+		(char __iomem *)kqp->bf.bfreg->up->map;
+	resp->farm_db_mmap_offset = mlx5_qp_entry_to_mmap_offset(
+		&qp->farm_db_mmap_entry->mentry);
+	resp->farm_db_mmap_len = PAGE_SIZE;
+	resp->farm_db_offset = kqp->db.index * cache_line_size();
+	resp->farm_bf_buf_size = kqp->bf.buf_size;
+	resp->comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_FARM_DB;
+	return 0;
+}
+
 static void mlx5_ib_fill_large_kernel_qp_info(struct mlx5_ib_srmc *srmc,
 					      struct mlx5_ib_modify_qp_resp *resp)
 {
@@ -1691,6 +1764,12 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 		return err;
 
 	mlx5_ib_fill_kernel_qp_info(qp, resp);
+
+#if MLX5_SRM_ENABLE_FARM
+	err = mlx5_ib_prepare_farm_db_mmaps(dev, context, qp, resp);
+	if (err)
+		return err;
+#endif
 
 	if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
 		if (!qp->large_srmc_owner)
@@ -1921,6 +2000,16 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 			rdma_user_mmap_entry_remove(
 				&qp->sq_publish_entry->mentry.rdma_entry);
 			qp->sq_publish_entry = NULL;
+		}
+		if (qp->farm_uar_mmap_entry) {
+			rdma_user_mmap_entry_remove(
+				&qp->farm_uar_mmap_entry->rdma_entry);
+			qp->farm_uar_mmap_entry = NULL;
+		}
+		if (qp->farm_db_mmap_entry) {
+			rdma_user_mmap_entry_remove(
+				&qp->farm_db_mmap_entry->mentry.rdma_entry);
+			qp->farm_db_mmap_entry = NULL;
 		}
 		if (qp->large_sq_mmap_entry) {
 			rdma_user_mmap_entry_remove(

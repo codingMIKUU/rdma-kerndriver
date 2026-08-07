@@ -195,6 +195,7 @@ enum {
 
 struct mlx5_qp_ctrl_mmap_entry;
 struct mlx5_qp_publish_mmap_entry;
+struct mlx5_qp_farm_db_mmap_entry;
 
 enum mlx5_ib_mmap_type {
 	MLX5_IB_MMAP_TYPE_MEMIC = 1,
@@ -205,6 +206,8 @@ enum mlx5_ib_mmap_type {
 	MLX5_IB_MMAP_TYPE_QP_SQ = 6,
 	MLX5_IB_MMAP_TYPE_QP_CTRL = 7,
 	MLX5_IB_MMAP_TYPE_QP_PUBLISH = 8,
+	MLX5_IB_MMAP_TYPE_QP_FARM_UAR = 9,
+	MLX5_IB_MMAP_TYPE_QP_FARM_DB = 10,
 };
 
 struct mlx5_bfreg_info {
@@ -566,6 +569,8 @@ struct mlx5_ib_qp {
 	struct mlx5_qp_sq_mmap_entry *sq_mmap_entry;
 	struct mlx5_qp_ctrl_mmap_entry *sq_ctrl_entry;
 	struct mlx5_qp_publish_mmap_entry *sq_publish_entry;
+	struct mlx5_user_mmap_entry *farm_uar_mmap_entry;
+	struct mlx5_qp_farm_db_mmap_entry *farm_db_mmap_entry;
 	struct mlx5_qp_sq_mmap_entry *large_sq_mmap_entry;
 	struct mlx5_qp_publish_mmap_entry *large_sq_publish_entry;
 	u32			sq_ctrl_slot_idx;
@@ -700,6 +705,12 @@ struct mlx5_qp_publish_mmap_entry {
 	struct mlx5_user_mmap_entry mentry;
 	struct page **pages;
 	u32 npages;
+};
+
+struct mlx5_qp_farm_db_mmap_entry {
+	struct mlx5_user_mmap_entry mentry;
+	void *cpu_addr;
+	dma_addr_t dma_addr;
 };
 
 enum mlx5_mkey_type {
