@@ -3,6 +3,7 @@
 #define _MLX5_IB_SCHEDULER_H
 
 #include <linux/mutex.h>
+#include <linux/mlx5/driver.h>
 #include <linux/types.h>
 #include <linux/wait.h>
 #include <rdma/rdma_cm.h>
@@ -29,8 +30,27 @@ static int debug = 0;
  * scheduler hot loop visits only path 0 of every logical IP.
  */
 #ifndef MLX5_SRM_ENABLE_STATIC_DUAL_PATH_SCAN
-#define MLX5_SRM_ENABLE_STATIC_DUAL_PATH_SCAN 1
+#define MLX5_SRM_ENABLE_STATIC_DUAL_PATH_SCAN 0
 #endif
+
+/*
+ * Reproduce the reroute scheduler's logical-IP-to-physical-path lookup
+ * without enabling migration. Each route remains statically [0, 1].
+ */
+#ifndef MLX5_SRM_ENABLE_KERNEL_PATH_SELECT
+#define MLX5_SRM_ENABLE_KERNEL_PATH_SELECT 1
+#endif
+
+#ifndef MLX5_SRM_ENABLE_UDP_REROUTE
+#define MLX5_SRM_ENABLE_UDP_REROUTE 1
+#endif
+
+enum mlx5_srm_udp_reroute_state {
+    MLX5_SRM_UDP_REROUTE_IDLE = 0,
+    MLX5_SRM_UDP_REROUTE_DRAINING,
+    MLX5_SRM_UDP_REROUTE_MODIFY_PENDING,
+    MLX5_SRM_UDP_REROUTE_MODIFY_DONE,
+};
 
 // 2. 位运算替代取模（需确保CQ_NUM是2的幂，如16、32）
 #define CQ_NUM_POWER 0 // 示例：CQ_NUM=2^4=16
@@ -66,7 +86,7 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
 #define MLX5_SRM_ENABLE_DB_BATCH_LOG 1
 #define MLX5_SRM_DB_BATCH_LOG_INTERVAL (1ULL << 20)
 
-static u64 LIMIT_BATCHING = 250;
+static u64 LIMIT_BATCHING = 500;
 #define DEBUG_LOG \
     if (debug)    \
     printk
@@ -88,7 +108,8 @@ struct mlx5_sq_ctrl_page {
     __u64 resv_idx;
     __u8 resv_pad[56];
     __u64 cons_idx;
-    __u8 cons_pad[56];
+    __u8 active_path[MLX5_SRM_PATHS_PER_IP];
+    __u8 cons_pad[56 - MLX5_SRM_PATHS_PER_IP];
 } CACHELINE_ALIGNED_USER;
 static_assert(sizeof(struct mlx5_sq_ctrl_page) == 128);
 
@@ -235,6 +256,29 @@ struct mlx5_ib_srmc
     u16 logical_ip_idx;
     u8 path_idx;
     u8 path_count;
+    u8 udp_reroute_state;
+    u8 udp_bad_windows;
+    u16 udp_sport;
+    u32 udp_reroute_generation;
+    u64 posted_wqes;
+    u64 completed_wqes;
+    u64 prev_posted_wqes;
+    u64 prev_completed_wqes;
+    u64 udp_drain_target;
+    u64 udp_drain_start_cycles;
+#if MLX5_SRM_ENABLE_UDP_REROUTE
+    struct mlx5_async_work udp_modify_work;
+    u32 udp_modify_out[4];
+    int udp_modify_status;
+    u16 udp_pending_sport;
+    u64 udp_modify_prepare_cycles;
+    u64 udp_modify_submit_cycles;
+    u64 udp_modify_start_cycles;
+    u64 udp_modify_cmd_start_cycles;
+    u64 udp_modify_done_cycles;
+#endif
+    unsigned long udp_drain_started;
+    unsigned long udp_last_switch;
     struct page **publish_pages;
     u32 publish_npages;
     u32 publish_depth;
@@ -256,6 +300,14 @@ struct mlx5_ib_sched
     wait_queue_head_t init_wait;
     int id;
     u64 quiescent_epoch;
+#if MLX5_SRM_ENABLE_UDP_REROUTE
+    struct mutex udp_async_lock;
+    struct mlx5_async_ctx udp_async_ctx;
+    struct mlx5_core_dev *udp_async_mdev;
+    struct mlx5_ib_srmc *udp_reroute_owner;
+    bool udp_async_initialized;
+    bool udp_async_stopping;
+#endif
 };
 
 struct mlx5_ib_usr_rc_route {
@@ -342,6 +394,11 @@ void mlx5_ib_unbind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
 			      u32 usr_rc_cnt);
 struct mlx5_ib_sqbuf *mlx5_ib_find_sqbuf_by_qpn(struct mlx5_ib_sched_group *sched_group, int qpn);
 int scheduler_polling(void *sched_data);
+#if MLX5_SRM_ENABLE_UDP_REROUTE
+int mlx5_ib_modify_xrc_udp_sport(struct mlx5_ib_sched *sched,
+                                 struct mlx5_ib_srmc *srmc,
+                                 u16 udp_sport);
+#endif
 int mlx5_ib_create_srmc(struct mlx5_ib_sched *sched, struct mlx5_ib_qp *init_qp, struct mlx5_ib_qp *tgt_qp, union ib_gid *dgid);
 int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num);
 void mlx5_ib_sched_stop(struct mlx5_ib_sched_group *sched_group);

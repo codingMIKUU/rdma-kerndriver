@@ -27,6 +27,7 @@
 #include <linux/compiler.h>
 #include <linux/random.h>
 #include <linux/jiffies.h>
+#include <asm/tsc.h>
 
 // 文件操作
 #include <linux/fs.h>
@@ -53,6 +54,35 @@ static bool srm_stats_enable;
 module_param_named(srm_stats_enable, srm_stats_enable, bool, 0644);
 MODULE_PARM_DESC(srm_stats_enable,
                  "Enable one-second hollow RC scheduler statistics");
+
+#if MLX5_SRM_ENABLE_UDP_REROUTE
+static bool srm_udp_reroute_enable=1;
+module_param_named(srm_udp_reroute_enable, srm_udp_reroute_enable, bool, 0444);
+MODULE_PARM_DESC(srm_udp_reroute_enable,
+                 "Enable hollow RC XRC UDP-source-port rerouting at module load");
+static bool srm_udp_reroute_wait_drain = true;
+module_param_named(srm_udp_reroute_wait_drain,
+                   srm_udp_reroute_wait_drain, bool, 0644);
+MODULE_PARM_DESC(srm_udp_reroute_wait_drain,
+                 "Wait for old-path CQEs before changing the UDP source port");
+static uint srm_udp_reroute_interval_us = 10000;
+module_param_named(srm_udp_reroute_interval_us,
+                   srm_udp_reroute_interval_us, uint, 0644);
+MODULE_PARM_DESC(srm_udp_reroute_interval_us,
+                 "Hollow RC UDP reroute detector interval in microseconds");
+static uint srm_udp_reroute_ratio_gap = 0;
+module_param_named(srm_udp_reroute_ratio_gap,
+                   srm_udp_reroute_ratio_gap, uint, 0644);
+static uint srm_udp_reroute_consecutive_windows = 3;
+module_param_named(srm_udp_reroute_consecutive_windows,
+                   srm_udp_reroute_consecutive_windows, uint, 0644);
+static uint srm_udp_reroute_cooldown_ms = 1000;
+module_param_named(srm_udp_reroute_cooldown_ms,
+                   srm_udp_reroute_cooldown_ms, uint, 0644);
+static uint srm_udp_reroute_drain_timeout_ms = 5000;
+module_param_named(srm_udp_reroute_drain_timeout_ms,
+                   srm_udp_reroute_drain_timeout_ms, uint, 0644);
+#endif
 
 static void mlx5_ib_srm_cb_init_waitqueue(struct srm_cb *cb)
 {
@@ -969,6 +999,8 @@ static inline void mlx5_srm_flush_cqe_publish_batch(
     struct mlx5_srm_ctrl_complete_entry *complete_cache,
     int *complete_cache_cnt,
     struct mlx5_ib_srm_sched_stats *stats);
+static __always_inline void
+mlx5_srm_record_kqp_completion(struct mlx5_ib_sched *sched, u64 wrid);
 
 // 仅支持64B的标准wqe
 static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, void **cqe)
@@ -1099,6 +1131,7 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
             {
                 struct mlx5_srm_cqe_publish_entry entry;
 
+                mlx5_srm_record_kqp_completion(sched, wc[i].wr_id);
                 iter_start = srm_stats_enable ? ktime_get_ns() : 0;
                 mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_LOOP_BASE,
                                             iter_start);
@@ -1378,7 +1411,8 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 16;
+const int num_kqps = 256;
+
 
 static inline int mlx5_srm_effective_kqps(void)
 {
@@ -1394,6 +1428,17 @@ static inline int mlx5_srm_sched_scan_kqps(void)
            MLX5_SRM_KERNEL_QP_LEVELS;
 }
 
+/* Number of logical route slots visited for each IP in one scheduler pass. */
+static inline int mlx5_srm_sched_active_paths(void)
+{
+#if MLX5_SRM_ENABLE_STATIC_DUAL_PATH_SCAN
+    return MLX5_SRM_PATHS_PER_IP;
+#else
+    return 1;
+#endif
+}
+
+/* Direct physical KQP order used by the no-selection baseline. */
 static inline int mlx5_srm_sched_scan_idx(int scan)
 {
 #if MLX5_SRM_ENABLE_STATIC_DUAL_PATH_SCAN
@@ -1406,6 +1451,504 @@ static inline int mlx5_srm_sched_scan_idx(int scan)
            logical_ip * MLX5_SRM_PATHS_PER_IP;
 #endif
 }
+
+/*
+ * Resolve one logical route slot to its physical KQP. The enabled path
+ * intentionally mirrors the former reroute hot path: route control lookup,
+ * active_path[] load, then route base plus selected path.
+ */
+static __always_inline bool
+mlx5_srm_sched_select_path(struct mlx5_qp_ctrl_pool *pool,
+                           int route_idx, int active_slot,
+                           struct mlx5_sq_ctrl_page **route_ctrl,
+                           int *kqp_idx)
+{
+#if MLX5_SRM_ENABLE_KERNEL_PATH_SELECT
+    u8 path_idx;
+
+    if (!active_slot)
+        *route_ctrl = mlx5_sq_ctrl_get_slot(pool, route_idx);
+    if (unlikely(!*route_ctrl))
+        return false;
+
+    path_idx = READ_ONCE((*route_ctrl)->active_path[active_slot]);
+    if (unlikely(path_idx >= MLX5_SRM_PATHS_PER_IP))
+        return false;
+    if (unlikely(active_slot &&
+                 path_idx == READ_ONCE((*route_ctrl)->active_path[0])))
+        return false;
+
+    *kqp_idx = route_idx + path_idx;
+#else
+    *kqp_idx = route_idx + active_slot;
+#endif
+    return true;
+}
+
+#if MLX5_SRM_ENABLE_UDP_REROUTE
+static_assert(MLX5_ST_SZ_BYTES(srm_rts2rts_qp_in) == 0x1d0);
+static_assert(MLX5_ST_SZ_BYTES(rts2rts_qp_out) ==
+              sizeof(((struct mlx5_ib_srmc *)0)->udp_modify_out));
+
+/* Read the currently programmed RoCE UDP source port from an XRC QPC. */
+static int mlx5_srm_query_xrc_udp_sport(struct mlx5_ib_qp *qp, u16 *udp_sport)
+{
+    struct mlx5_ib_dev *dev;
+    struct mlx5_ib_qp_base *base;
+    void *out;
+    void *qpc;
+    int outlen;
+    int ret;
+
+    if (!qp || !udp_sport || qp->type != IB_QPT_XRC_INI)
+        return -EINVAL;
+
+    dev = to_mdev(qp->ibqp.device);
+    base = &qp->trans_qp.base;
+    outlen = MLX5_ST_SZ_BYTES(query_qp_out);
+    out = kvzalloc(outlen, GFP_KERNEL);
+    if (!out)
+        return -ENOMEM;
+
+    ret = mlx5_core_qp_query(dev, &base->mqp, out, outlen, false);
+    if (!ret) {
+        qpc = MLX5_ADDR_OF(query_qp_out, out, qpc);
+        *udp_sport = MLX5_GET(qpc, qpc,
+                              primary_address_path.udp_sport);
+    }
+    kvfree(out);
+    return ret;
+}
+
+/* Firmware callback: publish only persistent state and never sleep. */
+static void mlx5_srm_udp_modify_callback(
+    int status, struct mlx5_async_work *work)
+{
+    struct mlx5_ib_srmc *srmc =
+        container_of(work, struct mlx5_ib_srmc, udp_modify_work);
+
+    WRITE_ONCE(srmc->udp_modify_status, status);
+    WRITE_ONCE(srmc->udp_modify_done_cycles, rdtsc());
+    smp_store_release(&srmc->udp_reroute_state,
+                      MLX5_SRM_UDP_REROUTE_MODIFY_DONE);
+}
+
+/* Initialize one command context per scheduler once its mlx5 device is known. */
+static int __mlx5_srm_init_udp_async_ctx(struct mlx5_ib_sched *sched,
+                                         struct mlx5_core_dev *mdev)
+{
+    if (READ_ONCE(sched->udp_async_stopping))
+        return -ESHUTDOWN;
+    if (sched->udp_async_initialized)
+        return sched->udp_async_mdev == mdev ? 0 : -EXDEV;
+
+    mlx5_cmd_init_async_ctx(mdev, &sched->udp_async_ctx);
+    sched->udp_async_mdev = mdev;
+    sched->udp_async_initialized = true;
+    return 0;
+}
+
+static int mlx5_srm_init_udp_async_ctx(struct mlx5_ib_sched *sched,
+                                       struct mlx5_core_dev *mdev)
+{
+    int ret;
+
+    mutex_lock(&sched->udp_async_lock);
+    ret = __mlx5_srm_init_udp_async_ctx(sched, mdev);
+    mutex_unlock(&sched->udp_async_lock);
+    return ret;
+}
+
+/* Wait for every callback before any SRMC or QP owned by this scheduler dies. */
+static void mlx5_srm_cleanup_udp_async_ctx(struct mlx5_ib_sched *sched)
+{
+    mutex_lock(&sched->udp_async_lock);
+    sched->udp_async_stopping = true;
+    if (!sched->udp_async_initialized)
+        goto out;
+
+    mlx5_cmd_cleanup_async_ctx(&sched->udp_async_ctx);
+    sched->udp_async_initialized = false;
+    sched->udp_async_mdev = NULL;
+out:
+    sched->udp_reroute_owner = NULL;
+    mutex_unlock(&sched->udp_async_lock);
+}
+
+/* Submit an RTS2RTS UDP-source-port update without waiting for firmware. */
+int mlx5_ib_modify_xrc_udp_sport(struct mlx5_ib_sched *sched,
+                                 struct mlx5_ib_srmc *srmc,
+                                 u16 udp_sport)
+{
+    u32 in[MLX5_ST_SZ_DW(srm_rts2rts_qp_in)];
+    struct mlx5_ib_qp *qp;
+    struct mlx5_ib_qp_base *base;
+    struct mlx5_ib_dev *dev;
+    u64 prepare_start;
+    u64 submit_start;
+    int ret;
+
+    prepare_start = rdtsc();
+    if (!sched || !srmc) {
+        return -EINVAL;
+    }
+    qp = srmc->ini_cb.qp;
+    srmc->udp_modify_start_cycles = prepare_start;
+    srmc->udp_modify_prepare_cycles = 0;
+    srmc->udp_modify_submit_cycles = 0;
+    srmc->udp_modify_cmd_start_cycles = 0;
+    srmc->udp_modify_done_cycles = 0;
+    srmc->udp_modify_status = 0;
+    memset(in, 0, sizeof(in));
+    memset(srmc->udp_modify_out, 0, sizeof(srmc->udp_modify_out));
+
+    if (!qp || qp->type != IB_QPT_XRC_INI) {
+        ret = -EOPNOTSUPP;
+        goto out_prepare_failed;
+    }
+    if (READ_ONCE(qp->state) != IB_QPS_RTS) {
+        ret = -EINVAL;
+        goto out_prepare_failed;
+    }
+    if (udp_sport < IB_ROCE_UDP_ENCAP_VALID_PORT_MIN) {
+        ret = -EINVAL;
+        goto out_prepare_failed;
+    }
+
+    dev = to_mdev(qp->ibqp.device);
+    if (!MLX5_CAP_GEN(dev->mdev, rts2rts_qp_udp_sport)) {
+        ret = -EOPNOTSUPP;
+        goto out_prepare_failed;
+    }
+    mutex_lock(&sched->udp_async_lock);
+    ret = __mlx5_srm_init_udp_async_ctx(sched, dev->mdev);
+    if (ret) {
+        mutex_unlock(&sched->udp_async_lock);
+        goto out_prepare_failed;
+    }
+
+    base = &qp->trans_qp.base;
+    MLX5_SET(srm_rts2rts_qp_in, in, opcode,
+             MLX5_CMD_OP_RTS2RTS_QP);
+    MLX5_SET(srm_rts2rts_qp_in, in, qpn, base->mqp.qpn);
+    MLX5_SET(srm_rts2rts_qp_in, in, uid, base->mqp.uid);
+    MLX5_SET64(srm_rts2rts_qp_in, in, opt_param_mask_95_32,
+               MLX5_SRM_QPC_OPT_MASK_32_UDP_SPORT);
+    MLX5_SET(srm_rts2rts_qp_in, in,
+             qpc.primary_address_path.udp_sport, udp_sport);
+
+    srmc->udp_pending_sport = udp_sport;
+    srmc->udp_modify_prepare_cycles = rdtsc() - prepare_start;
+    submit_start = rdtsc();
+    srmc->udp_modify_cmd_start_cycles = submit_start;
+    smp_store_release(&srmc->udp_reroute_state,
+                      MLX5_SRM_UDP_REROUTE_MODIFY_PENDING);
+    ret = mlx5_cmd_exec_cb(&sched->udp_async_ctx, in, sizeof(in),
+                           srmc->udp_modify_out,
+                           sizeof(srmc->udp_modify_out),
+                           mlx5_srm_udp_modify_callback,
+                           &srmc->udp_modify_work);
+    srmc->udp_modify_submit_cycles = rdtsc() - submit_start;
+    if (ret) {
+        WRITE_ONCE(srmc->udp_modify_status, ret);
+        WRITE_ONCE(srmc->udp_modify_done_cycles, rdtsc());
+        smp_store_release(&srmc->udp_reroute_state,
+                          MLX5_SRM_UDP_REROUTE_MODIFY_DONE);
+    }
+    mutex_unlock(&sched->udp_async_lock);
+    return ret;
+
+out_prepare_failed:
+    srmc->udp_modify_prepare_cycles = rdtsc() - prepare_start;
+    WRITE_ONCE(srmc->udp_modify_status, ret);
+    WRITE_ONCE(srmc->udp_modify_done_cycles, rdtsc());
+    smp_store_release(&srmc->udp_reroute_state,
+                      MLX5_SRM_UDP_REROUTE_MODIFY_DONE);
+    return ret;
+}
+
+/* Generate a deterministic new entropy value while avoiding the old port. */
+static u16 mlx5_srm_next_udp_sport(struct mlx5_ib_srmc *srmc,
+                                   u16 old_sport)
+{
+    u32 x;
+    u16 sport;
+
+    srmc->udp_reroute_generation++;
+    x = (srmc->srmc_idx + 1) * 0x9e3779b9U;
+    x ^= srmc->udp_reroute_generation * 0x85ebca6bU;
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    sport = IB_ROCE_UDP_ENCAP_VALID_PORT_MIN | (x & 0x3fff);
+    if (sport == old_sport)
+        sport = IB_ROCE_UDP_ENCAP_VALID_PORT_MIN |
+                ((sport + 0x1f) & 0x3fff);
+    return sport;
+}
+
+/* The detector and reroute progressor run on this scheduler's sole thread. */
+static bool mlx5_srm_claim_udp_reroute(struct mlx5_ib_sched *sched,
+                                       struct mlx5_ib_srmc *srmc)
+{
+    if (sched->udp_reroute_owner)
+        return false;
+    sched->udp_reroute_owner = srmc;
+    return true;
+}
+
+static void mlx5_srm_release_udp_reroute(struct mlx5_ib_sched *sched,
+                                         struct mlx5_ib_srmc *srmc)
+{
+    if (sched->udp_reroute_owner == srmc)
+        sched->udp_reroute_owner = NULL;
+}
+
+/* Claim this scheduler's reroute slot, then stop DBs and snapshot old WQEs. */
+static bool mlx5_srm_start_udp_drain(struct mlx5_ib_sched *sched,
+                                     struct mlx5_ib_srmc *srmc)
+{
+    if (!mlx5_srm_claim_udp_reroute(sched, srmc))
+        return false;
+
+    srmc->udp_drain_target = srmc->posted_wqes;
+    srmc->udp_drain_start_cycles = rdtsc();
+    srmc->udp_drain_started = jiffies;
+    smp_store_release(&srmc->udp_reroute_state,
+                      MLX5_SRM_UDP_REROUTE_DRAINING);
+    pr_info("hollow RC UDP reroute drain logical_ip=%u path=%u qpn=%u posted=%llu completed=%llu wait_drain=%d\n",
+            srmc->logical_ip_idx, srmc->path_idx,
+            srmc->ini_cb.qp->ibqp.qp_num, srmc->udp_drain_target,
+            srmc->completed_wqes,
+            READ_ONCE(srm_udp_reroute_wait_drain));
+    return true;
+}
+
+/*
+ * Switch only after every WQE doorbelled before the drain has produced a
+ * CQE. Undoorbelled WQEs remain queued and are sent after this function.
+ */
+static bool mlx5_srm_progress_udp_reroute(struct mlx5_ib_sched *sched,
+                                          struct mlx5_ib_srmc *srmc)
+{
+    u64 modify_async_cycles;
+    u64 modify_cmd_cycles;
+    u64 resume_delay_cycles;
+    u64 total_cycles;
+    u64 finish_cycles;
+    u8 state;
+    u16 old_sport;
+    u16 new_sport;
+    int ret;
+
+    state = smp_load_acquire(&srmc->udp_reroute_state);
+    if (state == MLX5_SRM_UDP_REROUTE_IDLE)
+        return false;
+
+    if (!READ_ONCE(srm_udp_reroute_enable)) {
+        WRITE_ONCE(srmc->udp_reroute_state,
+                   MLX5_SRM_UDP_REROUTE_IDLE);
+        mlx5_srm_release_udp_reroute(sched, srmc);
+        return true;
+    }
+
+    if (state == MLX5_SRM_UDP_REROUTE_MODIFY_PENDING)
+        return true;
+
+    if (state == MLX5_SRM_UDP_REROUTE_MODIFY_DONE)
+        goto modify_done;
+
+    if (state != MLX5_SRM_UDP_REROUTE_DRAINING) {
+        pr_warn_ratelimited("hollow RC UDP reroute invalid state=%u qpn=%u\n",
+                            state, srmc->ini_cb.qp->ibqp.qp_num);
+        smp_store_release(&srmc->udp_reroute_state,
+                          MLX5_SRM_UDP_REROUTE_IDLE);
+        mlx5_srm_release_udp_reroute(sched, srmc);
+        return true;
+    }
+
+    if (READ_ONCE(srm_udp_reroute_wait_drain) &&
+        srmc->completed_wqes < srmc->udp_drain_target) {
+        if (time_after(jiffies, srmc->udp_drain_started +
+                       msecs_to_jiffies(
+                           srm_udp_reroute_drain_timeout_ms))) {
+            total_cycles = rdtsc() - srmc->udp_drain_start_cycles;
+            pr_warn("hollow RC UDP reroute drain timeout logical_ip=%u path=%u qpn=%u target=%llu completed=%llu total_cycles=%llu\n",
+                    srmc->logical_ip_idx, srmc->path_idx,
+                    srmc->ini_cb.qp->ibqp.qp_num,
+                    srmc->udp_drain_target, srmc->completed_wqes,
+                    total_cycles);
+            WRITE_ONCE(srmc->udp_reroute_state,
+                       MLX5_SRM_UDP_REROUTE_IDLE);
+            srmc->udp_last_switch = jiffies;
+            mlx5_srm_release_udp_reroute(sched, srmc);
+            return true;
+        }
+        return true;
+    }
+
+    old_sport = srmc->udp_sport;
+    new_sport = mlx5_srm_next_udp_sport(srmc, old_sport);
+    mlx5_ib_modify_xrc_udp_sport(sched, srmc, new_sport);
+    return true;
+
+modify_done:
+    finish_cycles = rdtsc();
+    ret = READ_ONCE(srmc->udp_modify_status);
+    old_sport = srmc->udp_sport;
+    new_sport = srmc->udp_pending_sport;
+    modify_cmd_cycles = srmc->udp_modify_cmd_start_cycles ?
+        srmc->udp_modify_done_cycles -
+            srmc->udp_modify_cmd_start_cycles : 0;
+    modify_async_cycles = srmc->udp_modify_done_cycles -
+                          srmc->udp_modify_start_cycles;
+    resume_delay_cycles = finish_cycles - srmc->udp_modify_done_cycles;
+    total_cycles = finish_cycles - srmc->udp_drain_start_cycles;
+    if (ret)
+        goto out_failed;
+
+    srmc->udp_sport = srmc->udp_pending_sport;
+    srmc->udp_last_switch = jiffies;
+    srmc->prev_posted_wqes = srmc->posted_wqes;
+    srmc->prev_completed_wqes = srmc->completed_wqes;
+    smp_store_release(&srmc->udp_reroute_state,
+                      MLX5_SRM_UDP_REROUTE_IDLE);
+    mlx5_srm_release_udp_reroute(sched, srmc);
+    pr_info("hollow RC UDP reroute complete logical_ip=%u path=%u qpn=%u sport=%u->%u drain_wait=%d target=%llu completed=%llu modify_prepare_cycles=%llu modify_submit_cycles=%llu modify_cmd_cycles=%llu modify_async_cycles=%llu resume_delay_cycles=%llu total_cycles=%llu\n",
+            srmc->logical_ip_idx, srmc->path_idx,
+            srmc->ini_cb.qp->ibqp.qp_num, old_sport, new_sport,
+            READ_ONCE(srm_udp_reroute_wait_drain),
+            srmc->udp_drain_target, srmc->completed_wqes,
+            srmc->udp_modify_prepare_cycles,
+            srmc->udp_modify_submit_cycles, modify_cmd_cycles,
+            modify_async_cycles, resume_delay_cycles, total_cycles);
+    return true;
+
+out_failed:
+    srmc->udp_last_switch = jiffies;
+    smp_store_release(&srmc->udp_reroute_state,
+                      MLX5_SRM_UDP_REROUTE_IDLE);
+    mlx5_srm_release_udp_reroute(sched, srmc);
+    pr_warn_ratelimited("hollow RC UDP reroute failed logical_ip=%u path=%u qpn=%u err=%d modify_prepare_cycles=%llu modify_submit_cycles=%llu modify_cmd_cycles=%llu modify_async_cycles=%llu resume_delay_cycles=%llu total_cycles=%llu\n",
+                        srmc->logical_ip_idx, srmc->path_idx,
+                        srmc->ini_cb.qp->ibqp.qp_num, ret,
+                        srmc->udp_modify_prepare_cycles,
+                        srmc->udp_modify_submit_cycles, modify_cmd_cycles,
+                        modify_async_cycles, resume_delay_cycles,
+                        total_cycles);
+    return true;
+}
+
+/* Compare the two static paths and drain the persistently weaker one. */
+static void mlx5_srm_detect_udp_reroute(struct mlx5_ib_sched *sched)
+{
+    bool single_path = mlx5_srm_sched_active_paths() == 1;
+    int logical;
+
+    if (!READ_ONCE(srm_udp_reroute_enable))
+        return;
+
+    for (logical = 0; logical < num_kqps; logical++) {
+        struct mlx5_ib_srmc *path[MLX5_SRM_PATHS_PER_IP];
+        u64 posted[MLX5_SRM_PATHS_PER_IP];
+        u64 completed[MLX5_SRM_PATHS_PER_IP];
+        u32 ratio[MLX5_SRM_PATHS_PER_IP];
+        struct mlx5_ib_srmc *poor;
+        int poor_idx;
+        int p;
+
+        for (p = 0; p < MLX5_SRM_PATHS_PER_IP; p++) {
+            path[p] = mlx5_ib_sched_find_srmc_idx(
+                sched, logical * MLX5_SRM_PATHS_PER_IP + p);
+            if (!path[p] || !path[p]->ini_cb.qp)
+                break;
+            posted[p] = path[p]->posted_wqes -
+                        path[p]->prev_posted_wqes;
+            completed[p] = path[p]->completed_wqes -
+                           path[p]->prev_completed_wqes;
+            ratio[p] = posted[p] ?
+                min_t(u64, 1000,
+                      div64_u64(completed[p] * 1000, posted[p])) :
+                1000;
+        }
+        if (p != MLX5_SRM_PATHS_PER_IP)
+            continue;
+
+        if (path[0]->udp_reroute_state != MLX5_SRM_UDP_REROUTE_IDLE ||
+            path[1]->udp_reroute_state != MLX5_SRM_UDP_REROUTE_IDLE)
+            goto update_window;
+
+        poor_idx = single_path ? 0 : (ratio[0] <= ratio[1] ? 0 : 1);
+        poor = path[poor_idx];
+        if (!posted[poor_idx] ||
+            (!single_path &&
+             (!posted[poor_idx ^ 1] ||
+              ratio[poor_idx ^ 1] - ratio[poor_idx] <
+                  srm_udp_reroute_ratio_gap)) ||
+            time_before(jiffies, poor->udp_last_switch +
+                        msecs_to_jiffies(
+                            srm_udp_reroute_cooldown_ms))) {
+            poor->udp_bad_windows = 0;
+            goto update_window;
+        }
+
+        if (++poor->udp_bad_windows >=
+            max_t(uint, 1, srm_udp_reroute_consecutive_windows)) {
+            if (mlx5_srm_start_udp_drain(sched, poor)) {
+                poor->udp_bad_windows = 0;
+                pr_info("hollow RC UDP reroute detect logical_ip=%d single_path=%d poor_path=%d posted=%llu completed=%llu ratio=%u good_path=%d posted=%llu completed=%llu ratio=%u\n",
+                        logical, single_path, poor_idx, posted[poor_idx],
+                        completed[poor_idx], ratio[poor_idx],
+                        poor_idx ^ 1, posted[poor_idx ^ 1],
+                        completed[poor_idx ^ 1], ratio[poor_idx ^ 1]);
+            } else {
+                poor->udp_bad_windows = max_t(
+                    uint, 1, srm_udp_reroute_consecutive_windows);
+            }
+        }
+
+update_window:
+        for (p = 0; p < MLX5_SRM_PATHS_PER_IP; p++) {
+            path[p]->prev_posted_wqes = path[p]->posted_wqes;
+            path[p]->prev_completed_wqes = path[p]->completed_wqes;
+        }
+    }
+}
+
+/* Account a CQE to the KQP encoded in wr_id, independent of shared-CQ owner. */
+static __always_inline void
+mlx5_srm_record_kqp_completion(struct mlx5_ib_sched *sched, u64 wrid)
+{
+    struct mlx5_ib_srmc *send_srmc;
+    u32 kqp_idx;
+
+    if (likely(!READ_ONCE(srm_udp_reroute_enable)))
+        return;
+    kqp_idx = mlx5_srm_wrid_kqp(wrid);
+    if (unlikely(kqp_idx >= mlx5_srm_effective_kqps()))
+        return;
+    send_srmc = mlx5_ib_sched_find_srmc_idx(sched, kqp_idx);
+    if (likely(send_srmc))
+        send_srmc->completed_wqes++;
+}
+#else
+static inline bool mlx5_srm_progress_udp_reroute(struct mlx5_ib_sched *sched,
+                                                 struct mlx5_ib_srmc *srmc)
+{
+    return false;
+}
+
+static inline void mlx5_srm_detect_udp_reroute(struct mlx5_ib_sched *sched)
+{
+}
+
+static inline void
+mlx5_srm_record_kqp_completion(struct mlx5_ib_sched *sched, u64 wrid)
+{
+}
+#endif
 
 struct mlx5_ib_srm_kqp_stats {
     u64 scans;
@@ -2686,6 +3229,14 @@ int scheduler_polling(void *sched_data)
     uint32_t real_num_threads = 17; 
     struct mlx5_qp_ctrl_pool *sq_ctrl_pool = NULL;
     u64 observed_route_epoch = atomic64_read(&sched_group.route_epoch);
+#if MLX5_SRM_ENABLE_UDP_REROUTE
+    u64 last_udp_reroute_check = get_cycles();
+    u64 udp_reroute_interval_cycles =
+        div_u64((u64)max_t(uint, 1,
+                           READ_ONCE(srm_udp_reroute_interval_us)) *
+                    max_t(unsigned int, 1, READ_ONCE(tsc_khz)),
+                1000);
+#endif
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
     u64 db_batch_log_scans = 0;
     u64 db_batch_log_calls = 0;
@@ -2745,8 +3296,32 @@ int scheduler_polling(void *sched_data)
             }
         }
 
+        {
+#if MLX5_SRM_ENABLE_KERNEL_PATH_SELECT
+        int active_paths = mlx5_srm_sched_active_paths();
+        int scan_active_slot = 0;
+        int scan_route_idx = 0;
+        struct mlx5_sq_ctrl_page *scan_route_ctrl = NULL;
+#endif
+
         for (scan = 0; scan < mlx5_srm_sched_scan_kqps(); scan++) {
+#if MLX5_SRM_ENABLE_KERNEL_PATH_SELECT
+            int active_slot = scan_active_slot;
+            int route_idx = scan_route_idx;
+
+            scan_active_slot++;
+            if (scan_active_slot == active_paths) {
+                scan_active_slot = 0;
+                scan_route_idx += MLX5_SRM_PATHS_PER_IP;
+            }
+
+            if (!mlx5_srm_sched_select_path(sq_ctrl_pool, route_idx,
+                                            active_slot,
+                                            &scan_route_ctrl, &i))
+                continue;
+#else
             i = mlx5_srm_sched_scan_idx(scan);
+#endif
 
 
             if (cnt % 1000000 == 0)
@@ -2755,7 +3330,7 @@ int scheduler_polling(void *sched_data)
                 msleep(0);
             }
 
-            {
+            if(scan%2==0){
                 u64 poll_start = srm_stats_enable ? ktime_get_ns() : 0;
 
                 ret = poll_srmc_inline(sched, sq_ctrl_pool, pre_srmcs,
@@ -2777,6 +3352,8 @@ int scheduler_polling(void *sched_data)
                 continue;
             srmc = mlx5_ib_sched_find_srmc_idx(sched, i);
             if (!srmc || !srmc->ini_cb.qp)
+                continue;
+            if (unlikely(mlx5_srm_progress_udp_reroute(sched, srmc)))
                 continue;
             if (srm_stats_enable)
                 srm_stats->kqp[i].scans++;
@@ -3072,6 +3649,10 @@ int scheduler_polling(void *sched_data)
                 mlx5r_ring_db(srmc->ini_cb.qp, sent, last_ctrl);
                 pre_srmc->last_db_jiffies = jiffies;
                 kernel_tot_db += sent;
+#if MLX5_SRM_ENABLE_UDP_REROUTE
+                if (unlikely(READ_ONCE(srm_udp_reroute_enable)))
+                    srmc->posted_wqes += sent;
+#endif
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
                 db_batch_log_calls++;
                 db_batch_log_wqes += sent;
@@ -3141,6 +3722,23 @@ int scheduler_polling(void *sched_data)
 
             // pre_srmc->cur_cqe++;
         }
+        }
+#if MLX5_SRM_ENABLE_UDP_REROUTE
+        if (unlikely(READ_ONCE(srm_udp_reroute_enable))) {
+            u64 now = get_cycles();
+
+            if (now - last_udp_reroute_check >=
+                udp_reroute_interval_cycles) {
+                last_udp_reroute_check = now;
+                mlx5_srm_detect_udp_reroute(sched);
+                udp_reroute_interval_cycles = div_u64(
+                    (u64)max_t(uint, 1,
+                               READ_ONCE(srm_udp_reroute_interval_us)) *
+                        max_t(unsigned int, 1, READ_ONCE(tsc_khz)),
+                    1000);
+            }
+        }
+#endif
         mlx5_ib_srm_report_stats(sched, srm_stats);
         {
             u64 route_epoch = atomic64_read(&sched_group.route_epoch);
@@ -3248,6 +3846,13 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
         sched_group->scheds[i].ready_srmc_cnt = 0;
         sched_group->scheds[i].init_error = 0;
         sched_group->scheds[i].quiescent_epoch = 0;
+#if MLX5_SRM_ENABLE_UDP_REROUTE
+        mutex_init(&sched_group->scheds[i].udp_async_lock);
+        sched_group->scheds[i].udp_async_initialized = false;
+        sched_group->scheds[i].udp_async_mdev = NULL;
+        sched_group->scheds[i].udp_reroute_owner = NULL;
+        sched_group->scheds[i].udp_async_stopping = false;
+#endif
         init_waitqueue_head(&sched_group->scheds[i].init_wait);
         sched_group->scheds[i].task = kthread_create(scheduler_polling, (void *)sched_id, thread_info);
         mutex_init(&sched_group->scheds[i].srmc_lock);
@@ -3297,6 +3902,15 @@ void mlx5_ib_sched_stop(struct mlx5_ib_sched_group *sched_group)
         sched_group->num_sched <= 0)
         return;
 
+#if MLX5_SRM_ENABLE_UDP_REROUTE
+    /* Close the submission gate before stopping any scheduler thread. */
+    for (i = 0; i < sched_group->num_sched; i++) {
+        mutex_lock(&sched_group->scheds[i].udp_async_lock);
+        sched_group->scheds[i].udp_async_stopping = true;
+        mutex_unlock(&sched_group->scheds[i].udp_async_lock);
+    }
+#endif
+
     for (i = 0; i < sched_group->num_sched; i++) {
         sched = &sched_group->scheds[i];
         if (!sched->task || IS_ERR(sched->task)) {
@@ -3308,6 +3922,12 @@ void mlx5_ib_sched_stop(struct mlx5_ib_sched_group *sched_group)
         kthread_stop(sched->task);
         sched->task = NULL;
     }
+
+#if MLX5_SRM_ENABLE_UDP_REROUTE
+    /* No submitter remains; wait for callbacks before QP/CM teardown. */
+    for (i = 0; i < sched_group->num_sched; i++)
+        mlx5_srm_cleanup_udp_async_ctx(&sched_group->scheds[i]);
+#endif
 }
 
 static void mlx5_ib_destroy_srmc_ini(struct mlx5_ib_srmc *srmc)
@@ -3787,7 +4407,46 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
                 break;
             }
 
+#if MLX5_SRM_ENABLE_UDP_REROUTE
+            if (READ_ONCE(srm_udp_reroute_enable)) {
+                struct mlx5_ib_dev *dev =
+                    to_mdev(srmc->ini_cb.qp->ibqp.device);
+                int reroute_ret;
+
+                reroute_ret = mlx5_srm_init_udp_async_ctx(sched,
+                                                           dev->mdev);
+                if (reroute_ret) {
+                    pr_warn("hollow RC UDP reroute async context init failed srmc=%d err=%d\n",
+                            srmc->srmc_idx, reroute_ret);
+                } else {
+                    reroute_ret = mlx5_srm_query_xrc_udp_sport(
+                        srmc->ini_cb.qp, &srmc->udp_sport);
+                    if (reroute_ret)
+                        pr_warn("hollow RC UDP reroute initial sport query failed srmc=%d qpn=%u err=%d\n",
+                                srmc->srmc_idx,
+                                srmc->ini_cb.qp->ibqp.qp_num,
+                                reroute_ret);
+                }
+            }
+#endif
             WRITE_ONCE(sched->srmc_by_idx[srmc->srmc_idx], srmc);
+            if (!srmc->path_idx) {
+                struct mlx5_ib_dev *dev =
+                    to_mdev(srmc->ini_cb.qp->ibqp.device);
+                struct mlx5_sq_ctrl_page *route_ctrl =
+                    mlx5_sq_ctrl_get_slot(&dev->sq_ctrl_pool,
+                                           srmc->srmc_idx);
+                int path;
+
+                if (!route_ctrl) {
+                    ret = -EINVAL;
+                    WRITE_ONCE(sched->init_error, ret);
+                    wake_up_all(&sched->init_wait);
+                    break;
+                }
+                for (path = 0; path < MLX5_SRM_PATHS_PER_IP; path++)
+                    WRITE_ONCE(route_ctrl->active_path[path], path);
+            }
             smp_store_release(&sched->ready_srmc_cnt,
                               sched->ready_srmc_cnt + 1);
             wake_up_all(&sched->init_wait);
