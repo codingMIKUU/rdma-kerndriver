@@ -2588,10 +2588,21 @@ static int mlx5_ib_mmap_offset(struct mlx5_ib_dev *dev,
 		struct mlx5_qp_farm_db_mmap_entry *farm_db =
 			container_of(mentry, struct mlx5_qp_farm_db_mmap_entry,
 				     mentry);
+		unsigned long encoded_pgoff = vma->vm_pgoff;
 
+		/* dma_mmap_coherent() treats vm_pgoff as an offset within the
+		 * coherent allocation. The RDMA mmap API uses it as an opaque
+		 * entry key, which has already been resolved above.
+		 */
+		vma->vm_pgoff = 0;
 		ret = dma_mmap_coherent(&dev->mdev->pdev->dev, vma,
 					farm_db->cpu_addr, farm_db->dma_addr,
 					PAGE_SIZE);
+		vma->vm_pgoff = encoded_pgoff;
+		if (ret)
+			mlx5_ib_warn(dev,
+				     "FARM DB mmap failed: ret=%d encoded_pgoff=%lx dma=%pad\n",
+				     ret, encoded_pgoff, &farm_db->dma_addr);
 		rdma_user_mmap_entry_put(&mentry->rdma_entry);
 		return ret;
 	}
