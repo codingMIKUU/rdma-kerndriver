@@ -1730,6 +1730,14 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/scheduler.o := \
   /root/zxm/rdma-kerndriver/include/linux/inet.h \
   include/linux/inet.h \
   /root/zxm/rdma-kerndriver/include/rdma/ib_cm.h \
+  include/linux/cpu.h \
+    $(wildcard include/config/pm/sleep/smp.h) \
+    $(wildcard include/config/pm/sleep/smp/nonzero/cpu.h) \
+    $(wildcard include/config/hotplug/smt.h) \
+  include/linux/node.h \
+    $(wildcard include/config/hmem/reporting.h) \
+    $(wildcard include/config/memory/hotplug/sparse.h) \
+  include/linux/cpuhotplug.h \
   /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/mlx5_avl_tree.h \
 
 /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/scheduler.o: $(deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/scheduler.o)

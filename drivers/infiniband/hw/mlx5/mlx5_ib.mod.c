@@ -187,6 +187,7 @@ __used __section(__versions) = {
 	{ 0xdfa87a16, "mlx5_core_modify_cq" },
 	{ 0xd9a5ea54, "__init_waitqueue_head" },
 	{ 0xb44ad4b3, "_copy_to_user" },
+	{ 0x17de3d5, "nr_cpu_ids" },
 	{ 0x269efb14, "mlx5_eswitch_register_vport_reps" },
 	{ 0x6de13801, "wait_for_completion" },
 	{ 0xb7a22536, "ib_alloc_mr" },
@@ -225,6 +226,7 @@ __used __section(__versions) = {
 	{ 0x8c3253ec, "_raw_spin_trylock" },
 	{ 0xa5cc5d9f, "kthread_stop" },
 	{ 0x449ad0a7, "memcmp" },
+	{ 0x5a5a2271, "__cpu_online_mask" },
 	{ 0xd67364f7, "eventfd_ctx_fdget" },
 	{ 0x1528ba0e, "rdma_destroy_qp" },
 	{ 0x5a5cbd14, "mlx5_core_modify_sq" },
@@ -484,4 +486,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "18F943F4EE504936C0B3E9C");
+MODULE_INFO(srcversion, "BFEEC39B28BEB58368523C5");

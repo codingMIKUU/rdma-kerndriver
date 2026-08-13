@@ -1144,11 +1144,22 @@ static struct mlx5_ib_srmc *
 mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 {
 	struct mlx5_ib_srmc *selected = NULL;
+	struct mlx5_ib_usr_rc_route *route;
+	struct mlx5_ib_cqbuf *cqb;
 	u32 seen = 0;
 	u32 target;
 	u32 hash;
+	u16 owner_worker;
 	int si;
 	int i;
+
+	if (usr_rc_id >= ARRAY_SIZE(sched_group.usr_rc_routes))
+		return NULL;
+	route = &sched_group.usr_rc_routes[usr_rc_id];
+	cqb = smp_load_acquire(&route->cqb);
+	if (!cqb)
+		return NULL;
+	owner_worker = READ_ONCE(cqb->owner_worker);
 
 	for (si = 0; si < max_t(int, 1, sched_group.num_sched); si++) {
 		struct mlx5_ib_sched *sched = &sched_group.scheds[si];
@@ -1170,6 +1181,8 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 				   sizeof(srmc->dgid.raw)) != 0)
 				continue;
 			if (srmc->srmc_idx >= num_kqps)
+				continue;
+			if (srmc->owner_worker != owner_worker)
 				continue;
 			if (!srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
 				continue;
@@ -1201,6 +1214,8 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 				   sizeof(srmc->dgid.raw)) != 0)
 				continue;
 			if (srmc->srmc_idx >= num_kqps)
+				continue;
+			if (srmc->owner_worker != owner_worker)
 				continue;
 			if (!srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
 				continue;
@@ -1672,8 +1687,9 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 				large_srmc->ini_cb.qp->ibqp.qp_num,
 				srmc->ini_cb.refcnt);
 		else
-			pr_info("hollow RC attach: usr_rc=%u srmc=%d qpn=%u users=%d\n",
+			pr_info("hollow RC attach: usr_rc=%u srmc=%d worker=%u qpn=%u users=%d\n",
 				qp->ibqp.qp_num, srmc->srmc_idx,
+				srmc->owner_worker,
 				srmc->ini_cb.qp->ibqp.qp_num,
 				srmc->ini_cb.refcnt);
 		}

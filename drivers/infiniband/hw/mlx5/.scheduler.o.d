@@ -531,5 +531,6 @@ scheduler.o: \
  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/user_verbs.h \
  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/conn.h \
  /root/zxm/rdma-kerndriver/include/linux/inet.h include/linux/inet.h \
- /root/zxm/rdma-kerndriver/include/rdma/ib_cm.h \
+ /root/zxm/rdma-kerndriver/include/rdma/ib_cm.h include/linux/cpu.h \
+ include/linux/node.h include/linux/cpuhotplug.h \
  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/mlx5_avl_tree.h

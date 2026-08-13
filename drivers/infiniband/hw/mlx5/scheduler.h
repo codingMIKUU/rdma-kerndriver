@@ -87,7 +87,7 @@ static_assert(sizeof(struct mlx5_sq_ctrl_page) == 128);
 #define MLX5_SRM_PUBLISH_USR_MASK ((1ULL << MLX5_SRM_PUBLISH_USR_BITS) - 1)
 #define MLX5_SRM_PUBLISH_SEQ_MASK ((1ULL << 48) - 1)
 
-/* cur_put/op_own are lockless because one scheduler owns all CQ writes. */
+/* Logical scheduler ABI remains one; each user CQ has one worker owner. */
 static_assert(NUM_SCHED == 1);
 
 static inline u64 mlx5_srm_publish_token(u64 seq, u16 usr_rc_cnt)
@@ -134,6 +134,7 @@ struct mlx5_ib_cqbuf
     int cqn;
     int cur_put;
     int op_own;
+    u16 owner_worker;
     u64 retire_epoch;
     struct mlx5_ib_cqbuf *next; // not loop
 } CACHELINE_ALIGNED;
@@ -223,6 +224,7 @@ struct mlx5_ib_srmc
     struct mlx5_wqe_info *wqe_infos;
     int idx;                  // 该srmc在表中的索引
     int srmc_idx;             // 该srmc在创建顺序中排第几个(用于分配cq)
+    u16 owner_worker;
     struct page **publish_pages;
     u32 publish_npages;
     u32 publish_depth;
@@ -232,9 +234,23 @@ struct mlx5_ib_srmc
     unsigned long publish_gap_jiffies;
     u64 publish_gap_slot;
 } CACHELINE_ALIGNED;
+struct mlx5_ib_sched;
+struct mlx5_ib_sched_worker
+{
+    struct mlx5_ib_sched *sched;
+    struct task_struct *task;
+    struct ib_cq *shared_cq[CQ_NUM];
+    u32 worker_id;
+    u32 cpu_id;
+    u32 kqp_begin;
+    u32 kqp_end;
+    u64 limit_batch;
+    u64 quiescent_epoch;
+} CACHELINE_ALIGNED;
 struct mlx5_ib_sched
 {
-    struct task_struct *task;
+    struct mlx5_ib_sched_worker *workers;
+    u32 worker_count;
     struct mutex srmc_lock;
     struct mlx5_ib_srmc *srmc_tb[NUM_SRMC]; // single per-gid SRMC
     struct mlx5_ib_srmc *srmc_by_idx[NUM_SRMC]; // direct lookup by ctrl slot / srmc_idx
@@ -243,7 +259,6 @@ struct mlx5_ib_sched
     int init_error;
     wait_queue_head_t init_wait;
     int id;
-    u64 quiescent_epoch;
 };
 
 struct mlx5_ib_usr_rc_route {
@@ -254,6 +269,7 @@ struct mlx5_ib_sched_id
 {
     struct mlx5_ib_sched *sched;
     int id;
+    u32 worker_id;
 };
 
 struct xrc_table_entry {

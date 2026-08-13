@@ -27,6 +27,7 @@
 #include <linux/compiler.h>
 #include <linux/random.h>
 #include <linux/jiffies.h>
+#include <linux/cpu.h>
 
 // 文件操作
 #include <linux/fs.h>
@@ -43,8 +44,6 @@ uint32_t kernel_wqe_table[NUM_SQB], kernel_level_table[NUM_LEVEL * NUM_SCHED]; /
 int num_table_qp, num_table_level,num_xrc_per_srm,num_user_threads, num_xrc_qp;
 int num_table_apps;
 
-struct ib_cq *shared_cq[NUM_SCHED][CQ_NUM]; // 每个内核线程一个cq,大小srmc各CQ_NUM个cq
-
 uint16_t tot_xrc_sended_wqes[MAX_USER_THREADS_NUM][NUM_SCHED*NUM_LEVEL][MAX_USER_XRC_QP_PER_SRM],
             cur_xrc_sended_wqes[MAX_USER_THREADS_NUM][NUM_SCHED][MAX_USER_XRC_QP_PER_SRM]; // 统计0~4KB，每个用户线程每个xrc qp发送了多少wqe
 uint64_t lst_xrc_bytes[MAX_USER_THREADS_NUM][NUM_SCHED][MAX_USER_XRC_QP_PER_SRM]; // 0~4KB,记录上次统计时每个xrc qp发送的总字节数
@@ -53,6 +52,16 @@ static bool srm_stats_enable;
 module_param_named(srm_stats_enable, srm_stats_enable, bool, 0644);
 MODULE_PARM_DESC(srm_stats_enable,
                  "Enable one-second hollow RC scheduler statistics");
+
+static unsigned int srm_sched_cpu_num = 1;
+module_param_named(srm_sched_cpu_num, srm_sched_cpu_num, uint, 0444);
+MODULE_PARM_DESC(srm_sched_cpu_num,
+                 "Number of hollow RC scheduler CPUs");
+
+static unsigned int srm_sched_cpu_base = 8;
+module_param_named(srm_sched_cpu_base, srm_sched_cpu_base, uint, 0444);
+MODULE_PARM_DESC(srm_sched_cpu_base,
+                 "First CPU used by hollow RC scheduler workers");
 
 static void mlx5_ib_srm_cb_init_waitqueue(struct srm_cb *cb)
 {
@@ -215,12 +224,17 @@ static bool
 mlx5_ib_cqb_reached_quiescent_epoch(struct mlx5_ib_sched_group *sched_group,
                                     struct mlx5_ib_cqbuf *cqb)
 {
-    int i;
+    int i, worker_id;
 
-    for (i = 0; i < sched_group->num_sched; i++)
-        if (smp_load_acquire(&sched_group->scheds[i].quiescent_epoch) <
-            cqb->retire_epoch)
-            return false;
+    for (i = 0; i < sched_group->num_sched; i++) {
+        struct mlx5_ib_sched *sched = &sched_group->scheds[i];
+
+        for (worker_id = 0; worker_id < sched->worker_count; worker_id++)
+            if (smp_load_acquire(
+                    &sched->workers[worker_id].quiescent_epoch) <
+                cqb->retire_epoch)
+                return false;
+    }
 
     return true;
 }
@@ -543,6 +557,12 @@ int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group,
     uq->buf = vmap(pages, npages, VM_MAP, PAGE_KERNEL);
     uq->pages = pages;
     uq->cqe_sz = 64;
+    if (sched_group->num_sched > 0 && sched_group->scheds &&
+        sched_group->scheds[0].worker_count)
+        uq->owner_worker = (u32)cqn %
+                           sched_group->scheds[0].worker_count;
+    else
+        uq->owner_worker = 0;
     if (!uq->buf)
     {
         kfree(uq);
@@ -550,6 +570,8 @@ int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group,
         pr_err("failed to map CQ buffer for CQN %d\n", cqn);
         goto err_shrink_slot;
     }
+    pr_info("hollow RC user CQ cqn=%d owner_worker=%u\n",
+            cqn, uq->owner_worker);
     sched_group->cqb_arr[slot] = uq;
 
     mutex_unlock(&sched_group->cq_lock);
@@ -1385,6 +1407,18 @@ static inline int mlx5_srm_effective_kqps(void)
     return num_kqps * MLX5_SRM_KERNEL_QP_LEVELS;
 }
 
+static inline u32 mlx5_srm_kqp_owner(const struct mlx5_ib_sched *sched,
+                                      u32 kqp_idx)
+{
+    u32 total = mlx5_srm_effective_kqps();
+
+    if (!sched || sched->worker_count <= 1 || !total)
+        return 0;
+
+    return min_t(u32, div_u64((u64)kqp_idx * sched->worker_count, total),
+                 sched->worker_count - 1);
+}
+
 struct mlx5_ib_srm_kqp_stats {
     u64 scans;
     u64 active_scans;
@@ -1575,6 +1609,7 @@ static inline void mlx5_ib_srm_record_cq_poll(
 
 static void mlx5_ib_srm_report_stats(
     struct mlx5_ib_sched *sched,
+    u32 worker_id,
     struct mlx5_ib_srm_sched_stats *stats)
 {
     u64 scans = 0;
@@ -1616,7 +1651,7 @@ static void mlx5_ib_srm_report_stats(
                          ? stats->cq_post_poll_ns - accounted_ns
                          : 0;
 
-    pr_info("SRM_KERN_STATS sched=%d scans=%llu active_pct=%llu "
+    pr_info("SRM_KERN_STATS sched=%d worker=%u scans=%llu active_pct=%llu "
             "consumed_avg_x100=%llu db_calls=%llu db_wqes=%llu "
             "db_avg_x100=%llu cq_polls=%llu cq_empty_pct=%llu "
             "cqes=%llu cq_poll_avg_ns=%llu gaps=%llu credit_stalls=%llu "
@@ -1630,7 +1665,7 @@ static void mlx5_ib_srm_report_stats(
             "cq_unaccounted_avg_ns=%llu "
             "cq_drain_calls=%llu cq_drain_polls=%llu "
             "cq_drain_avg_ns=%llu cq_inline_queue_avg_ns=%llu\n",
-            sched->id, scans,
+            sched->id, worker_id, scans,
             scans ? div64_u64(active_scans * 100, scans) : 0,
             active_scans ? div64_u64(consumed_sum * 100, active_scans) : 0,
             db_calls, db_wqes,
@@ -1693,11 +1728,12 @@ static void mlx5_ib_srm_report_stats(
         if (!k->active_scans && !k->db_calls && !k->publish_gaps)
             continue;
         srmc = mlx5_ib_sched_find_srmc_idx(sched, i);
-        pr_info("SRM_KQP_STATS sched=%d kqp=%d users=%d scans=%llu "
+        pr_info("SRM_KQP_STATS sched=%d worker=%u kqp=%d users=%d scans=%llu "
                 "active=%llu consumed_avg_x100=%llu consumed_max=%llu "
                 "db_calls=%llu db_wqes=%llu db_avg_x100=%llu db_max=%llu "
                 "gaps=%llu credit_stalls=%llu free_stalls=%llu\n",
-                sched->id, i, srmc ? srmc->ini_cb.refcnt : 0,
+                sched->id, worker_id, i,
+                srmc ? srmc->ini_cb.refcnt : 0,
                 k->scans, k->active_scans,
                 k->active_scans
                     ? div64_u64(k->consumed_sum * 100, k->active_scans)
@@ -2474,6 +2510,11 @@ int scheduler_polling(void *sched_data)
     struct mlx5_ib_sched_id *sched_id = (struct mlx5_ib_sched_id *)sched_data;
     struct mlx5_ib_sched *sched = sched_id->sched;
     int id = sched_id->id;
+    u32 worker_id = sched_id->worker_id;
+    struct mlx5_ib_sched_worker *worker;
+    u32 kqp_begin;
+    u32 kqp_end;
+    u64 worker_limit;
     struct mlx5_ib_sqbuf *sqb;
     struct mlx5_ib_cqbuf *cqb;
     struct mlx5_ib_srmc *srmc;
@@ -2515,6 +2556,15 @@ int scheduler_polling(void *sched_data)
     uint64_t db_elapsed_ns;
     uint64_t start_cycles_cq, end_cycles_cq;
     const uint64_t cpu_frequency_hz = 2900000000; // 2.9 GHz
+
+    if (!sched->workers || worker_id >= sched->worker_count) {
+        kfree(sched_id);
+        return -EINVAL;
+    }
+    worker = &sched->workers[worker_id];
+    kqp_begin = worker->kqp_begin;
+    kqp_end = worker->kqp_end;
+    worker_limit = worker->limit_batch;
 
     cqe = kvcalloc(SQ_DEPTH, sizeof(*cqe), GFP_KERNEL);
     wc = kvcalloc(SQ_DEPTH, sizeof(*wc), GFP_KERNEL);
@@ -2618,7 +2668,7 @@ int scheduler_polling(void *sched_data)
                    id, READ_ONCE(sched->init_error));
             /*
              * Keep task_struct valid until the module explicitly stops us.
-             * Returning here leaves sched->task stale for kthread_stop().
+             * Keep the worker task valid until module teardown stops it.
              */
             wait_event_interruptible(sched->init_wait,
                                      kthread_should_stop());
@@ -2695,7 +2745,7 @@ int scheduler_polling(void *sched_data)
     }
     srm_stats->last_report = jiffies;
 
-    smp_store_release(&sched->quiescent_epoch, observed_route_epoch);
+    smp_store_release(&worker->quiescent_epoch, observed_route_epoch);
 
     while (!kthread_should_stop())
     {
@@ -2722,7 +2772,7 @@ int scheduler_polling(void *sched_data)
             }
         }
 
-        for (i = 0; i < mlx5_srm_effective_kqps(); i++) {
+        for (i = kqp_begin; i < kqp_end; i++) {
 
 
             if (cnt % 1000000 == 0)
@@ -2759,8 +2809,8 @@ int scheduler_polling(void *sched_data)
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
             db_batch_log_scans++;
             if (unlikely(db_batch_log_scans >= MLX5_SRM_DB_BATCH_LOG_INTERVAL)) {
-                pr_info("hollow RC db batch sched=%d scans=%llu db_calls=%llu db_wqes=%llu db_avg_x100=%llu db_max=%llu large_db_calls=%llu large_db_wqes=%llu large_db_avg_x100=%llu large_db_max=%llu large_limit_active=%d large_limit=%u\n",
-                        id, db_batch_log_scans,
+                pr_info("hollow RC db batch sched=%d worker=%u scans=%llu db_calls=%llu db_wqes=%llu db_avg_x100=%llu db_max=%llu large_db_calls=%llu large_db_wqes=%llu large_db_avg_x100=%llu large_db_max=%llu large_limit_active=%d large_limit=%u\n",
+                        id, worker_id, db_batch_log_scans,
                         db_batch_log_calls, db_batch_log_wqes,
                         db_batch_log_calls ?
                             div64_u64(db_batch_log_wqes * 100,
@@ -2789,7 +2839,7 @@ int scheduler_polling(void *sched_data)
             stuck_cnt = 0;
             inflight = kernel_tot_db - user_tot_cqes;
 
-            while (inflight >= LIMIT_BATCHING && !kthread_should_stop()) {
+            while (inflight >= worker_limit && !kthread_should_stop()) {
                 u64 poll_start = srm_stats_enable ? ktime_get_ns() : 0;
 
                 if (srm_stats_enable)
@@ -2818,7 +2868,7 @@ int scheduler_polling(void *sched_data)
                                 user_tot_cqes,
                                 pre_srmc->ini_cb.qp->sq.head,
                                 pre_srmc->ini_cb.qp->sq.tail);
-                            for (j = 0; j < mlx5_srm_effective_kqps(); j++) {
+                            for (j = kqp_begin; j < kqp_end; j++) {
                                 struct mlx5_ib_srmc *shared_srmc;
                                 struct mlx5_sq_ctrl_page *shared_ctrl;
 
@@ -2852,12 +2902,12 @@ int scheduler_polling(void *sched_data)
                 goto out;
 
             inflight = kernel_tot_db - user_tot_cqes;
-            if (inflight >= LIMIT_BATCHING) {
+            if (inflight >= worker_limit) {
                 if (srm_stats_enable)
                     srm_stats->kqp[i].credit_stalls++;
                 continue;
             }
-            credit = LIMIT_BATCHING - inflight;
+            credit = worker_limit - inflight;
             if (!credit)
                 continue;
 
@@ -3114,13 +3164,13 @@ int scheduler_polling(void *sched_data)
 
             // pre_srmc->cur_cqe++;
         }
-        mlx5_ib_srm_report_stats(sched, srm_stats);
+        mlx5_ib_srm_report_stats(sched, worker_id, srm_stats);
         {
             u64 route_epoch = atomic64_read(&sched_group.route_epoch);
 
             if (unlikely(route_epoch != observed_route_epoch)) {
                 observed_route_epoch = route_epoch;
-                smp_store_release(&sched->quiescent_epoch, route_epoch);
+                smp_store_release(&worker->quiescent_epoch, route_epoch);
             }
         }
     }
@@ -3163,12 +3213,34 @@ err:
 
 int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
 {
-    int i;
-    int j;
+    int i, j;
     int ret;
-    struct mlx5_ib_sched_id *sched_id;
+    u32 worker_id;
+    u32 total_kqps = mlx5_srm_effective_kqps();
+    char thread_info[64];
 
-    i = j = 0;
+    if (!srm_sched_cpu_num || srm_sched_cpu_num > total_kqps) {
+        pr_err("invalid srm_sched_cpu_num=%u for %u KQPs\n",
+               srm_sched_cpu_num, total_kqps);
+        return -EINVAL;
+    }
+    if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP && srm_sched_cpu_num > 1) {
+        pr_err("multi-CPU scheduler does not support large/small KQP levels\n");
+        return -EOPNOTSUPP;
+    }
+    if (LIMIT_BATCHING < srm_sched_cpu_num) {
+        pr_err("LIMIT_BATCHING=%llu is smaller than worker count %u\n",
+               LIMIT_BATCHING, srm_sched_cpu_num);
+        return -EINVAL;
+    }
+    for (worker_id = 0; worker_id < srm_sched_cpu_num; worker_id++) {
+        u32 cpu = srm_sched_cpu_base + worker_id;
+
+        if (cpu >= nr_cpu_ids || !cpu_online(cpu)) {
+            pr_err("hollow RC scheduler CPU %u is not online\n", cpu);
+            return -EINVAL;
+        }
+    }
 
     mutex_init(&sched_group->sq_lock);
     mutex_init(&sched_group->cq_lock);
@@ -3197,43 +3269,71 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
         return -ENOMEM;
     }
 
-    char thread_info[64];
     for (i = 0; i < num; i++)
     {
+        struct mlx5_ib_sched *sched = &sched_group->scheds[i];
 
-        snprintf(thread_info, sizeof(thread_info), "sched_thread_%d", i);
+        sched->id = i;
+        memset(sched->srmc_tb, 0, sizeof(sched->srmc_tb));
+        memset(sched->srmc_by_idx, 0, sizeof(sched->srmc_by_idx));
+        sched->srmc_cnt = 0;
+        sched->ready_srmc_cnt = 0;
+        sched->init_error = 0;
+        init_waitqueue_head(&sched->init_wait);
+        mutex_init(&sched->srmc_lock);
 
-        sched_id = kzalloc(sizeof(struct mlx5_ib_sched_id), GFP_KERNEL);
-        if (sched_id == NULL)
-        {
-            pr_err("Failed to allocate memory for sched_id\n");
+        sched->worker_count = srm_sched_cpu_num;
+        sched->workers = kcalloc(sched->worker_count,
+                                 sizeof(*sched->workers), GFP_KERNEL);
+        if (!sched->workers) {
             ret = -ENOMEM;
             goto err;
         }
-        sched_id->sched = &sched_group->scheds[i];
-        sched_group->scheds[i].id = i;
-        sched_id->id = i;
-        memset(sched_group->scheds[i].srmc_tb, 0,
-               sizeof(sched_group->scheds[i].srmc_tb));
-        memset(sched_group->scheds[i].srmc_by_idx, 0,
-               sizeof(sched_group->scheds[i].srmc_by_idx));
-        sched_group->scheds[i].srmc_cnt = 0;
-        sched_group->scheds[i].ready_srmc_cnt = 0;
-        sched_group->scheds[i].init_error = 0;
-        sched_group->scheds[i].quiescent_epoch = 0;
-        init_waitqueue_head(&sched_group->scheds[i].init_wait);
-        sched_group->scheds[i].task = kthread_create(scheduler_polling, (void *)sched_id, thread_info);
-        mutex_init(&sched_group->scheds[i].srmc_lock);
 
-        if (IS_ERR(sched_group->scheds[i].task))
-        {
-            pr_err("Failed to create polling thread%d\n", i);
-            ret = PTR_ERR(sched_group->scheds[i].task);
-            goto err;
+        for (worker_id = 0; worker_id < sched->worker_count; worker_id++) {
+            struct mlx5_ib_sched_worker *worker =
+                &sched->workers[worker_id];
+            struct mlx5_ib_sched_id *sched_id;
+
+            worker->sched = sched;
+            worker->worker_id = worker_id;
+            worker->cpu_id = srm_sched_cpu_base + worker_id;
+            worker->kqp_begin = div_u64((u64)total_kqps * worker_id,
+                                        sched->worker_count);
+            worker->kqp_end = div_u64((u64)total_kqps * (worker_id + 1),
+                                      sched->worker_count);
+            worker->limit_batch = div_u64(LIMIT_BATCHING,
+                                           sched->worker_count);
+            worker->quiescent_epoch = 0;
+
+            sched_id = kzalloc(sizeof(*sched_id), GFP_KERNEL);
+            if (!sched_id) {
+                ret = -ENOMEM;
+                goto err;
+            }
+            sched_id->sched = sched;
+            sched_id->id = i;
+            sched_id->worker_id = worker_id;
+
+            snprintf(thread_info, sizeof(thread_info),
+                     "sched_thread_%d_%u", i, worker_id);
+            worker->task = kthread_create(scheduler_polling, sched_id,
+                                           thread_info);
+            if (IS_ERR(worker->task)) {
+                ret = PTR_ERR(worker->task);
+                worker->task = NULL;
+                kfree(sched_id);
+                pr_err("Failed to create scheduler %d worker %u: %d\n",
+                       i, worker_id, ret);
+                goto err;
+            }
+
+            kthread_bind(worker->task, worker->cpu_id);
+            wake_up_process(worker->task);
+            pr_info("SRM worker sched=%d worker=%u cpu=%u kqp=[%u,%u) limit_batch=%llu\n",
+                    i, worker_id, worker->cpu_id, worker->kqp_begin,
+                    worker->kqp_end, worker->limit_batch);
         }
-        kthread_bind(sched_group->scheds[i].task, i + 8);
-        wake_up_process(sched_group->scheds[i].task);
-        pr_info("Polling thread %d started and bound to CPU %d\n", i, i + 8);
     }
     // sched_group->cq_task =  kthread_create(polling_cqe,NULL,"polling_cqe");
     // if (IS_ERR(sched_group->cq_task))
@@ -3247,13 +3347,24 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
     // pr_info("CQ polling thread started and bound to CPU %d\n", 10);
     return 0;
 err:
-    for (j = 0; j < i; j++)
-    {
-        if (sched_group->scheds[j].task)
-        {
-            kthread_stop(sched_group->scheds[j].task);
-            sched_group->scheds[j].task = NULL;
+    for (j = 0; j < num; j++) {
+        struct mlx5_ib_sched *sched = &sched_group->scheds[j];
+
+        if (!sched->workers)
+            continue;
+        wake_up_all(&sched->init_wait);
+        for (worker_id = 0; worker_id < sched->worker_count; worker_id++) {
+            struct mlx5_ib_sched_worker *worker =
+                &sched->workers[worker_id];
+
+            if (worker->task) {
+                kthread_stop(worker->task);
+                worker->task = NULL;
+            }
         }
+        kfree(sched->workers);
+        sched->workers = NULL;
+        sched->worker_count = 0;
     }
     kfree(sched_group->scheds);
     sched_group->scheds = NULL;
@@ -3264,7 +3375,7 @@ err:
 void mlx5_ib_sched_stop(struct mlx5_ib_sched_group *sched_group)
 {
     struct mlx5_ib_sched *sched;
-    int i;
+    int i, worker_id;
 
     if (!sched_group || !sched_group->scheds ||
         sched_group->num_sched <= 0)
@@ -3272,14 +3383,21 @@ void mlx5_ib_sched_stop(struct mlx5_ib_sched_group *sched_group)
 
     for (i = 0; i < sched_group->num_sched; i++) {
         sched = &sched_group->scheds[i];
-        if (!sched->task || IS_ERR(sched->task)) {
-            sched->task = NULL;
+        if (!sched->workers)
             continue;
-        }
 
         wake_up_all(&sched->init_wait);
-        kthread_stop(sched->task);
-        sched->task = NULL;
+        for (worker_id = 0; worker_id < sched->worker_count; worker_id++) {
+            struct mlx5_ib_sched_worker *worker =
+                &sched->workers[worker_id];
+
+            if (!worker->task || IS_ERR(worker->task)) {
+                worker->task = NULL;
+                continue;
+            }
+            kthread_stop(worker->task);
+            worker->task = NULL;
+        }
     }
 }
 
@@ -3477,11 +3595,20 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
     // }
 
     for (i = 0; i < sched_group->num_sched; i++) {
-        for (j = 0; j < CQ_NUM; j++) {
-            if (!shared_cq[i][j])
-                continue;
-            ib_destroy_cq(shared_cq[i][j]);
-            shared_cq[i][j] = NULL;
+        int worker_id;
+        struct mlx5_ib_sched *owner_sched = &sched_group->scheds[i];
+
+        for (worker_id = 0; worker_id < owner_sched->worker_count;
+             worker_id++) {
+            struct mlx5_ib_sched_worker *worker =
+                &owner_sched->workers[worker_id];
+
+            for (j = 0; j < CQ_NUM; j++) {
+                if (!worker->shared_cq[j])
+                    continue;
+                ib_destroy_cq(worker->shared_cq[j]);
+                worker->shared_cq[j] = NULL;
+            }
         }
     }
 
@@ -3542,6 +3669,11 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
 
     sched_group->xrc_bf_cnt = 0;
 
+    for (i = 0; i < sched_group->num_sched; i++) {
+        kfree(sched_group->scheds[i].workers);
+        sched_group->scheds[i].workers = NULL;
+        sched_group->scheds[i].worker_count = 0;
+    }
     kfree(sched_group->scheds);
     sched_group->scheds = NULL;
     sched_group->num_sched = 0;
@@ -3729,6 +3861,7 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
                 srmc->ini_cb.refcnt = 0;
             srmc->idx = j;
             srmc->srmc_idx = i;
+            srmc->owner_worker = mlx5_srm_kqp_owner(sched, i);
 
             sched->srmc_tb[j] = srmc;
             sched->srmc_cnt++;
@@ -4301,11 +4434,20 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
 {
     struct srm_cb *cb;
     struct mlx5_ib_dev *dev;
+    struct mlx5_ib_sched *sched;
+    struct mlx5_ib_sched_worker *worker;
     int ret;
     struct ib_cq_init_attr cq_attr;
     struct ib_qp_init_attr init_attr;
 
     cb = &srmc->ini_cb;
+
+    if (id < 0 || id >= sched_group.num_sched)
+        return -EINVAL;
+    sched = &sched_group.scheds[id];
+    if (!sched->workers || srmc->owner_worker >= sched->worker_count)
+        return -EINVAL;
+    worker = &sched->workers[srmc->owner_worker];
 
     cb->addr_str = IP_ADDR;
     cb->port = PORT_NUM;
@@ -4372,13 +4514,17 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
     cq_attr.cqe = SQ_DEPTH;
     cq_attr.comp_vector = 0;
     // change to event?
-    if (!shared_cq[id][srmc->srmc_idx % CQ_NUM]) {
+    if (!worker->shared_cq[srmc->srmc_idx % CQ_NUM]) {
         cb->cq = ib_create_cq(cb->cm_id->device, NULL, NULL, NULL,
                               &cq_attr);
-        if (!IS_ERR(cb->cq))
-            shared_cq[id][srmc->srmc_idx % CQ_NUM] = cb->cq;
+        if (!IS_ERR(cb->cq)) {
+            worker->shared_cq[srmc->srmc_idx % CQ_NUM] = cb->cq;
+            pr_info("SRM kernel CQ sched=%d worker=%u cq_idx=%u cqe=%d\n",
+                    id, worker->worker_id,
+                    srmc->srmc_idx % CQ_NUM, cb->cq->cqe);
+        }
     } else {
-        cb->cq = shared_cq[id][srmc->srmc_idx % CQ_NUM];
+        cb->cq = worker->shared_cq[srmc->srmc_idx % CQ_NUM];
     }
     if (IS_ERR(cb->cq))
     {
