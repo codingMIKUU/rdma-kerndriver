@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/ib_mthca.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/main.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/ib_mthca.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/ib_mthca.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/ib_mthca.mod

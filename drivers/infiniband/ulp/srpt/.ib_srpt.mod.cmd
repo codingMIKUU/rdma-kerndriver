@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/ib_srpt.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/main.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/ib_srpt.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/ib_srpt.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/ib_srpt.mod

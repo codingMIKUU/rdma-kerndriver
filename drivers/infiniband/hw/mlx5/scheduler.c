@@ -1676,7 +1676,7 @@ int scheduler_polling(void *sched_data)
 
 
         /* 根据当前端到端吞吐与时延，自适应更新 LIMIT_BATCHING */
-        //update_limit_batch(sched);
+        update_limit_batch(sched);
         // for (sqb = sched_group.sq_head, qp_cnt = 0; sqb; sqb = sqb->next, qp_cnt++){
         //     end_time0 = rdtsc();
         //     elapsed_time0 = (end_time0 - start_time0)*1000000000 / cpu_frequency_hz;
@@ -2005,21 +2005,21 @@ int scheduler_polling(void *sched_data)
             // smp_rmb();  // 读内存屏障，阻止读重排
 
 
-            // if(level != 0 || lat_cnt % 2 != 0){
-            //     user_thread_idx = srm_fastrand(&polling_seed) % current_num_user_threads;
-            // }
-            // else{
-            //     //user_thread_idx = current_num_user_threads - 1;
-            //     user_thread_idx = real_num_threads - 1;
-            // }
+            if(level != 0 || lat_cnt % 2 != 0){
+                user_thread_idx = srm_fastrand(&polling_seed) % current_num_user_threads;
+            }
+            else{
+                //user_thread_idx = current_num_user_threads - 1;
+                user_thread_idx = real_num_threads - 1;
+            }
             
-            user_thread_idx = srm_fastrand(&polling_seed) % num_user_threads;
+            //user_thread_idx = srm_fastrand(&polling_seed) % current_num_user_threads;
 
 
             if(level == 0)
                 lat_cnt++;
             
-            //user_thread_idx = 0 / 16;
+            
             k = level * sched_group.num_sched + id + user_thread_idx * num_thread_qps;
 
             for (m = 0; m < current_num_user_threads;
@@ -2130,7 +2130,7 @@ int scheduler_polling(void *sched_data)
 
                 stuck_cnt = 0 ;    
                 //limit_batch controlling   
-                while (kernel_tot_db - user_tot_cqes > LIMIT_BATCHING && !kthread_should_stop()) {
+                while (user_thread_idx != real_num_threads-1 && kernel_tot_db - user_tot_cqes > LIMIT_BATCHING && !kthread_should_stop()) {
                     //uint64_t t_st = rdtsc();
                     user_tot_cqes = calc_tot_cqes(current_num_user_threads);
                     //uint64_t t_ed = rdtsc();
@@ -2298,7 +2298,7 @@ int scheduler_polling(void *sched_data)
                         //     roll_cnt++;
                         // }
 
-                        //if(user_thread_idx != real_num_threads-1)
+                        if(user_thread_idx != real_num_threads-1)
                             kernel_tot_db += delta;
                         
                         // pr_info_ratelimited("xrc_qp_idx=%d bf_idx=%d num_xrc_per_srm=%d level=%d sched_id=%d n=%d k=%d user_thread_idx=%d user_level_val=%llu kernel_level_val=%llu xrc_ctrl=%llu\n",

@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/core/rdma_ucm.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/core/ucma.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/core/rdma_ucm.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/core/rdma_ucm.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/core/ucma.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/core/rdma_ucm.mod

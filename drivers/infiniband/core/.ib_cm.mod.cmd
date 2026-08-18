@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/core/ib_cm.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/core/cm.o /home/dell/zxm/rdma-kerndriver/drivers/infiniband/core/cm_trace.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/core/ib_cm.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_cm.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/core/cm.o /root/zxm/rdma-kerndriver/drivers/infiniband/core/cm_trace.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_cm.mod

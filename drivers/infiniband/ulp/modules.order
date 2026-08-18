@@ -1,6 +1,6 @@
-/home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/ipoib/ib_ipoib.ko
-/home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/srp/ib_srp.ko
-/home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/ib_srpt.ko
-/home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser.ko
-/home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/isert/ib_isert.ko
-/home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/opa_vnic/opa_vnic.ko
+/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/ipoib/ib_ipoib.ko
+/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/srp/ib_srp.ko
+/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/ib_srpt.ko
+/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser.ko
+/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/isert/ib_isert.ko
+/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/opa_vnic/opa_vnic.ko

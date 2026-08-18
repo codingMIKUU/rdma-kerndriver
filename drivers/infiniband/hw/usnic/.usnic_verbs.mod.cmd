@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/usnic/usnic_verbs.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/usnic/main.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/usnic/usnic_verbs.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/usnic/usnic_verbs.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/usnic/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/usnic/usnic_verbs.mod

@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/efa/efa.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/efa/efa_main.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/efa/efa.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/efa/efa.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/efa/efa_main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/efa/efa.mod

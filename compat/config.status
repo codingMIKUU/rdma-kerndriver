@@ -437,10 +437,10 @@ Copyright (C) 2012 Free Software Foundation, Inc.
 This config.status script is free software; the Free Software Foundation
 gives unlimited permission to copy, distribute and modify it."
 
-ac_pwd='/home/dell/zxm/rdma-kerndriver/compat'
+ac_pwd='/root/zxm/rdma-kerndriver/compat'
 srcdir='.'
 INSTALL='/usr/bin/install -c'
-MKDIR_P='/usr/bin/mkdir -p'
+MKDIR_P='/bin/mkdir -p'
 AWK='gawk'
 test -n "$AWK" || AWK=awk
 # The default lists apply if the user does not specify any file.
@@ -620,7 +620,7 @@ S["LTLIBOBJS"]=""
 S["LIBOBJS"]=""
 S["ARCH_x86_FALSE"]="#"
 S["ARCH_x86_TRUE"]=""
-S["EXTRA_KCFLAGS"]="-include /home/dell/zxm/rdma-kerndriver/compat/config.h "
+S["EXTRA_KCFLAGS"]="-include /root/zxm/rdma-kerndriver/compat/config.h "
 S["SYMVERFILE"]="Module.symvers"
 S["RELEASE"]="5.4.133_"
 S["modulenetdir"]="$(moduledir)/net/$(PACKAGE)"
@@ -633,8 +633,8 @@ S["CONFIG_INCLUDE"]="/usr/src/linux-headers-5.4.0-86-generic/include/linux/kconf
 S["LINUX_CONFIG"]="/usr/src/linux-headers-5.4.0-86-generic/include/config/auto.conf"
 S["LINUX_OBJ"]="/usr/src/linux-headers-5.4.0-86-generic"
 S["LINUX"]="/usr/src/linux-headers-5.4.0-86-generic"
-S["EGREP"]="/usr/bin/grep -E"
-S["GREP"]="/usr/bin/grep"
+S["EGREP"]="/bin/grep -E"
+S["GREP"]="/bin/grep"
 S["CPP"]="gcc -E"
 S["OBJDUMP"]="objdump"
 S["LD"]="ld"
@@ -674,15 +674,15 @@ S["am__leading_dot"]="."
 S["SET_MAKE"]=""
 S["AWK"]="gawk"
 S["mkdir_p"]="$(MKDIR_P)"
-S["MKDIR_P"]="/usr/bin/mkdir -p"
+S["MKDIR_P"]="/bin/mkdir -p"
 S["INSTALL_STRIP_PROGRAM"]="$(install_sh) -c -s"
 S["STRIP"]="strip"
-S["install_sh"]="${SHELL} /home/dell/zxm/rdma-kerndriver/compat/config/install-sh"
-S["MAKEINFO"]="${SHELL} /home/dell/zxm/rdma-kerndriver/compat/config/missing makeinfo"
-S["AUTOHEADER"]="${SHELL} /home/dell/zxm/rdma-kerndriver/compat/config/missing autoheader"
-S["AUTOMAKE"]="${SHELL} /home/dell/zxm/rdma-kerndriver/compat/config/missing automake-1.15"
-S["AUTOCONF"]="${SHELL} /home/dell/zxm/rdma-kerndriver/compat/config/missing autoconf"
-S["ACLOCAL"]="${SHELL} /home/dell/zxm/rdma-kerndriver/compat/config/missing aclocal-1.15"
+S["install_sh"]="${SHELL} /root/zxm/rdma-kerndriver/compat/config/install-sh"
+S["MAKEINFO"]="${SHELL} /root/zxm/rdma-kerndriver/compat/config/missing makeinfo"
+S["AUTOHEADER"]="${SHELL} /root/zxm/rdma-kerndriver/compat/config/missing autoheader"
+S["AUTOMAKE"]="${SHELL} /root/zxm/rdma-kerndriver/compat/config/missing automake-1.15"
+S["AUTOCONF"]="${SHELL} /root/zxm/rdma-kerndriver/compat/config/missing autoconf"
+S["ACLOCAL"]="${SHELL} /root/zxm/rdma-kerndriver/compat/config/missing aclocal-1.15"
 S["VERSION"]="2.3"
 S["PACKAGE"]="compat_mlnx"
 S["CYGPATH_W"]="echo"

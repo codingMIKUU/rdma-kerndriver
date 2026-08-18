@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/qedr/qedr.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/qedr/main.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/qedr/qedr.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/qedr/qedr.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/qedr/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/qedr/qedr.mod

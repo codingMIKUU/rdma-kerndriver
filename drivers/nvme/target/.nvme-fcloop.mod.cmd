@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/nvme/target/nvme-fcloop.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/nvme/target/fcloop.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/nvme/target/nvme-fcloop.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/nvme/target/nvme-fcloop.mod := { echo  /root/zxm/rdma-kerndriver/drivers/nvme/target/fcloop.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/nvme/target/nvme-fcloop.mod

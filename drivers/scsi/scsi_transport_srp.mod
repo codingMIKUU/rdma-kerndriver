@@ -1,2 +1,2 @@
-/home/dell/zxm/rdma-kerndriver/drivers/scsi/scsi_transport_srp.o
+/root/zxm/rdma-kerndriver/drivers/scsi/scsi_transport_srp.o
 

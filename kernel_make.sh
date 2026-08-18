@@ -10,4 +10,4 @@ echo "modprobe start" && \
 sudo modprobe mlx5_ib && \
 echo "modprobe end" && \
 echo "bridge modules insmod start" && \
-sudo insmod /home/dell/zxm/mlx5_table_bridge/mlx5_table_bridge.ko
+sudo insmod /root/zxm/mlx5_table_bridge/mlx5_table_bridge.ko

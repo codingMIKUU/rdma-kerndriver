@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser.o /home/dell/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser_dummy.o
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser.o /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/iser/ib_iser_dummy.o

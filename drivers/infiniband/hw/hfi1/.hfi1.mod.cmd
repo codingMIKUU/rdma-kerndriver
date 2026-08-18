@@ -1,1 +1,1 @@
-cmd_/home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/hfi1/hfi1.mod := { echo  /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/hfi1/main.o;  echo; } > /home/dell/zxm/rdma-kerndriver/drivers/infiniband/hw/hfi1/hfi1.mod
+cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/hfi1/hfi1.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/hfi1/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/hfi1/hfi1.mod
