@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/compat/build/conftest.mod := { echo  /root/zxm/rdma-kerndriver/compat/build/conftest.o;  echo; } > /root/zxm/rdma-kerndriver/compat/build/conftest.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/compat/build/conftest.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/compat/build/conftest.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/compat/build/conftest.mod

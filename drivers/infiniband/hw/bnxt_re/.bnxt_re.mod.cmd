@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/bnxt_re.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/bnxt_re.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/bnxt_re.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/main.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/bnxt_re/bnxt_re.mod

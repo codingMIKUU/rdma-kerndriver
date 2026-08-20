@@ -1,2 +1,2 @@
-WARNING: modpost: missing MODULE_LICENSE() in /root/zxm/rdma-kerndriver/compat/build/conftest.o
+WARNING: modpost: missing MODULE_LICENSE() in /home/lingbo11/zxm/rdma-kerndriver/compat/build/conftest.o
 see include/linux/module.h for more information

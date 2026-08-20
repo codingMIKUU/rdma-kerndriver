@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/scsi/scsi_transport_srp.o
+/home/lingbo11/zxm/rdma-kerndriver/drivers/scsi/scsi_transport_srp.o
 

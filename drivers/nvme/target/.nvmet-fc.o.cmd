@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-fc.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-fc.o /root/zxm/rdma-kerndriver/drivers/nvme/target/fc.o
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-fc.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-fc.o /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/target/fc.o

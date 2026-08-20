@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/i40iw.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /root/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/i40iw.o /root/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/main.o
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/i40iw.o := ld -m elf_x86_64  -z max-page-size=0x200000    -r -o /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/i40iw.o /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/main.o

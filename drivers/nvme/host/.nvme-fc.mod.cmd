@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fc.mod := { echo  /root/zxm/rdma-kerndriver/drivers/nvme/host/fc.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fc.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fc.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/host/fc.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fc.mod

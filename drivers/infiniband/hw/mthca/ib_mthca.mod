@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/main.o
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/main.o
 

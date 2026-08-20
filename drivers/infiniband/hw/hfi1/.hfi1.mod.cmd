@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/hfi1/hfi1.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/hfi1/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/hfi1/hfi1.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/hfi1/hfi1.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/hfi1/main.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/hfi1/hfi1.mod

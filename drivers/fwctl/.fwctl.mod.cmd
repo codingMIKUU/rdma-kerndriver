@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/fwctl/fwctl.mod := { echo  /root/zxm/rdma-kerndriver/drivers/fwctl/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/fwctl/fwctl.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/fwctl/fwctl.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/fwctl/main.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/fwctl/fwctl.mod

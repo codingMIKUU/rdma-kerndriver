@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/net/smc/smc_diag_dummy.o
+/home/lingbo11/zxm/rdma-kerndriver/net/smc/smc_diag_dummy.o
 

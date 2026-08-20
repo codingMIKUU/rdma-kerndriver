@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/i40iw.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/i40iw.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/i40iw.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/main.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/i40iw/i40iw.mod

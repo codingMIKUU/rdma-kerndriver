@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_ucm_dummy.o
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/ib_ucm_dummy.o
 

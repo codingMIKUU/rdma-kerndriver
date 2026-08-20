@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-rdma.mod := { echo  /root/zxm/rdma-kerndriver/drivers/nvme/target/rdma.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-rdma.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-rdma.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/target/rdma.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/target/nvmet-rdma.mod

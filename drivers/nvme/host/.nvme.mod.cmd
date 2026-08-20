@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/nvme/host/nvme.mod := { echo  /root/zxm/rdma-kerndriver/drivers/nvme/host/pci.o /root/zxm/rdma-kerndriver/drivers/nvme/host/nvfs-dma.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/nvme/host/nvme.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/host/nvme.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/host/pci.o /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/host/nvfs-dma.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/host/nvme.mod

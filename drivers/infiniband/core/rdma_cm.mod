@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/infiniband/core/cma.o /root/zxm/rdma-kerndriver/drivers/infiniband/core/cma_trace.o /root/zxm/rdma-kerndriver/drivers/infiniband/core/cma_configfs.o
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/cma.o /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/cma_trace.o /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/cma_configfs.o
 

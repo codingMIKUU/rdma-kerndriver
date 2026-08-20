@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_cm.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/core/cm.o /root/zxm/rdma-kerndriver/drivers/infiniband/core/cm_trace.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_cm.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/ib_cm.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/cm.o /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/cm_trace.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/ib_cm.mod

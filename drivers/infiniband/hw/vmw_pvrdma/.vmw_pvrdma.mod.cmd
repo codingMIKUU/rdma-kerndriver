@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/main.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod

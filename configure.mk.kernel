@@ -1,5 +1,5 @@
 # Current working directory
-CWD=/root/zxm/rdma-kerndriver
+CWD=/home/lingbo11/zxm/rdma-kerndriver
 BACKPORT_INCLUDES=
 
 # Kernel level
@@ -11,7 +11,7 @@ KSRC_OBJ=/lib/modules/5.4.0-86-generic/build
 KLIB_BUILD=/lib/modules/5.4.0-86-generic/build
 prefix=/usr
 
-AUTOCONF_H=/root/zxm/rdma-kerndriver/include/generated/autoconf.h
+AUTOCONF_H=/home/lingbo11/zxm/rdma-kerndriver/include/generated/autoconf.h
 
 WITH_MAKE_PARAMS=
 

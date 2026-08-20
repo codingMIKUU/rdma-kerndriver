@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/net/mlxdevm/mlxdevm.o
+/home/lingbo11/zxm/rdma-kerndriver/net/mlxdevm/mlxdevm.o
 

@@ -1,8 +1,8 @@
-/root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_core.ko
-/root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_cm.ko
-/root/zxm/rdma-kerndriver/drivers/infiniband/core/iw_cm.ko
-/root/zxm/rdma-kerndriver/drivers/infiniband/core/rdma_cm.ko
-/root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_umad.ko
-/root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_uverbs.ko
-/root/zxm/rdma-kerndriver/drivers/infiniband/core/rdma_ucm.ko
-/root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_ucm.ko
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/ib_core.ko
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/ib_cm.ko
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/iw_cm.ko
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/rdma_cm.ko
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/ib_umad.ko
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/ib_uverbs.ko
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/rdma_ucm.ko
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/ib_ucm.ko

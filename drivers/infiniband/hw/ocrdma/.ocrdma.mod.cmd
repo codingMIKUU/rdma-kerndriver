@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/ocrdma/ocrdma.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/ocrdma/ocrdma.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/ocrdma/ocrdma.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/ocrdma/ocrdma.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/ocrdma/ocrdma.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/ocrdma/ocrdma.mod

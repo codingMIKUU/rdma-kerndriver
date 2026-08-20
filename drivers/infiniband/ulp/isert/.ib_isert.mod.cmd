@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/isert/ib_isert.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/isert/ib_isert.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/isert/ib_isert.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/ulp/isert/ib_isert.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/ulp/isert/ib_isert.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/ulp/isert/ib_isert.mod

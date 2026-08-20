@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_umad.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/core/user_mad.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/core/ib_umad.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/ib_umad.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/user_mad.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/core/ib_umad.mod

@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxsw/spectrum_main.o
+/home/lingbo11/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxsw/spectrum_main.o
 

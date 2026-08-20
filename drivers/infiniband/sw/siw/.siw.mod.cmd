@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/siw.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/siw.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/siw.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/main.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/sw/siw/siw.mod

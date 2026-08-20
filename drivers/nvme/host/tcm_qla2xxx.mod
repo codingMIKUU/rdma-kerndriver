@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/nvme/host/tcm_qla2xxx_dummy.o
+/home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/host/tcm_qla2xxx_dummy.o
 

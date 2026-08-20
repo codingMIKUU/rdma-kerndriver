@@ -1,2 +1,2 @@
-/root/zxm/rdma-kerndriver/drivers/infiniband/hw/ocrdma/ocrdma.o
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/ocrdma/ocrdma.o
 

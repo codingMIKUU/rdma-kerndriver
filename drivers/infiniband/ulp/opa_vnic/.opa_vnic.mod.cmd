@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/opa_vnic/opa_vnic.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/opa_vnic/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/opa_vnic/opa_vnic.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/ulp/opa_vnic/opa_vnic.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/ulp/opa_vnic/main.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/ulp/opa_vnic/opa_vnic.mod

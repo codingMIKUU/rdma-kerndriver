@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fabrics.mod := { echo  /root/zxm/rdma-kerndriver/drivers/nvme/host/fabrics.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fabrics.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fabrics.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/host/fabrics.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/host/nvme-fabrics.mod

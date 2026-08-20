@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/ib_srpt.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/ib_srpt.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/ib_srpt.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/main.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/ulp/srpt/ib_srpt.mod

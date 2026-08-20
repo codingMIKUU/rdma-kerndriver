@@ -58,7 +58,7 @@ module_param_named(srm_sched_cpu_num, srm_sched_cpu_num, uint, 0444);
 MODULE_PARM_DESC(srm_sched_cpu_num,
                  "Number of hollow RC scheduler CPUs");
 
-static unsigned int srm_sched_cpu_base = 8;
+static unsigned int srm_sched_cpu_base = 280;
 module_param_named(srm_sched_cpu_base, srm_sched_cpu_base, uint, 0444);
 MODULE_PARM_DESC(srm_sched_cpu_base,
                  "First CPU used by hollow RC scheduler workers");
@@ -1400,7 +1400,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 256;
+const int num_kqps = 32;
 
 static inline int mlx5_srm_effective_kqps(void)
 {
@@ -2781,7 +2781,7 @@ int scheduler_polling(void *sched_data)
                 msleep(0);
             }
 
-            {
+            if(i%4==0){
                 u64 poll_start = srm_stats_enable ? ktime_get_ns() : 0;
 
                 ret = poll_srmc_inline(sched, sq_ctrl_pool, pre_srmcs,
@@ -3683,16 +3683,42 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
 }
 int mlx5_ib_server_init(struct mlx5_ib_server *server)
 {
+    u32 server_cpu;
+    int ret;
+
+    if (srm_sched_cpu_base >= nr_cpu_ids ||
+        srm_sched_cpu_num >= nr_cpu_ids - srm_sched_cpu_base) {
+        pr_err("hollow RC server CPU base=%u + sched_cpus=%u is out of range\n",
+               srm_sched_cpu_base, srm_sched_cpu_num);
+        return -EINVAL;
+    }
+    server_cpu = srm_sched_cpu_base + srm_sched_cpu_num;
+    if (!cpu_online(server_cpu)) {
+        pr_err("hollow RC server CPU %u is not online\n", server_cpu);
+        return -EINVAL;
+    }
+
     atomic_set(&server->conn_tasks, 0);
     init_waitqueue_head(&server->conn_wait);
     WRITE_ONCE(server->stopping, false);
     mlx5_ib_srm_cb_init_waitqueue(&server->server_cb);
-    server->task = kthread_run(mlx5_sched_run_server, &server->server_cb, "server thread");
+    server->task = kthread_create(mlx5_sched_run_server,
+                                  &server->server_cb,
+                                  "server thread");
     if (IS_ERR(server->task))
     {
-        DEBUG_LOG("Failed to create server thread\n");
-        return PTR_ERR(server->task);
+        ret = PTR_ERR(server->task);
+        server->task = NULL;
+        WRITE_ONCE(server->server_cb.sem_initialized, false);
+        pr_err("Failed to create hollow RC server thread: %d\n", ret);
+        return ret;
     }
+
+    kthread_bind(server->task, server_cpu);
+    wake_up_process(server->task);
+    pr_info("hollow RC server thread bound to CPU %u (scheduler CPUs %u-%u)\n",
+            server_cpu, srm_sched_cpu_base,
+            srm_sched_cpu_base + srm_sched_cpu_num - 1);
     return 0;
 }
 void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_group *sched_group)

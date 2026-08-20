@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxsw/mlxsw_spectrum.mod := { echo  /root/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxsw/spectrum_main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxsw/mlxsw_spectrum.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxsw/mlxsw_spectrum.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxsw/spectrum_main.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/net/ethernet/mellanox/mlxsw/mlxsw_spectrum.mod

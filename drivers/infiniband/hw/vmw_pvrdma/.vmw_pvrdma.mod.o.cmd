@@ -1,22 +1,22 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o := gcc -Wp,-MD,/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/.vmw_pvrdma.mod.o.d  -nostdinc -isystem /usr/lib/gcc/x86_64-linux-gnu/9/include -D__OFED_BUILD__ -D__KERNEL__ -w  -include /lib/modules/5.4.0-86-generic/build/include/generated/autoconf.h -include /lib/modules/5.4.0-86-generic/build/include/linux/kconfig.h -include /root/zxm/rdma-kerndriver/include/linux/compat-2.6.h  -include /root/zxm/rdma-kerndriver/drivers/infiniband/debug/mtrack.h  -I/root/zxm/rdma-kerndriver/include -I/root/zxm/rdma-kerndriver/include/uapi -I/root/zxm/rdma-kerndriver/drivers/infiniband/debug   -I./arch/x86/include -Iarch/x86/include/generated -Iinclude -I./arch/x86/include/uapi -Iarch/x86/include/generated/uapi -I./include -I./include/uapi -Iinclude/generated/uapi  -I./arch/x86/include -Iarch/x86/include/generated  -include ./include/linux/compiler_types.h -D__KERNEL__ -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs -fno-strict-aliasing -fno-common -fshort-wchar -fno-PIE -Werror=implicit-function-declaration -Werror=implicit-int -Werror=return-type -Wno-format-security -std=gnu89 -mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx -fcf-protection=none -m64 -falign-jumps=1 -falign-loops=1 -mno-80387 -mno-fp-ret-in-387 -mpreferred-stack-boundary=3 -mskip-rax-setup -mtune=generic -mno-red-zone -mcmodel=kernel -DCONFIG_X86_X32_ABI -DCONFIG_AS_CFI=1 -DCONFIG_AS_CFI_SIGNAL_FRAME=1 -DCONFIG_AS_CFI_SECTIONS=1 -DCONFIG_AS_SSSE3=1 -DCONFIG_AS_AVX=1 -DCONFIG_AS_AVX2=1 -DCONFIG_AS_AVX512=1 -DCONFIG_AS_SHA1_NI=1 -DCONFIG_AS_SHA256_NI=1 -Wno-sign-compare -fno-asynchronous-unwind-tables -mindirect-branch=thunk-extern -mindirect-branch-register -fno-jump-tables -fno-delete-null-pointer-checks -Wno-frame-address -Wno-format-truncation -Wno-format-overflow -Wno-address-of-packed-member -O2 --param=allow-store-data-races=0 -Wframe-larger-than=1024 -fstack-protector-strong -Wimplicit-fallthrough -Wno-unused-but-set-variable -Wno-unused-const-variable -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-var-tracking-assignments -g -pg -mrecord-mcount -mfentry -DCC_USING_FENTRY -flive-patching=inline-clone -Wdeclaration-after-statement -Wvla -Wno-pointer-sign -Wno-stringop-truncation -Wno-array-bounds -Wno-stringop-overflow -Wno-restrict -Wno-maybe-uninitialized -fno-strict-overflow -fno-merge-all-constants -fmerge-constants -fno-stack-check -fconserve-stack -Werror=date-time -Werror=incompatible-pointer-types -Werror=designated-init -fmacro-prefix-map=./= -Wno-packed-not-aligned -Wno-date-time  -DMODULE  -DKBUILD_BASENAME='"vmw_pvrdma.mod"' -DKBUILD_MODNAME='"vmw_pvrdma"' -c -o /root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o /root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.c
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o := gcc -Wp,-MD,/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/.vmw_pvrdma.mod.o.d  -nostdinc -isystem /usr/lib/gcc/x86_64-linux-gnu/9/include -D__OFED_BUILD__ -D__KERNEL__ -w  -include /lib/modules/5.4.0-86-generic/build/include/generated/autoconf.h -include /lib/modules/5.4.0-86-generic/build/include/linux/kconfig.h -include /home/lingbo11/zxm/rdma-kerndriver/include/linux/compat-2.6.h  -include /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/debug/mtrack.h  -I/home/lingbo11/zxm/rdma-kerndriver/include -I/home/lingbo11/zxm/rdma-kerndriver/include/uapi -I/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/debug   -I./arch/x86/include -Iarch/x86/include/generated -Iinclude -I./arch/x86/include/uapi -Iarch/x86/include/generated/uapi -I./include -I./include/uapi -Iinclude/generated/uapi  -I./arch/x86/include -Iarch/x86/include/generated  -include ./include/linux/compiler_types.h -D__KERNEL__ -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs -fno-strict-aliasing -fno-common -fshort-wchar -fno-PIE -Werror=implicit-function-declaration -Werror=implicit-int -Werror=return-type -Wno-format-security -std=gnu89 -mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx -fcf-protection=none -m64 -falign-jumps=1 -falign-loops=1 -mno-80387 -mno-fp-ret-in-387 -mpreferred-stack-boundary=3 -mskip-rax-setup -mtune=generic -mno-red-zone -mcmodel=kernel -DCONFIG_X86_X32_ABI -DCONFIG_AS_CFI=1 -DCONFIG_AS_CFI_SIGNAL_FRAME=1 -DCONFIG_AS_CFI_SECTIONS=1 -DCONFIG_AS_SSSE3=1 -DCONFIG_AS_AVX=1 -DCONFIG_AS_AVX2=1 -DCONFIG_AS_AVX512=1 -DCONFIG_AS_SHA1_NI=1 -DCONFIG_AS_SHA256_NI=1 -Wno-sign-compare -fno-asynchronous-unwind-tables -mindirect-branch=thunk-extern -mindirect-branch-register -fno-jump-tables -fno-delete-null-pointer-checks -Wno-frame-address -Wno-format-truncation -Wno-format-overflow -Wno-address-of-packed-member -O2 --param=allow-store-data-races=0 -Wframe-larger-than=1024 -fstack-protector-strong -Wimplicit-fallthrough -Wno-unused-but-set-variable -Wno-unused-const-variable -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-var-tracking-assignments -g -pg -mrecord-mcount -mfentry -DCC_USING_FENTRY -flive-patching=inline-clone -Wdeclaration-after-statement -Wvla -Wno-pointer-sign -Wno-stringop-truncation -Wno-array-bounds -Wno-stringop-overflow -Wno-restrict -Wno-maybe-uninitialized -fno-strict-overflow -fno-merge-all-constants -fmerge-constants -fno-stack-check -fconserve-stack -Werror=date-time -Werror=incompatible-pointer-types -Werror=designated-init -fmacro-prefix-map=./= -Wno-packed-not-aligned -Wno-date-time  -DMODULE  -DKBUILD_BASENAME='"vmw_pvrdma.mod"' -DKBUILD_MODNAME='"vmw_pvrdma"' -c -o /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.c
 
-source_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o := /root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.c
+source_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o := /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.c
 
-deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o := \
+deps_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o := \
     $(wildcard include/config/module/unload.h) \
     $(wildcard include/config/retpoline.h) \
   /lib/modules/5.4.0-86-generic/build/include/linux/kconfig.h \
     $(wildcard include/config/cpu/big/endian.h) \
     $(wildcard include/config/booger.h) \
     $(wildcard include/config/foo.h) \
-  /root/zxm/rdma-kerndriver/include/linux/compat-2.6.h \
-  /root/zxm/rdma-kerndriver/include/linux/../../compat/config.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/compat-2.6.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/../../compat/config.h \
   include/generated/uapi/linux/version.h \
-  /root/zxm/rdma-kerndriver/include/linux/kconfig.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/kconfig.h \
   include/linux/kconfig.h \
   include/uapi/linux/if.h \
   include/uapi/linux/libc-compat.h \
-  /root/zxm/rdma-kerndriver/include/linux/types.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/types.h \
   include/linux/types.h \
     $(wildcard include/config/have/uid16.h) \
     $(wildcard include/config/uid16.h) \
@@ -32,7 +32,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/asm-generic/bitsperlong.h \
   include/uapi/asm-generic/bitsperlong.h \
   include/uapi/linux/posix_types.h \
-  /root/zxm/rdma-kerndriver/include/linux/stddef.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/stddef.h \
   include/linux/stddef.h \
   include/uapi/linux/stddef.h \
   include/linux/compiler_types.h \
@@ -40,9 +40,9 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/enable/must/check.h) \
     $(wildcard include/config/optimize/inlining.h) \
     $(wildcard include/config/cc/has/asm/inline.h) \
-  /root/zxm/rdma-kerndriver/include/linux/compiler_attributes.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/compiler_attributes.h \
   include/linux/compiler_attributes.h \
-  /root/zxm/rdma-kerndriver/include/linux/compiler-gcc.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/compiler-gcc.h \
   include/linux/compiler-gcc.h \
     $(wildcard include/config/arm64.h) \
     $(wildcard include/config/arch/use/builtin/bswap.h) \
@@ -61,7 +61,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/uio.h \
     $(wildcard include/config/arch/has/uaccess/flushcache.h) \
     $(wildcard include/config/arch/has/uaccess/mcsafe.h) \
-  /root/zxm/rdma-kerndriver/include/linux/kernel.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/kernel.h \
   include/linux/kernel.h \
     $(wildcard include/config/preempt/voluntary.h) \
     $(wildcard include/config/debug/atomic/sleep.h) \
@@ -76,7 +76,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/uapi/linux/limits.h \
   include/linux/linkage.h \
   include/linux/stringify.h \
-  /root/zxm/rdma-kerndriver/include/linux/export.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/export.h \
   include/linux/export.h \
     $(wildcard include/config/modversions.h) \
     $(wildcard include/config/module/rel/crcs.h) \
@@ -84,7 +84,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/modules.h) \
     $(wildcard include/config/trim/unused/ksyms.h) \
     $(wildcard include/config/unused/symbols.h) \
-  /root/zxm/rdma-kerndriver/include/linux/compiler.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/compiler.h \
   include/linux/compiler.h \
     $(wildcard include/config/trace/branch/profiling.h) \
     $(wildcard include/config/profile/all/branches.h) \
@@ -103,9 +103,9 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/kasan-checks.h \
   arch/x86/include/asm/linkage.h \
     $(wildcard include/config/x86/alignment/16.h) \
-  /root/zxm/rdma-kerndriver/include/linux/bitops.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/bitops.h \
   include/linux/bitops.h \
-  /root/zxm/rdma-kerndriver/include/linux/bits.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/bits.h \
   include/linux/bits.h \
   include/linux/const.h \
   include/uapi/linux/const.h \
@@ -144,7 +144,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   arch/x86/include/uapi/asm/swab.h \
   include/linux/byteorder/generic.h \
   include/asm-generic/bitops/ext2-atomic-setbit.h \
-  /root/zxm/rdma-kerndriver/include/linux/log2.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/log2.h \
   include/linux/log2.h \
     $(wildcard include/config/arch/has/ilog2/u32.h) \
     $(wildcard include/config/arch/has/ilog2/u64.h) \
@@ -161,7 +161,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/init.h \
     $(wildcard include/config/strict/kernel/rwx.h) \
     $(wildcard include/config/strict/module/rwx.h) \
-  /root/zxm/rdma-kerndriver/include/linux/kern_levels.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/kern_levels.h \
   include/linux/kern_levels.h \
   include/linux/cache.h \
     $(wildcard include/config/arch/has/cache/line/size.h) \
@@ -176,7 +176,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/jump_label.h \
     $(wildcard include/config/have/arch/jump/label/relative.h) \
   arch/x86/include/asm/jump_label.h \
-  /root/zxm/rdma-kerndriver/include/linux/build_bug.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/build_bug.h \
   include/linux/build_bug.h \
   arch/x86/include/asm/div64.h \
   include/asm-generic/div64.h \
@@ -189,8 +189,8 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/bug/on/data/corruption.h) \
   arch/x86/include/asm/bug.h \
     $(wildcard include/config/debug/bugverbose.h) \
-  /root/zxm/rdma-kerndriver/include/asm-generic/bug.h \
-  /root/zxm/rdma-kerndriver/include/asm-generic/../../compat/config.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/asm-generic/bug.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/asm-generic/../../compat/config.h \
   include/asm-generic/bug.h \
     $(wildcard include/config/bug.h) \
     $(wildcard include/config/generic/bug/relative/pointers.h) \
@@ -308,9 +308,9 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/cpumask/offstack.h) \
     $(wildcard include/config/hotplug/cpu.h) \
     $(wildcard include/config/debug/per/cpu/maps.h) \
-  /root/zxm/rdma-kerndriver/include/linux/bitmap.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/bitmap.h \
   include/linux/bitmap.h \
-  /root/zxm/rdma-kerndriver/include/linux/string.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/string.h \
   include/linux/string.h \
     $(wildcard include/config/binary/printf.h) \
     $(wildcard include/config/fortify/source.h) \
@@ -348,13 +348,13 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/crypto/hash.h \
   include/linux/crypto.h \
     $(wildcard include/config/crypto/stats.h) \
-  /root/zxm/rdma-kerndriver/include/linux/list.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/list.h \
   include/linux/list.h \
     $(wildcard include/config/debug/list.h) \
   include/linux/poison.h \
     $(wildcard include/config/illegal/pointer/value.h) \
     $(wildcard include/config/page/poisoning/zero.h) \
-  /root/zxm/rdma-kerndriver/include/linux/slab.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/slab.h \
   include/linux/slab.h \
     $(wildcard include/config/debug/slab.h) \
     $(wildcard include/config/debug/objects.h) \
@@ -366,7 +366,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/slob.h) \
     $(wildcard include/config/zone/dma.h) \
     $(wildcard include/config/numa.h) \
-  /root/zxm/rdma-kerndriver/include/linux/gfp.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/gfp.h \
   include/linux/gfp.h \
     $(wildcard include/config/lockdep.h) \
     $(wildcard include/config/highmem.h) \
@@ -413,7 +413,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/asm-generic/mmiowb.h \
     $(wildcard include/config/mmiowb.h) \
   include/linux/spinlock_types.h \
-  /root/zxm/rdma-kerndriver/include/linux/lockdep.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/lockdep.h \
   include/linux/lockdep.h \
     $(wildcard include/config/lock/stat.h) \
   include/linux/rwlock_types.h \
@@ -460,7 +460,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/numa.h \
     $(wildcard include/config/nodes/shift.h) \
   include/linux/seqlock.h \
-  /root/zxm/rdma-kerndriver/include/linux/nodemask.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/nodemask.h \
   include/linux/nodemask.h \
   include/linux/pageblock-flags.h \
     $(wildcard include/config/hugetlb/page.h) \
@@ -485,9 +485,9 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/auxvec.h \
   include/uapi/linux/auxvec.h \
   arch/x86/include/uapi/asm/auxvec.h \
-  /root/zxm/rdma-kerndriver/include/linux/rbtree.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/rbtree.h \
   include/linux/rbtree.h \
-  /root/zxm/rdma-kerndriver/include/linux/rcupdate.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/rcupdate.h \
   include/linux/rcupdate.h \
     $(wildcard include/config/preempt/rcu.h) \
     $(wildcard include/config/rcu/stall/common.h) \
@@ -544,7 +544,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/x86/tsc.h) \
   include/linux/jiffies.h \
   include/generated/timeconst.h \
-  /root/zxm/rdma-kerndriver/include/linux/timekeeping.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/timekeeping.h \
   include/linux/timekeeping.h \
   include/linux/timekeeping32.h \
   include/linux/debugobjects.h \
@@ -598,8 +598,8 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/asm-generic/topology.h \
   arch/x86/include/asm/realmode.h \
     $(wildcard include/config/acpi/sleep.h) \
-  /root/zxm/rdma-kerndriver/include/asm/io.h \
-  /root/zxm/rdma-kerndriver/include/asm/../../compat/config.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/asm/io.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/asm/../../compat/config.h \
   arch/x86/include/asm/io.h \
     $(wildcard include/config/mtrr.h) \
     $(wildcard include/config/x86/pat.h) \
@@ -619,10 +619,10 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/indirect/pio.h) \
   include/linux/fwnode.h \
   include/linux/vmalloc.h \
-  /root/zxm/rdma-kerndriver/include/linux/llist.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/llist.h \
   include/linux/llist.h \
     $(wildcard include/config/arch/have/nmi/safe/cmpxchg.h) \
-  /root/zxm/rdma-kerndriver/include/linux/overflow.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/overflow.h \
   include/linux/overflow.h \
   arch/x86/include/uapi/asm/vsyscall.h \
   include/asm-generic/fixmap.h \
@@ -650,9 +650,9 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/percpu-refcount.h \
   include/linux/kasan.h \
     $(wildcard include/config/kasan/generic.h) \
-  /root/zxm/rdma-kerndriver/include/linux/uaccess.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/uaccess.h \
   include/linux/uaccess.h \
-  /root/zxm/rdma-kerndriver/include/linux/sched.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/sched.h \
   include/linux/sched.h \
     $(wildcard include/config/virt/cpu/accounting/native.h) \
     $(wildcard include/config/sched/info.h) \
@@ -698,10 +698,10 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/debug/rseq.h) \
   include/uapi/linux/sched.h \
   include/linux/pid.h \
-  /root/zxm/rdma-kerndriver/include/linux/rculist.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/rculist.h \
   include/linux/rculist.h \
     $(wildcard include/config/prove/rcu/list.h) \
-  /root/zxm/rdma-kerndriver/include/linux/refcount.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/refcount.h \
   include/linux/refcount.h \
     $(wildcard include/config/refcount/full.h) \
   arch/x86/include/asm/refcount.h \
@@ -778,7 +778,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/uapi/linux/uio.h \
   include/uapi/linux/socket.h \
   include/uapi/linux/hdlc/ioctl.h \
-  /root/zxm/rdma-kerndriver/include/linux/compat_autoconf.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/compat_autoconf.h \
     $(wildcard include/config/compat/if/iscsi/scsi/req.h) \
     $(wildcard include/config/compat/scsi/target/unblock.h) \
     $(wildcard include/config/compat/eth/hw/addr/random.h) \
@@ -862,7 +862,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/compat/is/dcbnl/ops/const.h) \
     $(wildcard include/config/compat/tc/prio/is/major.h) \
     $(wildcard include/config/mlx5/tc/ct.h) \
-  /root/zxm/rdma-kerndriver/include/linux/module.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/module.h \
     $(wildcard include/config/dtrace.h) \
     $(wildcard include/config/ctf.h) \
   include/linux/module.h \
@@ -876,7 +876,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/stat.h \
   arch/x86/include/uapi/asm/stat.h \
   include/uapi/linux/stat.h \
-  /root/zxm/rdma-kerndriver/include/linux/kmod.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/kmod.h \
     $(wildcard include/config/mlnx/block/request.h) \
   include/linux/kmod.h \
   include/linux/umh.h \
@@ -896,19 +896,19 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/kobject.h \
     $(wildcard include/config/uevent/helper.h) \
     $(wildcard include/config/debug/kobject/release.h) \
-  /root/zxm/rdma-kerndriver/include/linux/sysfs.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/sysfs.h \
   include/linux/sysfs.h \
   include/linux/kernfs.h \
     $(wildcard include/config/kernfs.h) \
-  /root/zxm/rdma-kerndriver/include/linux/idr.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/idr.h \
   include/linux/idr.h \
-  /root/zxm/rdma-kerndriver/include/linux/radix-tree.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/radix-tree.h \
   include/linux/radix-tree.h \
-  /root/zxm/rdma-kerndriver/include/linux/xarray.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/xarray.h \
     $(wildcard include/config/xarray/multi.h) \
   include/linux/xarray.h \
   include/linux/kobject_ns.h \
-  /root/zxm/rdma-kerndriver/include/linux/kref.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/kref.h \
   include/linux/kref.h \
   include/linux/moduleparam.h \
     $(wildcard include/config/alpha.h) \
@@ -946,10 +946,10 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/modules/use/elf/rel.h) \
     $(wildcard include/config/modules/use/elf/rela.h) \
   arch/x86/include/asm/orc_types.h \
-  /root/zxm/rdma-kerndriver/drivers/infiniband/debug/mtrack.h \
+  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/debug/mtrack.h \
     $(wildcard include/config/generic/ioremap.h) \
     $(wildcard include/config/ppc.h) \
-  /root/zxm/rdma-kerndriver/drivers/infiniband/debug/memtrack.h \
+  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/debug/memtrack.h \
   include/linux/io.h \
     $(wildcard include/config/have/arch/huge/vmap.h) \
   include/linux/random.h \
@@ -975,7 +975,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   arch/x86/include/asm/pgtable-invert.h \
   include/asm-generic/pgtable.h \
     $(wildcard include/config/x86/espfix64.h) \
-  /root/zxm/rdma-kerndriver/include/linux/mm.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/mm.h \
   include/linux/mm.h \
     $(wildcard include/config/have/arch/mmap/rnd/bits.h) \
     $(wildcard include/config/have/arch/mmap/rnd/compat/bits.h) \
@@ -1004,7 +1004,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/arch/stackwalk.h) \
     $(wildcard include/config/have/reliable/stacktrace.h) \
   include/linux/stackdepot.h \
-  /root/zxm/rdma-kerndriver/include/linux/page_ref.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/page_ref.h \
   include/linux/page_ref.h \
     $(wildcard include/config/debug/page/ref.h) \
   include/linux/memremap.h \
@@ -1014,7 +1014,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/huge_mm.h \
   include/linux/sched/coredump.h \
     $(wildcard include/config/core/dump/default/elf/headers.h) \
-  /root/zxm/rdma-kerndriver/include/linux/fs.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/fs.h \
   include/linux/fs.h \
     $(wildcard include/config/read/only/thp/for/fs.h) \
     $(wildcard include/config/fs/posix/acl.h) \
@@ -1059,7 +1059,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/rcuwait.h \
   include/linux/rcu_sync.h \
   include/linux/delayed_call.h \
-  /root/zxm/rdma-kerndriver/include/linux/uuid.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/uuid.h \
   include/linux/uuid.h \
   include/uapi/linux/uuid.h \
   include/linux/errseq.h \
@@ -1085,14 +1085,14 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/vm_event_item.h \
     $(wildcard include/config/memory/balloon.h) \
     $(wildcard include/config/balloon/compaction.h) \
-  /root/zxm/rdma-kerndriver/include/linux/scatterlist.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/scatterlist.h \
   include/linux/scatterlist.h \
     $(wildcard include/config/need/sg/dma/length.h) \
     $(wildcard include/config/debug/sg.h) \
     $(wildcard include/config/sgl/alloc.h) \
     $(wildcard include/config/arch/no/sg/chain.h) \
     $(wildcard include/config/sg/pool.h) \
-  /root/zxm/rdma-kerndriver/include/linux/skbuff.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/skbuff.h \
   include/linux/skbuff.h \
     $(wildcard include/config/nf/conntrack.h) \
     $(wildcard include/config/bridge/netfilter.h) \
@@ -1115,7 +1115,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/nf/tables.h) \
     $(wildcard include/config/ip/vs.h) \
   include/linux/bvec.h \
-  /root/zxm/rdma-kerndriver/include/linux/net.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/net.h \
   include/linux/net.h \
   include/uapi/linux/net.h \
   include/linux/textsearch.h \
@@ -1132,7 +1132,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/arch/has/setup/dma/ops.h) \
     $(wildcard include/config/arch/has/teardown/dma/ops.h) \
     $(wildcard include/config/need/dma/map/state.h) \
-  /root/zxm/rdma-kerndriver/include/linux/device.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/device.h \
   include/linux/device.h \
     $(wildcard include/config/debug/devres.h) \
     $(wildcard include/config/generic/msi/irq/domain.h) \
@@ -1163,13 +1163,13 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   arch/x86/include/asm/swiotlb.h \
   include/linux/swiotlb.h \
   include/linux/dma-contiguous.h \
-  /root/zxm/rdma-kerndriver/include/linux/netdev_features.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/netdev_features.h \
   include/linux/netdev_features.h \
   include/linux/sched/clock.h \
     $(wildcard include/config/have/unstable/sched/clock.h) \
     $(wildcard include/config/irq/time/accounting.h) \
-  /root/zxm/rdma-kerndriver/include/net/flow_dissector.h \
-  /root/zxm/rdma-kerndriver/include/net/../../compat/config.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/net/flow_dissector.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/net/../../compat/config.h \
   include/net/flow_dissector.h \
   include/linux/in6.h \
   include/uapi/linux/in6.h \
@@ -1181,7 +1181,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/net/flow.h \
   include/linux/netfilter/nf_conntrack_common.h \
   include/uapi/linux/netfilter/nf_conntrack_common.h \
-  /root/zxm/rdma-kerndriver/include/linux/pci.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/pci.h \
   include/linux/pci.h \
     $(wildcard include/config/pci/iov.h) \
     $(wildcard include/config/pcieaer.h) \
@@ -1198,9 +1198,9 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
     $(wildcard include/config/acpi/mcfg.h) \
     $(wildcard include/config/hotplug/pci.h) \
     $(wildcard include/config/eeh.h) \
-  /root/zxm/rdma-kerndriver/include/linux/mod_devicetable.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/mod_devicetable.h \
   include/uapi/linux/mei.h \
-  /root/zxm/rdma-kerndriver/include/linux/interrupt.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/interrupt.h \
   include/linux/interrupt.h \
     $(wildcard include/config/irq/forced/threading.h) \
     $(wildcard include/config/generic/irq/probe.h) \
@@ -1219,7 +1219,7 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/asm-generic/sections.h \
   include/linux/resource_ext.h \
   include/uapi/linux/pci.h \
-  /root/zxm/rdma-kerndriver/include/linux/pci_regs.h \
+  /home/lingbo11/zxm/rdma-kerndriver/include/linux/pci_regs.h \
   include/uapi/linux/pci_regs.h \
   include/linux/pci_ids.h \
   include/linux/dmapool.h \
@@ -1238,6 +1238,6 @@ deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o
   include/linux/vermagic.h \
   include/generated/utsrelease.h \
 
-/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o: $(deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o)
+/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o: $(deps_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o)
 
-$(deps_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o):
+$(deps_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/vmw_pvrdma/vmw_pvrdma.mod.o):

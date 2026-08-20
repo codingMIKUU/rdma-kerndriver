@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/nvme/target/nvme-loop.mod := { echo  /root/zxm/rdma-kerndriver/drivers/nvme/target/loop.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/nvme/target/nvme-loop.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/target/nvme-loop.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/target/loop.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/nvme/target/nvme-loop.mod

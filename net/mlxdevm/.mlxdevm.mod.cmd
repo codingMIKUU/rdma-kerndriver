@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/net/mlxdevm/mlxdevm.mod := { echo  /root/zxm/rdma-kerndriver/net/mlxdevm/mlxdevm.o;  echo; } > /root/zxm/rdma-kerndriver/net/mlxdevm/mlxdevm.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/net/mlxdevm/mlxdevm.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/net/mlxdevm/mlxdevm.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/net/mlxdevm/mlxdevm.mod

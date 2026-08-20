@@ -1,1 +1,1 @@
-cmd_/root/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/ib_mthca.mod := { echo  /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/main.o;  echo; } > /root/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/ib_mthca.mod
+cmd_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/ib_mthca.mod := { echo  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/main.o;  echo; } > /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/mthca/ib_mthca.mod
