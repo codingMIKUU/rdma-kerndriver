@@ -57,6 +57,13 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
 #define MLX5_SRM_ENABLE_DB_BATCH_LOG 1
 #define MLX5_SRM_DB_BATCH_LOG_INTERVAL (1ULL << 20)
 
+/*
+ * Experimental shared-SQ ready-counter fast path.  The matching switch in
+ * rdma-core/providers/mlx5/mlx5.h must also be enabled.  Keep this disabled by
+ * default: ready_idx is a multi-producer atomic hot spot when enabled.
+ */
+#define MLX5_SRM_ENABLE_READY_FASTPATH 1
+
 static u64 LIMIT_BATCHING = 1000;
 #define DEBUG_LOG \
     if (debug)    \
@@ -77,7 +84,8 @@ struct srm_qp_entry{
 
 struct mlx5_sq_ctrl_page {
     __u64 resv_idx;
-    __u8 resv_pad[56];
+    __u64 ready_idx;
+    __u8 resv_pad[48];
     __u64 cons_idx;
     __u8 cons_pad[56];
 } CACHELINE_ALIGNED_USER;

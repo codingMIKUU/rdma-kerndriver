@@ -38,7 +38,6 @@ __used __section(__versions) = {
 	{ 0x6c59aa8d, "mlx5_lag_is_active" },
 	{ 0x4ef31583, "rdma_nl_put_driver_string" },
 	{ 0xeb233a45, "__kmalloc" },
-	{ 0xf9a482f9, "msleep" },
 	{ 0xfcf72b8, "mlx5_eq_destroy_generic" },
 	{ 0xd0c07a29, "mlx5_alloc_bfreg" },
 	{ 0x1ed8b599, "__x86_indirect_thunk_r8" },
@@ -58,6 +57,7 @@ __used __section(__versions) = {
 	{ 0x50c1938, "rdma_restrack_put" },
 	{ 0x2d229a14, "mlx5_qp_debugfs_cleanup" },
 	{ 0x7aa1756e, "kvfree" },
+	{ 0x5ab5b891, "param_ops_int" },
 	{ 0x33f1176a, "ib_umem_copy_from" },
 	{ 0x31d7d67e, "mlx5_core_modify_cq_moderation" },
 	{ 0xdf0f75c6, "eventfd_signal" },
@@ -158,6 +158,7 @@ __used __section(__versions) = {
 	{ 0x3c3ff9fd, "sprintf" },
 	{ 0x638c6409, "debugfs_remove_recursive" },
 	{ 0x14518505, "ib_wc_status_msg" },
+	{ 0x96bcdfb8, "__alloc_pages_nodemask" },
 	{ 0xb421a321, "pv_ops" },
 	{ 0x745a981, "xa_erase" },
 	{ 0x296cb509, "__xa_insert" },
@@ -314,7 +315,9 @@ __used __section(__versions) = {
 	{ 0x29e24a1b, "rdma_resolve_route" },
 	{ 0x9cc8a234, "mlx5_core_create_tis" },
 	{ 0xd88aa32e, "__free_pages" },
+	{ 0x6ab9b4f6, "kmem_cache_alloc_node_trace" },
 	{ 0xd397ec5, "mlx5_eq_notifier_register" },
+	{ 0x618911fc, "numa_node" },
 	{ 0xc3762aec, "mempool_alloc" },
 	{ 0xac053a33, "pcie_relaxed_ordering_enabled" },
 	{ 0xaf2350f9, "mlx5_debug_qp_remove" },
@@ -363,11 +366,13 @@ __used __section(__versions) = {
 	{ 0x3b67ff49, "pci_unregister_driver" },
 	{ 0x24381090, "mlx5_core_query_rq" },
 	{ 0xb3a666c0, "kmem_cache_alloc_trace" },
+	{ 0x944c43f, "node_states" },
 	{ 0xa897e3e7, "mempool_free" },
 	{ 0xdbf17652, "_raw_spin_lock" },
 	{ 0x3596aaa0, "flow_resources_alloc" },
 	{ 0x38ede7b4, "mlx5_debugfs_get_dev_root" },
 	{ 0xde046cf5, "__dynamic_dev_dbg" },
+	{ 0xb19a5453, "__per_cpu_offset" },
 	{ 0xca21ebd3, "bitmap_free" },
 	{ 0x51760917, "_raw_spin_lock_irqsave" },
 	{ 0x877423b9, "rdma_reject" },
@@ -439,6 +444,7 @@ __used __section(__versions) = {
 	{ 0x1b88756e, "mlx5_lag_get_next_peer_mdev" },
 	{ 0x2900a90d, "__ib_alloc_pd" },
 	{ 0xca9360b5, "rb_next" },
+	{ 0x1ba59527, "__kmalloc_node" },
 	{ 0xf88358ab, "rdma_read_gid_l2_fields" },
 	{ 0xe29055ae, "mlx5_core_alloc_pd" },
 	{ 0xcc104fe1, "mlx5_flow_table_id" },
@@ -486,4 +492,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "02F54CFB5FFF2C2A2AD8887");
+MODULE_INFO(srcversion, "7782A023091043F515E3E33");

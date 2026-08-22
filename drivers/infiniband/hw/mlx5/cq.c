@@ -673,12 +673,17 @@ repoll:
 		wq = &(*cur_qp)->sq;
 		wqe_ctr = be16_to_cpu(cqe64->wqe_counter);
 		idx = wqe_ctr & (wq->wqe_cnt - 1);
-		handle_good_req(wc, cqe64, wq, idx);
 		if ((*cur_qp)->is_srmc_kernel_qp) {
+			/*
+			 * Hollow RC only consumes wr_id and the raw CQE.  Avoid
+			 * constructing the generic verbs work completion on its
+			 * single-consumer kernel CQ fast path.
+			 */
 			wc->wr_id = wq->wrid[idx];
 			mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
 			wc->status = IB_WC_SUCCESS;
 		} else {
+			handle_good_req(wc, cqe64, wq, idx);
 			handle_atomics(*cur_qp, cqe64, wq->last_poll, idx);
 			wc->wr_id = wq->wrid[idx];
 			wq->tail = wq->wqe_head[idx] + 1;

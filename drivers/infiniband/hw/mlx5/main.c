@@ -4492,16 +4492,17 @@ static int mlx5_ib_stage_init_init(struct mlx5_ib_dev *dev)
 	dev->sq_ctrl_pool.npages = DIV_ROUND_UP((u64)dev->sq_ctrl_pool.slot_cnt *
 					       dev->sq_ctrl_pool.slot_stride,
 					       PAGE_SIZE);
-	dev->sq_ctrl_pool.pages = kcalloc(dev->sq_ctrl_pool.npages,
-					  sizeof(*dev->sq_ctrl_pool.pages),
-					  GFP_KERNEL);
+	dev->sq_ctrl_pool.pages = kcalloc_node(
+		dev->sq_ctrl_pool.npages, sizeof(*dev->sq_ctrl_pool.pages),
+		GFP_KERNEL, mdev->priv.numa_node);
 	if (!dev->sq_ctrl_pool.pages) {
 		err = -ENOMEM;
 		goto err_mp;
 	}
 
 	for (i = 0; i < dev->sq_ctrl_pool.npages; i++) {
-		dev->sq_ctrl_pool.pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+		dev->sq_ctrl_pool.pages[i] = alloc_pages_node(
+			mdev->priv.numa_node, GFP_KERNEL | __GFP_ZERO, 0);
 		if (!dev->sq_ctrl_pool.pages[i]) {
 			err = -ENOMEM;
 			goto err_ctrl_pool;
@@ -4535,6 +4536,11 @@ static struct ib_device *mlx5_ib_add_sub_dev(struct ib_device *parent,
 											 enum rdma_nl_dev_type type,
 											 const char *name);
 static void mlx5_ib_del_sub_dev(struct ib_device *sub_dev);
+
+static int mlx5_ib_get_numa_node(struct ib_device *ibdev)
+{
+	return to_mdev(ibdev)->mdev->priv.numa_node;
+}
 
 static const struct ib_device_ops mlx5_ib_dev_ops = {
 	.owner = THIS_MODULE,
@@ -4573,6 +4579,7 @@ static const struct ib_device_ops mlx5_ib_dev_ops = {
 	.get_dev_fw_str = get_dev_fw_str,
 	.get_dma_mr = mlx5_ib_get_dma_mr,
 	.get_link_layer = mlx5_ib_port_link_layer,
+	.get_numa_node = mlx5_ib_get_numa_node,
 	.map_mr_sg = mlx5_ib_map_mr_sg,
 	.map_mr_sg_pi = mlx5_ib_map_mr_sg_pi,
 	.mmap = mlx5_ib_mmap,
