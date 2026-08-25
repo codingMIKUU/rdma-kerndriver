@@ -486,6 +486,16 @@ struct mlx5_ib_modify_qp_resp {
 	__u32	kernel_sq_max_gs;
 	__u32	kernel_sq_qp_state_max_gs;
 	__u32	kernel_max_inline_data;
+	__u64	farm_uar_mmap_offset;
+	__u32	farm_uar_mmap_len;
+	__u32	farm_uar_reg_offset;
+	__u64	farm_db_mmap_offset;
+	__u32	farm_db_mmap_len;
+	__u32	farm_db_offset;
+	__u32	farm_bf_buf_size;
+	__u32	farm_credit_slot_idx;
+	__u32	farm_direct_db_batch;
+	__u32	farm_reserved;
 	__u32	large_sq_state_slot_idx;
 	__u32	large_reserved1;
 	__u64	large_sq_mmap_offset;
@@ -509,6 +519,7 @@ enum mlx5_ib_modify_qp_resp_mask {
 	MLX5_IB_MODIFY_QP_RESP_MASK_KERNEL_QP_INFO = 1UL << 1,
 	MLX5_IB_MODIFY_QP_RESP_MASK_SQ_MMAP = 1UL << 2,
 	MLX5_IB_MODIFY_QP_RESP_MASK_PUBLISH_MMAP = 1UL << 3,
+	MLX5_IB_MODIFY_QP_RESP_MASK_FARM_DB = 1UL << 4,
 };
 
 struct mlx5_ib_create_wq_resp {

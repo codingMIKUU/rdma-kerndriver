@@ -118,6 +118,41 @@ static bool mlx5_ib_is_skip_kern_qp(struct mlx5_ib_qp *qp)
 	       (qp->flags_en & MLX5_QP_FLAG_SRM_SKIP_KERN_QP);
 }
 
+static void mlx5_ib_unregister_srm_owners(struct mlx5_ib_qp *qp)
+{
+	struct mlx5_ib_srmc *srmc_owner;
+	struct mlx5_ib_srmc *large_srmc_owner;
+
+	mutex_lock(&sched_group.owner_lock);
+
+	/* Clear the published pointers before touching the owners themselves. */
+	srmc_owner = qp->srmc_owner;
+	large_srmc_owner = qp->large_srmc_owner;
+	qp->srmc_owner = NULL;
+	qp->large_srmc_owner = NULL;
+
+	if (qp->srm_owner_registered) {
+		list_del_init(&qp->srm_owner_list);
+		qp->srm_owner_registered = 0;
+	}
+
+	/*
+	 * owner_stopping means scheduler teardown has already detached all QPs
+	 * and may be about to free the SRMCs.  Never dereference a saved owner in
+	 * that state.  During normal QP destruction owner_lock guarantees that
+	 * teardown cannot free the owner while its diagnostic count is updated.
+	 */
+	if (!sched_group.owner_stopping) {
+		if (srmc_owner && srmc_owner->ini_cb.refcnt > 0)
+			srmc_owner->ini_cb.refcnt--;
+		if (large_srmc_owner && large_srmc_owner != srmc_owner &&
+		    large_srmc_owner->ini_cb.refcnt > 0)
+			large_srmc_owner->ini_cb.refcnt--;
+	}
+
+	mutex_unlock(&sched_group.owner_lock);
+}
+
 static int __mlx5_ib_modify_qp(struct ib_qp *ibqp,
 			       const struct ib_qp_attr *attr, int attr_mask,
 			       enum ib_qp_state cur_state,
@@ -1400,6 +1435,7 @@ static int mlx5_ib_create_qp_ctrl_mmap(struct mlx5_ib_dev *dev,
 					    struct mlx5_ib_qp *qp,
 					    struct mlx5_ib_modify_qp_resp *resp)
 {
+	struct mlx5_ib_dev *kernel_dev;
 	struct mlx5_qp_ctrl_pool *pool;
 	struct mlx5_qp_ctrl_mmap_entry *ctrl;
 	u32 slot_idx;
@@ -1409,8 +1445,23 @@ static int mlx5_ib_create_qp_ctrl_mmap(struct mlx5_ib_dev *dev,
 		return -EINVAL;
 	if (!qp->srmc_owner)
 		return -EINVAL;
+	if (!qp->srmc_owner->ini_cb.qp)
+		return -EINVAL;
 
 	pool = &dev->sq_ctrl_pool;
+	kernel_dev = to_mdev(qp->srmc_owner->ini_cb.qp->ibqp.device);
+	pr_info_once("hollow RC ctrl identity: user_dev=%s kernel_dev=%s same_dev=%u user_pool=%px kernel_pool=%px stride=%u slot_size=%zu\n",
+		     dev_name(&dev->ib_dev.dev),
+		     dev_name(&kernel_dev->ib_dev.dev), dev == kernel_dev,
+		     pool, &kernel_dev->sq_ctrl_pool, pool->slot_stride,
+		     sizeof(struct mlx5_sq_ctrl_page));
+	if (dev != kernel_dev) {
+		mlx5_ib_err(dev,
+			    "hollow RC device mismatch: user QP is on %s but kernel QP is on %s\n",
+			    dev_name(&dev->ib_dev.dev),
+			    dev_name(&kernel_dev->ib_dev.dev));
+		return -EXDEV;
+	}
 	slot_idx = qp->srmc_owner->srmc_idx;
 	if (slot_idx >= pool->slot_cnt)
 		return -EINVAL;
@@ -1601,6 +1652,91 @@ static void mlx5_ib_fill_kernel_qp_info(struct mlx5_ib_qp *qp,
 	resp->comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_KERNEL_QP_INFO;
 }
 
+static int mlx5_ib_prepare_farm_db_mmaps(
+	struct mlx5_ib_dev *dev, struct mlx5_ib_ucontext *context,
+	struct mlx5_ib_qp *qp, struct mlx5_ib_modify_qp_resp *resp)
+{
+	struct mlx5_qp_farm_db_mmap_entry *db_entry;
+	struct mlx5_user_mmap_entry *uar_entry;
+	struct mlx5_ib_sched_worker *worker;
+	struct mlx5_ib_srmc *srmc;
+	struct mlx5_ib_qp *kqp;
+	unsigned int fw_uars_per_page;
+	size_t db_offset;
+	int err;
+
+	srmc = qp->srmc_owner;
+	if (!srmc || !srmc->ini_cb.qp || !sched_group.scheds ||
+	    !sched_group.num_sched)
+		return -EINVAL;
+	kqp = srmc->ini_cb.qp;
+	if (!kqp->bf.bfreg || !kqp->bf.bfreg->up || !kqp->db.db)
+		return -EINVAL;
+	if (!sched_group.scheds[0].workers ||
+	    srmc->owner_worker >= sched_group.scheds[0].worker_count)
+		return -EINVAL;
+	worker = &sched_group.scheds[0].workers[srmc->owner_worker];
+	if (!worker->credit_ctrl)
+		return -EAGAIN;
+
+	if (!qp->farm_uar_mmap_entry) {
+		uar_entry = kzalloc(sizeof(*uar_entry), GFP_KERNEL);
+		if (!uar_entry)
+			return -ENOMEM;
+
+		fw_uars_per_page = MLX5_CAP_GEN(dev->mdev, uar_4k) ?
+			MLX5_UARS_IN_PAGE : 1;
+		uar_entry->mmap_flag = MLX5_IB_MMAP_TYPE_QP_FARM_UAR;
+		uar_entry->address = dev->mdev->bar_addr +
+			(kqp->bf.bfreg->up->index / fw_uars_per_page) * PAGE_SIZE;
+		err = rdma_user_mmap_entry_insert_range(
+			&context->ibucontext, &uar_entry->rdma_entry, PAGE_SIZE,
+			(MLX5_IB_MMAP_OFFSET_START << 16),
+			((MLX5_IB_MMAP_OFFSET_END << 16) + (1UL << 16) - 1));
+		if (err) {
+			kfree(uar_entry);
+			return err;
+		}
+		qp->farm_uar_mmap_entry = uar_entry;
+	}
+
+	if (!qp->farm_db_mmap_entry) {
+		db_entry = kzalloc(sizeof(*db_entry), GFP_KERNEL);
+		if (!db_entry)
+			return -ENOMEM;
+
+		db_offset = kqp->db.index * cache_line_size();
+		db_entry->mentry.mmap_flag = MLX5_IB_MMAP_TYPE_QP_FARM_DB;
+		db_entry->cpu_addr = (char *)kqp->db.db - db_offset;
+		db_entry->dma_addr = kqp->db.dma - db_offset;
+		err = rdma_user_mmap_entry_insert_range(
+			&context->ibucontext, &db_entry->mentry.rdma_entry,
+			PAGE_SIZE, (MLX5_IB_MMAP_OFFSET_START << 16),
+			((MLX5_IB_MMAP_OFFSET_END << 16) + (1UL << 16) - 1));
+		if (err) {
+			kfree(db_entry);
+			return err;
+		}
+		qp->farm_db_mmap_entry = db_entry;
+	}
+
+	resp->farm_uar_mmap_offset = mlx5_qp_entry_to_mmap_offset(
+		qp->farm_uar_mmap_entry);
+	resp->farm_uar_mmap_len = PAGE_SIZE;
+	resp->farm_uar_reg_offset =
+		(char __iomem *)kqp->bf.bfreg->map -
+		(char __iomem *)kqp->bf.bfreg->up->map;
+	resp->farm_db_mmap_offset = mlx5_qp_entry_to_mmap_offset(
+		&qp->farm_db_mmap_entry->mentry);
+	resp->farm_db_mmap_len = PAGE_SIZE;
+	resp->farm_db_offset = kqp->db.index * cache_line_size();
+	resp->farm_bf_buf_size = kqp->bf.buf_size;
+	resp->farm_credit_slot_idx = worker->kqp_begin;
+	resp->farm_direct_db_batch = MLX5_SRM_DIRECT_DB_MAX_BATCH;
+	resp->comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_FARM_DB;
+	return 0;
+}
+
 static void mlx5_ib_fill_large_kernel_qp_info(struct mlx5_ib_srmc *srmc,
 					      struct mlx5_ib_modify_qp_resp *resp)
 {
@@ -1651,34 +1787,57 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 	grh = rdma_ah_read_grh(&attr->ah_attr);
 	memcpy(dgid.raw, grh->dgid.raw, sizeof(dgid.raw));
 
+	/*
+	 * Keep owner selection, all owner-based mmap preparation, and owner-list
+	 * publication in one teardown exclusion region.  This is a setup-only
+	 * lock and is never taken from the post-send fast path.
+	 */
+	mutex_lock(&sched_group.owner_lock);
+	if (sched_group.owner_stopping) {
+		err = -ESHUTDOWN;
+		goto out_owner_unlock;
+	}
+
 	if (!qp->srmc_owner) {
 		for (si = 0; si < max_t(int, 1, sched_group.num_sched); si++) {
 			err = is_xrc_exists(&sched_group.scheds[si], pd, &dgid,
 					    SRMC_CREATE_FLAG_INIT_QP, 0,
 					    qp->sq.max_post);
 			if (err < 0)
-				return err;
+				goto out_owner_unlock;
 		}
 
 		srmc = mlx5_ib_find_pseudo_random_srmc_by_gid(
 			&dgid, qp->usr_rc_id_valid ?
 			       qp->usr_rc_id : qp->ibqp.qp_num);
-		if (!srmc || !srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
-			return -EINVAL;
+		if (!srmc || !srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags) {
+			err = -EINVAL;
+			goto out_owner_unlock;
+		}
 
 		if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
-			if (srmc->srmc_idx + num_kqps >= NUM_SRMC)
-				return -EINVAL;
+			if (srmc->srmc_idx + num_kqps >= NUM_SRMC) {
+				err = -EINVAL;
+				goto out_owner_unlock;
+			}
 			large_srmc = sched_group.scheds[0].srmc_by_idx[
 				srmc->srmc_idx + num_kqps];
 			if (!large_srmc || !large_srmc->ini_cb.qp ||
-			    !large_srmc->ini_cb.qp->buf.frags)
-				return -EINVAL;
+			    !large_srmc->ini_cb.qp->buf.frags) {
+				err = -EINVAL;
+				goto out_owner_unlock;
+			}
 			large_srmc->ini_cb.refcnt++;
 			qp->large_srmc_owner = large_srmc;
 		}
 
 		qp->srmc_owner = srmc;
+		if (!qp->srm_owner_registered) {
+			INIT_LIST_HEAD(&qp->srm_owner_list);
+			list_add_tail(&qp->srm_owner_list,
+				      &sched_group.owner_qps);
+			qp->srm_owner_registered = 1;
+		}
 		if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP)
 			pr_info("hollow RC attach: usr_rc=%u small_srmc=%d small_qpn=%u large_srmc=%d large_qpn=%u users=%d\n",
 				qp->ibqp.qp_num, srmc->srmc_idx,
@@ -1696,21 +1855,27 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 
 	err = mlx5_ib_modify_qp_sq_mmap(dev, context, qp, resp);
 	if (err)
-		return err;
+		goto out_owner_unlock;
 
 	err = mlx5_ib_create_qp_ctrl_mmap(dev, context, qp, resp);
 	if (err)
-		return err;
+		goto out_owner_unlock;
 
 	err = mlx5_ib_create_qp_publish_mmap(context, qp, resp);
 	if (err)
-		return err;
+		goto out_owner_unlock;
 
 	mlx5_ib_fill_kernel_qp_info(qp, resp);
 
+	err = mlx5_ib_prepare_farm_db_mmaps(dev, context, qp, resp);
+	if (err)
+		goto out_owner_unlock;
+
 	if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
-		if (!qp->large_srmc_owner)
-			return -EINVAL;
+		if (!qp->large_srmc_owner) {
+			err = -EINVAL;
+			goto out_owner_unlock;
+		}
 		resp->large_sq_state_slot_idx = qp->large_srmc_owner->srmc_idx;
 
 		err = mlx5_ib_prepare_srmc_sq_mmap(context, qp,
@@ -1719,7 +1884,7 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 						   &resp->large_sq_mmap_offset,
 						   &resp->large_sq_mmap_len);
 		if (err)
-			return err;
+			goto out_owner_unlock;
 
 		err = mlx5_ib_create_srmc_publish_mmap(
 			context, qp, qp->large_srmc_owner,
@@ -1728,11 +1893,15 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 			&resp->large_publish_mmap_len,
 			&resp->large_publish_depth);
 		if (err)
-			return err;
+			goto out_owner_unlock;
 
 		mlx5_ib_fill_large_kernel_qp_info(qp->large_srmc_owner, resp);
 	}
-	return 0;
+	err = 0;
+
+out_owner_unlock:
+	mutex_unlock(&sched_group.owner_lock);
+	return err;
 }
 
 static int _create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
@@ -1916,8 +2085,6 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 {
 	struct mlx5_ib_ucontext *context = rdma_udata_to_drv_context(
 		udata, struct mlx5_ib_ucontext, ibucontext);
-	struct mlx5_ib_srmc *srmc_owner;
-	struct mlx5_ib_srmc *large_srmc_owner;
 
 	if (udata) {
 		/* User QP */
@@ -1938,6 +2105,16 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 				&qp->sq_publish_entry->mentry.rdma_entry);
 			qp->sq_publish_entry = NULL;
 		}
+		if (qp->farm_uar_mmap_entry) {
+			rdma_user_mmap_entry_remove(
+				&qp->farm_uar_mmap_entry->rdma_entry);
+			qp->farm_uar_mmap_entry = NULL;
+		}
+		if (qp->farm_db_mmap_entry) {
+			rdma_user_mmap_entry_remove(
+				&qp->farm_db_mmap_entry->mentry.rdma_entry);
+			qp->farm_db_mmap_entry = NULL;
+		}
 		if (qp->large_sq_mmap_entry) {
 			rdma_user_mmap_entry_remove(
 				&qp->large_sq_mmap_entry->mentry.rdma_entry);
@@ -1949,15 +2126,11 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 			qp->large_sq_publish_entry = NULL;
 		}
 
-		srmc_owner = qp->srmc_owner;
-		large_srmc_owner = qp->large_srmc_owner;
-		if (srmc_owner && srmc_owner->ini_cb.refcnt > 0)
-			srmc_owner->ini_cb.refcnt--;
-		if (large_srmc_owner && large_srmc_owner != srmc_owner &&
-		    large_srmc_owner->ini_cb.refcnt > 0)
-			large_srmc_owner->ini_cb.refcnt--;
-			qp->srmc_owner = NULL;
-			qp->large_srmc_owner = NULL;
+		/* Keep ordinary RC QP teardown out of the Hollow RC owner path. */
+		if (qp->srm_owner_registered ||
+		    READ_ONCE(qp->srmc_owner) ||
+		    READ_ONCE(qp->large_srmc_owner))
+			mlx5_ib_unregister_srm_owners(qp);
 		if (qp->usr_rc_id_valid) {
 			mlx5_ib_unbind_usr_rc_cq(&sched_group, qp->usr_rc_id);
 			ida_free(&mlx5_usr_rc_ida, qp->usr_rc_id);

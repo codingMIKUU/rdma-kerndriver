@@ -62,9 +62,9 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
  * rdma-core/providers/mlx5/mlx5.h must also be enabled.  Keep this disabled by
  * default: ready_idx is a multi-producer atomic hot spot when enabled.
  */
-#define MLX5_SRM_ENABLE_READY_FASTPATH 1
+#define MLX5_SRM_ENABLE_READY_FASTPATH 0
 
-static u64 LIMIT_BATCHING = 1000;
+static u64 LIMIT_BATCHING = 2000;
 #define DEBUG_LOG \
     if (debug)    \
     printk
@@ -88,8 +88,37 @@ struct mlx5_sq_ctrl_page {
     __u8 resv_pad[48];
     __u64 cons_idx;
     __u8 cons_pad[56];
+    __u64 db_tail;
+    __u32 db_owner;
+    __u32 flags;
+    __u32 bf_offset;
+    __u32 direct_db_batch;
+    __u32 direct_stats_attempts;
+    __u32 direct_stats_not_head;
+    __u32 direct_stats_owner_busy;
+    __u32 direct_stats_owner_acquired;
+    __u32 direct_stats_no_pending;
+    __u32 direct_stats_scan_calls;
+    __u32 direct_stats_scan_ready_wqes;
+    __u32 direct_stats_no_ready;
+    __u32 direct_stats_credit_stalls;
+    __u32 direct_stats_partial_credit;
+    atomic64_t issued_total;
+    atomic64_t completed_total;
+    __u64 credit_limit;
+    __u32 direct_stats_db_calls;
+    __u32 direct_stats_db_wqes;
+    __u32 direct_stats_db_max;
+    /* Must exactly match rdma-core/providers/mlx5/mlx5.h. */
+    __u8 credit_pad[28];
 } CACHELINE_ALIGNED_USER;
-static_assert(sizeof(struct mlx5_sq_ctrl_page) == 128);
+static_assert(sizeof(struct mlx5_sq_ctrl_page) == 256);
+
+#define MLX5_SRM_DB_OWNER_FREE   0U
+#define MLX5_SRM_DB_OWNER_USER   1U
+#define MLX5_SRM_DB_OWNER_KERNEL 2U
+#define MLX5_SRM_CTRL_F_DIRECT_DB_STATS (1U << 0)
+#define MLX5_SRM_DIRECT_DB_MAX_BATCH 32U
 
 #define MLX5_SRM_PUBLISH_USR_BITS 16
 #define MLX5_SRM_PUBLISH_USR_MASK ((1ULL << MLX5_SRM_PUBLISH_USR_BITS) - 1)
@@ -114,8 +143,8 @@ static inline u16 mlx5_srm_publish_usr_rc(u64 token)
     return token & MLX5_SRM_PUBLISH_USR_MASK;
 }
 
-#define MLX5_SRM_WRID_KQP_SHIFT 32
-#define MLX5_SRM_WRID_POST_MASK 0xffffffffULL
+#define MLX5_SRM_WRID_KQP_SHIFT 48
+#define MLX5_SRM_WRID_POST_MASK MLX5_SRM_PUBLISH_SEQ_MASK
 
 static inline u64 mlx5_srm_make_wrid(u32 kqp_idx, u64 post_idx)
 {
@@ -128,9 +157,38 @@ static inline u32 mlx5_srm_wrid_kqp(u64 wrid)
     return wrid >> MLX5_SRM_WRID_KQP_SHIFT;
 }
 
-static inline u32 mlx5_srm_wrid_post(u64 wrid)
+static inline u64 mlx5_srm_wrid_post(u64 wrid)
 {
     return wrid & MLX5_SRM_WRID_POST_MASK;
+}
+
+/*
+ * Sequence cursors are allowed to wrap.  All live SRM windows are many
+ * orders of magnitude smaller than half of the u64 sequence space, so a
+ * signed modular delta gives an unambiguous before/after relation.
+ */
+static inline s64 mlx5_srm_seq_delta(u64 lhs, u64 rhs)
+{
+    return (s64)(lhs - rhs);
+}
+
+static inline bool mlx5_srm_seq_after(u64 lhs, u64 rhs)
+{
+    return mlx5_srm_seq_delta(lhs, rhs) > 0;
+}
+
+static inline u64 mlx5_srm_extend_post48(u64 reference, u64 post48)
+{
+    const u64 period = MLX5_SRM_WRID_POST_MASK + 1;
+    const u64 half = period >> 1;
+    u64 delta = ((post48 & MLX5_SRM_WRID_POST_MASK) -
+                 (reference & MLX5_SRM_WRID_POST_MASK)) &
+                MLX5_SRM_WRID_POST_MASK;
+
+    if (delta >= half)
+        return reference - (period - delta);
+
+    return reference + delta;
 }
 
 struct mlx5_ib_cqbuf
@@ -229,6 +287,7 @@ struct mlx5_ib_srmc
     int sig_cnt;
     uint32_t cur_cqe;
     u64 sched_post_idx;
+    u64 cq_complete_idx;
     struct mlx5_wqe_info *wqe_infos;
     int idx;                  // 该srmc在表中的索引
     int srmc_idx;             // 该srmc在创建顺序中排第几个(用于分配cq)
@@ -253,6 +312,7 @@ struct mlx5_ib_sched_worker
     u32 kqp_begin;
     u32 kqp_end;
     u64 limit_batch;
+    struct mlx5_sq_ctrl_page *credit_ctrl;
     u64 quiescent_epoch;
 } CACHELINE_ALIGNED;
 struct mlx5_ib_sched
@@ -311,6 +371,10 @@ struct xrc_bf_entry{
 struct mlx5_ib_sched_group
 {
     struct mutex sq_lock;
+	/* Serializes Hollow RC QP owner attach/detach against SRMC teardown. */
+	struct mutex owner_lock;
+	struct list_head owner_qps;
+	bool owner_stopping;
 
     uint32_t sqb_cnt;
     uint32_t cqb_cnt;
@@ -365,12 +429,14 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
 int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn);
 int mlx5_ib_destroy_srmc(struct mlx5_ib_sched *sched, int ah_id);
 int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched *sched, struct mlx5_ib_srmc *srmc, struct ib_pd *pd, int flags, int qpn);
-int mlx5_sched_run_server(struct srm_cb *cb);
+int mlx5_sched_run_server(void *data);
 int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid *dgid, int flags, int id, u32 sq_depth);
 void ib_sched_free_buf(struct srm_cb *cb);
 int sched_hash_ip(char addr[4], int n);
 int srm_accept(struct srm_cb *cb);
 int mlx5_ib_server_init(struct mlx5_ib_server *server);
+void mlx5_ib_server_exit(struct mlx5_ib_server *server,
+                         struct mlx5_ib_sched_group *sched_group);
 int polling_cqe(void *data);
 int mlx5_ib_register_external_table(void *table, size_t size, struct page **pages, void *level_table, size_t level_size, struct page **level_pages,
                                            void *xrc_table, size_t xrc_size, struct page **xrc_pages, int xrc_qp_num_per_srm);

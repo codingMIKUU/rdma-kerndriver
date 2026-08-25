@@ -86,6 +86,7 @@ __used __section(__versions) = {
 	{ 0x5ebdebdb, "mlx5_core_modify_rq" },
 	{ 0x1b6314fd, "in_aton" },
 	{ 0x97235752, "flow_resources_add" },
+	{ 0x9eab7385, "dma_mmap_attrs" },
 	{ 0xca9beaa4, "__xa_store" },
 	{ 0xd4c14632, "system_unbound_wq" },
 	{ 0x868d21d4, "uverbs_copy_to" },
@@ -492,4 +493,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "7782A023091043F515E3E33");
+MODULE_INFO(srcversion, "CE909ED48C738D49C98FF99");

@@ -2382,6 +2382,16 @@ static void mlx5_ib_mmap_free(struct rdma_user_mmap_entry *entry)
 		kfree(publish);
 		break;
 	}
+	case MLX5_IB_MMAP_TYPE_QP_FARM_UAR:
+		kfree(mentry);
+		break;
+	case MLX5_IB_MMAP_TYPE_QP_FARM_DB: {
+		struct mlx5_qp_farm_db_mmap_entry *farm_db =
+			container_of(mentry, struct mlx5_qp_farm_db_mmap_entry,
+				     mentry);
+		kfree(farm_db);
+		break;
+	}
 	default:
 		WARN_ON(true);
 	}
@@ -2571,6 +2581,21 @@ static int mlx5_ib_mmap_offset(struct mlx5_ib_dev *dev,
 			container_of(mentry, struct mlx5_qp_publish_mmap_entry, mentry);
 		ret = mlx5_ib_mmap_qp_pages(vma, publish->pages,
 					    publish->npages);
+		rdma_user_mmap_entry_put(&mentry->rdma_entry);
+		return ret;
+	}
+	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_QP_FARM_DB) {
+		struct mlx5_qp_farm_db_mmap_entry *farm_db =
+			container_of(mentry, struct mlx5_qp_farm_db_mmap_entry,
+				     mentry);
+		unsigned long encoded_pgoff = vma->vm_pgoff;
+
+		/* The RDMA mmap key is not an offset in the coherent page. */
+		vma->vm_pgoff = 0;
+		ret = dma_mmap_coherent(&dev->mdev->pdev->dev, vma,
+					farm_db->cpu_addr, farm_db->dma_addr,
+					PAGE_SIZE);
+		vma->vm_pgoff = encoded_pgoff;
 		rdma_user_mmap_entry_put(&mentry->rdma_entry);
 		return ret;
 	}

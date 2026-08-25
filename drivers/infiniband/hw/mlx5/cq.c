@@ -103,15 +103,42 @@ static void *next_cqe_sw(struct mlx5_ib_cq *cq)
     return get_sw_cqe(cq, cq->mcq.cons_index);
 }
 
-static inline void mlx5_ib_srmc_advance_sq_tail(struct mlx5_ib_wq *wq,
-						u16 wqe_ctr)
+static inline u64 mlx5_ib_srmc_complete_post(struct mlx5_ib_qp *qp,
+					     struct mlx5_ib_wq *wq,
+					     u16 wqe_ctr)
 {
-	unsigned completed = (wq->tail & ~0xffffU) | wqe_ctr;
+	struct mlx5_ib_srmc *srmc = qp->srmc_owner;
+	u64 expected;
+	u64 completed;
+	u16 forward;
 
-	if (wqe_ctr < (wq->tail & 0xffffU))
-		completed += 1U << 16;
+	/*
+	 * The CQE carries only the low 16 bits of the SQ producer index.
+	 * Keep a 64-bit per-KQP completion cursor so a long-running Hollow RC
+	 * queue is not truncated when the generic mlx5 wq->tail wraps at 32 bits.
+	 * Requestor completions on one SQ are ordered, even when several SQs
+	 * share the same CQ.
+	 */
+	expected = READ_ONCE(srmc->cq_complete_idx);
+	forward = wqe_ctr - (u16)expected;
+	if (unlikely(forward >= wq->wqe_cnt)) {
+		/*
+		 * A stale/duplicate 16-bit CQE counter must not be mistaken for
+		 * the next 64K epoch.  Hollow RC keeps fewer than wqe_cnt entries
+		 * live, which provides an unambiguous extension window.
+		 */
+		pr_warn_ratelimited(
+			"hollow RC CQE counter outside window: qpn=%u expected=%llu counter=%u forward=%u depth=%u\n",
+			qp->ibqp.qp_num, expected, wqe_ctr, forward,
+			wq->wqe_cnt);
+		forward = 0;
+	}
+	completed = expected + forward;
 
-	wq->tail = completed + 1;
+	WRITE_ONCE(srmc->cq_complete_idx, completed + 1);
+	wq->tail = (u32)(completed + 1);
+
+	return completed;
 }
 
 static enum ib_wc_opcode get_umr_comp(struct mlx5_ib_wq *wq, int idx)
@@ -523,12 +550,17 @@ repoll:
 		idx = wqe_ctr & (wq->wqe_cnt - 1);
 		handle_good_req(wc, cqe64, wq, idx);
 		if ((*cur_qp)->is_srmc_kernel_qp) {
+			u64 absolute_post;
+			u32 kqp_idx;
+
 			/*
 			 * Scheduler WQEs bypass ib_post_send(), so wqe_head[],
 			 * wr_data[] and atomic-response bookkeeping are absent.
 			 */
-			wc->wr_id = wq->wrid[idx];
-			mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
+			absolute_post = mlx5_ib_srmc_complete_post(*cur_qp, wq,
+								 wqe_ctr);
+			kqp_idx = (*cur_qp)->srmc_owner->srmc_idx;
+			wc->wr_id = mlx5_srm_make_wrid(kqp_idx, absolute_post);
 			wc->status = IB_WC_SUCCESS;
 		} else {
 			handle_atomics(*cur_qp, cqe64, wq->last_poll, idx);
@@ -567,11 +599,19 @@ repoll:
 			wq = &(*cur_qp)->sq;
 			wqe_ctr = be16_to_cpu(cqe64->wqe_counter);
 			idx = wqe_ctr & (wq->wqe_cnt - 1);
-			wc->wr_id = wq->wrid[idx];
-			if ((*cur_qp)->is_srmc_kernel_qp)
-				mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
-			else
+			if ((*cur_qp)->is_srmc_kernel_qp) {
+				u64 absolute_post;
+				u32 kqp_idx;
+
+				absolute_post = mlx5_ib_srmc_complete_post(
+					*cur_qp, wq, wqe_ctr);
+				kqp_idx = (*cur_qp)->srmc_owner->srmc_idx;
+				wc->wr_id = mlx5_srm_make_wrid(kqp_idx,
+							       absolute_post);
+			} else {
+				wc->wr_id = wq->wrid[idx];
 				wq->tail = wq->wqe_head[idx] + 1;
+			}
 		} else {
 			struct mlx5_ib_srq *srq;
 
@@ -674,13 +714,18 @@ repoll:
 		wqe_ctr = be16_to_cpu(cqe64->wqe_counter);
 		idx = wqe_ctr & (wq->wqe_cnt - 1);
 		if ((*cur_qp)->is_srmc_kernel_qp) {
+			u64 absolute_post;
+			u32 kqp_idx;
+
 			/*
-			 * Hollow RC only consumes wr_id and the raw CQE.  Avoid
-			 * constructing the generic verbs work completion on its
-			 * single-consumer kernel CQ fast path.
+			 * Reconstruct the routing key from the CQE instead of reading
+			 * sq.wrid[], which otherwise has to be populated before every
+			 * doorbell by the scheduler.
 			 */
-			wc->wr_id = wq->wrid[idx];
-			mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
+			absolute_post = mlx5_ib_srmc_complete_post(*cur_qp, wq,
+								 wqe_ctr);
+			kqp_idx = (*cur_qp)->srmc_owner->srmc_idx;
+			wc->wr_id = mlx5_srm_make_wrid(kqp_idx, absolute_post);
 			wc->status = IB_WC_SUCCESS;
 		} else {
 			handle_good_req(wc, cqe64, wq, idx);
@@ -720,11 +765,19 @@ repoll:
 			wq = &(*cur_qp)->sq;
 			wqe_ctr = be16_to_cpu(cqe64->wqe_counter);
 			idx = wqe_ctr & (wq->wqe_cnt - 1);
-			wc->wr_id = wq->wrid[idx];
-			if ((*cur_qp)->is_srmc_kernel_qp)
-				mlx5_ib_srmc_advance_sq_tail(wq, wqe_ctr);
-			else
+			if ((*cur_qp)->is_srmc_kernel_qp) {
+				u64 absolute_post;
+				u32 kqp_idx;
+
+				absolute_post = mlx5_ib_srmc_complete_post(
+					*cur_qp, wq, wqe_ctr);
+				kqp_idx = (*cur_qp)->srmc_owner->srmc_idx;
+				wc->wr_id = mlx5_srm_make_wrid(kqp_idx,
+							       absolute_post);
+			} else {
+				wc->wr_id = wq->wrid[idx];
 				wq->tail = wq->wqe_head[idx] + 1;
+			}
 		} else {
 			struct mlx5_ib_srq *srq;
 
