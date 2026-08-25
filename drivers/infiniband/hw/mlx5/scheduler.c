@@ -58,7 +58,7 @@ module_param_named(srm_stats_enable, srm_stats_enable, bool, 0644);
 MODULE_PARM_DESC(srm_stats_enable,
                  "Enable one-second hollow RC scheduler statistics");
 
-static bool srm_direct_db_stats_enable = 0;
+static bool srm_direct_db_stats_enable = 1;
 module_param_named(srm_direct_db_stats_enable,
                    srm_direct_db_stats_enable, bool, 0644);
 MODULE_PARM_DESC(srm_direct_db_stats_enable,

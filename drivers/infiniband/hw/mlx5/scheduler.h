@@ -64,7 +64,7 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
  */
 #define MLX5_SRM_ENABLE_READY_FASTPATH 0
 
-static u64 LIMIT_BATCHING = 2000;
+static u64 LIMIT_BATCHING = 500;
 #define DEBUG_LOG \
     if (debug)    \
     printk
