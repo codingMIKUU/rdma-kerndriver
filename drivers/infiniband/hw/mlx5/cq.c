@@ -105,7 +105,8 @@ static void *next_cqe_sw(struct mlx5_ib_cq *cq)
 
 static inline u64 mlx5_ib_srmc_complete_post(struct mlx5_ib_qp *qp,
 					     struct mlx5_ib_wq *wq,
-					     u16 wqe_ctr)
+					     u16 wqe_ctr,
+					     u32 *completed_wqes)
 {
 	struct mlx5_ib_srmc *srmc = qp->srmc_owner;
 	u64 expected;
@@ -134,6 +135,8 @@ static inline u64 mlx5_ib_srmc_complete_post(struct mlx5_ib_qp *qp,
 		forward = 0;
 	}
 	completed = expected + forward;
+	if (completed_wqes)
+		*completed_wqes = (u32)forward + 1;
 
 	WRITE_ONCE(srmc->cq_complete_idx, completed + 1);
 	wq->tail = (u32)(completed + 1);
@@ -558,7 +561,7 @@ repoll:
 			 * wr_data[] and atomic-response bookkeeping are absent.
 			 */
 			absolute_post = mlx5_ib_srmc_complete_post(*cur_qp, wq,
-								 wqe_ctr);
+								 wqe_ctr, NULL);
 			kqp_idx = (*cur_qp)->srmc_owner->srmc_idx;
 			wc->wr_id = mlx5_srm_make_wrid(kqp_idx, absolute_post);
 			wc->status = IB_WC_SUCCESS;
@@ -604,7 +607,7 @@ repoll:
 				u32 kqp_idx;
 
 				absolute_post = mlx5_ib_srmc_complete_post(
-					*cur_qp, wq, wqe_ctr);
+					*cur_qp, wq, wqe_ctr, NULL);
 				kqp_idx = (*cur_qp)->srmc_owner->srmc_idx;
 				wc->wr_id = mlx5_srm_make_wrid(kqp_idx,
 							       absolute_post);
@@ -656,7 +659,7 @@ repoll:
 
 static int mlx5_poll_one_with_cqe(struct mlx5_ib_cq *cq,
 			 struct mlx5_ib_qp **cur_qp,
-			 struct ib_wc *wc,void** cqe)
+			 struct ib_wc *wc, void **cqe, u32 *completed_wqes)
 {
 	struct mlx5_ib_dev *dev = to_mdev(cq->ibcq.device);
 	struct mlx5_err_cqe *err_cqe;
@@ -667,6 +670,7 @@ static int mlx5_poll_one_with_cqe(struct mlx5_ib_cq *cq,
 	uint32_t qpn;
 	u16 wqe_ctr;
 	int idx;
+	*completed_wqes = 1;
 	DEBUG_LOG("2\n");
 repoll:
 	*cqe = next_cqe_sw(cq);
@@ -723,7 +727,8 @@ repoll:
 			 * doorbell by the scheduler.
 			 */
 			absolute_post = mlx5_ib_srmc_complete_post(*cur_qp, wq,
-								 wqe_ctr);
+								 wqe_ctr,
+								 completed_wqes);
 			kqp_idx = (*cur_qp)->srmc_owner->srmc_idx;
 			wc->wr_id = mlx5_srm_make_wrid(kqp_idx, absolute_post);
 			wc->status = IB_WC_SUCCESS;
@@ -770,7 +775,8 @@ repoll:
 				u32 kqp_idx;
 
 				absolute_post = mlx5_ib_srmc_complete_post(
-					*cur_qp, wq, wqe_ctr);
+					*cur_qp, wq, wqe_ctr,
+					completed_wqes);
 				kqp_idx = (*cur_qp)->srmc_owner->srmc_idx;
 				wc->wr_id = mlx5_srm_make_wrid(kqp_idx,
 							       absolute_post);
@@ -883,7 +889,10 @@ out:
 	return soft_polled + npolled;
 }
 
-int mlx5_ib_poll_cq_with_cqe(struct ib_cq *ibcq, int num_entries, struct ib_wc *wc,void **cqe){
+int mlx5_ib_poll_cq_with_cqe(struct ib_cq *ibcq, int num_entries,
+			     struct ib_wc *wc, void **cqe,
+			     u32 *completed_wqes)
+{
 	DEBUG_LOG("in mlx5_ib_poll_cq_with_cqe\n");
 	struct mlx5_ib_cq *cq = to_mcq(ibcq);
 	struct mlx5_ib_qp *cur_qp = NULL;
@@ -892,6 +901,7 @@ int mlx5_ib_poll_cq_with_cqe(struct ib_cq *ibcq, int num_entries, struct ib_wc *
 	unsigned long flags;
 	int soft_polled = 0;
 	int npolled;
+	u32 completed_sum = 0;
 	DEBUG_LOG("mlx5_ib_poll_cq_with_cqe,0\n");
 	spin_lock_irqsave(&cq->lock, flags);
 	if (mdev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR) {
@@ -901,21 +911,29 @@ int mlx5_ib_poll_cq_with_cqe(struct ib_cq *ibcq, int num_entries, struct ib_wc *
 
 		mlx5_ib_poll_sw_comp(cq, num_entries - soft_polled,
 				     wc + soft_polled, &npolled);
+		completed_sum = soft_polled + npolled;
 		goto out;
 	}
 	DEBUG_LOG("mlx5_ib_poll_cq_with_cqe,1\n");
 	if (unlikely(!list_empty(&cq->wc_list)))
 		soft_polled = poll_soft_wc(cq, num_entries, wc, false);
+	completed_sum = soft_polled;
 
 	for (npolled = 0; npolled < num_entries - soft_polled; npolled++) {
-		if (mlx5_poll_one_with_cqe(cq, &cur_qp, wc + soft_polled + npolled,cqe + soft_polled + npolled))
+		u32 completed_one = 1;
+
+		if (mlx5_poll_one_with_cqe(
+				cq, &cur_qp, wc + soft_polled + npolled,
+				cqe + soft_polled + npolled, &completed_one))
 			break;
+		completed_sum += completed_one;
 	}
 	DEBUG_LOG("mlx5_ib_poll_cq_with_cqe,4\n");
 	if (npolled)
 		mlx5_cq_set_ci(&cq->mcq);
     DEBUG_LOG("mlx5_ib_poll_cq_with_cqe,5\n");
 out:
+	*completed_wqes = completed_sum;
 	spin_unlock_irqrestore( &cq->lock, flags);
 	DEBUG_LOG("mlx5_ib_poll_cq_with_cqe,6\n");
 	return soft_polled + npolled;

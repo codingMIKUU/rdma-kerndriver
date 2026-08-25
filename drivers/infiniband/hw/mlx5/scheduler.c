@@ -1404,6 +1404,7 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
     int op_own;
     int uidx, idx;
     int cqe_num;
+    u32 completed_wqes;
     int i, j, k;
     for (i = 0; i < NUM_SRMC; i++)
     {
@@ -1426,10 +1427,13 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
             DEBUG_LOG("distributing cqe\n");
             // memset(&wc, 1, sizeof wc);
             cqe_num = 0;
-            if ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe)))
+            completed_wqes = 0;
+            if ((cqe_num = mlx5_ib_poll_cq_with_cqe(
+                     srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe,
+                     &completed_wqes)))
             {
-                // 减去sig_cnt
-                srmc->sig_cnt -= cqe_num;
+                srmc->sig_cnt -= min_t(u32, srmc->sig_cnt,
+                                       completed_wqes);
                 // cnt2++;
                 for (j = 0; j < cqe_num; j++)
                 {
@@ -1488,6 +1492,7 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
     struct mlx5_ib_sched_worker *credit_worker;
     struct mlx5_ib_cqbuf *cqb;
     int cqe_num;
+    u32 completed_wqes;
     int i;
     u64 phase_start;
     u64 iter_start;
@@ -1508,9 +1513,12 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
 
         // memset(&wc, 1, sizeof wc);
         cqe_num = 0;
+        completed_wqes = 0;
         phase_start = mlx5_ib_srm_cq_timing_active(stats) ?
                           ktime_get_ns() : 0;
-        if ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe)))
+        if ((cqe_num = mlx5_ib_poll_cq_with_cqe(
+                 srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe,
+                 &completed_wqes)))
         {
             mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_KERNEL_POLL,
                                         phase_start);
@@ -1569,11 +1577,13 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
             mlx5_ib_srm_record_cq_post_poll(stats, post_poll_start);
             /*
              * Publish credit only after CQ routing and per-KQP SQ recycle
-             * are complete.  A route error still consumes a hardware CQE
-             * and therefore must return one unit of shared credit.
+             * are complete.  One signaled CQE cumulatively completes every
+             * preceding unsignaled WQE on that physical KQP, so return the
+             * WQE span reconstructed from the hardware wqe_counter rather
+             * than the number of CQEs polled.
              */
             if (likely(credit_worker && credit_worker->credit_ctrl))
-                atomic64_add(cqe_num,
+                atomic64_add(completed_wqes,
                              &credit_worker->credit_ctrl->completed_total);
             mlx5_srm_refresh_poll_budget(sched, srmc);
         } else {
@@ -1606,6 +1616,7 @@ static inline int srm_poll_srmc_once_debug(struct mlx5_ib_srmc *srmc, struct ib_
     int op_own;
     int uidx, idx;
     int cqe_num;
+    u32 completed_wqes;
     int i, j;
     int len;
     int ret;
@@ -1619,14 +1630,17 @@ static inline int srm_poll_srmc_once_debug(struct mlx5_ib_srmc *srmc, struct ib_
 
         // memset(&wc, 1, sizeof wc);
         cqe_num = 0;
-        if ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe)))
+        completed_wqes = 0;
+        if ((cqe_num = mlx5_ib_poll_cq_with_cqe(
+                 srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe,
+                 &completed_wqes)))
         {
             *end_cycles = rdtsc();
             elapsed_cycles = *end_cycles - *start_cycles;
             elapsed_ns = (elapsed_cycles * 1000000000) / cpu_frequency_hz;
 
-            // 减去sig_cnt
-            srmc->sig_cnt -= cqe_num;
+            srmc->sig_cnt -= min_t(u32, srmc->sig_cnt,
+                                   completed_wqes);
             // cnt2++;
             for (i = 0; i < cqe_num; i++)
             {
