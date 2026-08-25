@@ -64,7 +64,7 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
  */
 #define MLX5_SRM_ENABLE_READY_FASTPATH 0
 
-static u64 LIMIT_BATCHING = 500;
+static u64 LIMIT_BATCHING = 2000;
 #define DEBUG_LOG \
     if (debug)    \
     printk
@@ -109,8 +109,11 @@ struct mlx5_sq_ctrl_page {
     __u32 direct_stats_db_calls;
     __u32 direct_stats_db_wqes;
     __u32 direct_stats_db_max;
+    __u64 completion_error_idx;
+    __u32 completion_error_status;
+    __u32 completion_error_vendor;
     /* Must exactly match rdma-core/providers/mlx5/mlx5.h. */
-    __u8 credit_pad[28];
+    __u8 credit_pad[8];
 } CACHELINE_ALIGNED_USER;
 static_assert(sizeof(struct mlx5_sq_ctrl_page) == 256);
 
@@ -288,6 +291,7 @@ struct mlx5_ib_srmc
     uint32_t cur_cqe;
     u64 sched_post_idx;
     u64 cq_complete_idx;
+    struct mlx5_sq_ctrl_page *ctrl_page;
     struct mlx5_wqe_info *wqe_infos;
     int idx;                  // 该srmc在表中的索引
     int srmc_idx;             // 该srmc在创建顺序中排第几个(用于分配cq)

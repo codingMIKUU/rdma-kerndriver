@@ -939,6 +939,140 @@ out:
 	return soft_polled + npolled;
 }
 
+/*
+ * Hollow RC completion-watermark poller.  The hardware CQ is private to the
+ * scheduler KQPs, so successful requestor CQEs need neither an ib_wc nor a
+ * copy into a user CQ.  Publish only the cumulative completed SQ position to
+ * the mmap-visible per-KQP control slot.
+ */
+static int mlx5_poll_one_srm_progress(struct mlx5_ib_cq *cq,
+				      struct mlx5_ib_qp **cur_qp,
+				      u32 *completed_wqes)
+{
+	struct mlx5_ib_dev *dev = to_mdev(cq->ibcq.device);
+	struct mlx5_err_cqe *err_cqe;
+	struct mlx5_cqe64 *cqe64;
+	struct mlx5_core_qp *mqp;
+	struct mlx5_ib_srmc *srmc;
+	struct mlx5_ib_wq *wq;
+	struct ib_wc error_wc = {};
+	void *cqe;
+	u64 absolute_post;
+	u32 qpn;
+	u16 wqe_ctr;
+	u8 opcode;
+
+repoll:
+	cqe = next_cqe_sw(cq);
+	if (!cqe)
+		return -EAGAIN;
+	cqe64 = (cq->mcq.cqe_sz == 64) ? cqe : cqe + 64;
+	++cq->mcq.cons_index;
+	rmb();
+
+	opcode = get_cqe_opcode(cqe64);
+	if (unlikely(opcode == MLX5_CQE_RESIZE_CQ)) {
+		if (likely(cq->resize_buf)) {
+			free_cq_buf(dev, &cq->buf);
+			cq->buf = *cq->resize_buf;
+			kfree(cq->resize_buf);
+			cq->resize_buf = NULL;
+			goto repoll;
+		}
+		mlx5_ib_warn(dev, "unexpected resize cqe\n");
+		return -EIO;
+	}
+
+	qpn = ntohl(cqe64->sop_drop_qpn) & 0xffffff;
+	if (!*cur_qp || qpn != (*cur_qp)->ibqp.qp_num) {
+		mqp = radix_tree_lookup(&dev->qp_table.tree, qpn);
+		if (unlikely(!mqp))
+			return -ENOENT;
+		*cur_qp = to_mibqp(mqp);
+	}
+	if (unlikely(!(*cur_qp)->is_srmc_kernel_qp ||
+		     !(*cur_qp)->srmc_owner))
+		return -EINVAL;
+
+	srmc = (*cur_qp)->srmc_owner;
+	if (unlikely(!srmc->ctrl_page))
+		return -EINVAL;
+	wq = &(*cur_qp)->sq;
+	wqe_ctr = be16_to_cpu(cqe64->wqe_counter);
+
+	switch (opcode) {
+	case MLX5_CQE_REQ:
+		absolute_post = mlx5_ib_srmc_complete_post(
+			*cur_qp, wq, wqe_ctr, completed_wqes);
+		break;
+	case MLX5_CQE_REQ_ERR:
+		err_cqe = (struct mlx5_err_cqe *)cqe64;
+		mlx5_handle_error_cqe(dev, err_cqe, &error_wc);
+		absolute_post = mlx5_ib_srmc_complete_post(
+			*cur_qp, wq, wqe_ctr, completed_wqes);
+		WRITE_ONCE(srmc->ctrl_page->completion_error_idx,
+			   absolute_post + 1);
+		WRITE_ONCE(srmc->ctrl_page->completion_error_status,
+			   error_wc.status);
+		WRITE_ONCE(srmc->ctrl_page->completion_error_vendor,
+			   error_wc.vendor_err);
+		break;
+	default:
+		pr_warn_ratelimited(
+			"unexpected hollow RC kernel CQE opcode=%u qpn=%u\n",
+			opcode, qpn);
+		return -EOPNOTSUPP;
+	}
+
+	/* Error information, if any, is visible before the completion cursor. */
+	smp_store_release(&srmc->ctrl_page->cons_idx, absolute_post + 1);
+	return 0;
+}
+
+int mlx5_ib_poll_srm_progress(struct ib_cq *ibcq, int num_entries,
+			      u32 *completed_wqes)
+{
+	struct mlx5_ib_cq *cq = to_mcq(ibcq);
+	struct mlx5_ib_qp *cur_qp = NULL;
+	struct mlx5_ib_dev *dev = to_mdev(cq->ibcq.device);
+	struct mlx5_core_dev *mdev = dev->mdev;
+	unsigned long flags;
+	u32 completed_sum = 0;
+	int npolled;
+
+	if (unlikely(mdev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR))
+		return -EIO;
+
+	spin_lock_irqsave(&cq->lock, flags);
+	for (npolled = 0; npolled < num_entries; npolled++) {
+		u32 completed_one = 0;
+		int ret;
+
+		ret = mlx5_poll_one_srm_progress(cq, &cur_qp,
+						 &completed_one);
+		if (ret == -EAGAIN)
+			break;
+		if (unlikely(ret)) {
+			/* mlx5_poll_one_srm_progress() consumed the bad CQE before
+			 * discovering the error; publish the new CQ consumer index. */
+			pr_warn_ratelimited(
+				"hollow RC CQ progress parse failed: error=%d\n",
+				ret);
+			mlx5_cq_set_ci(&cq->mcq);
+			spin_unlock_irqrestore(&cq->lock, flags);
+			*completed_wqes = completed_sum;
+			return npolled ? npolled : ret;
+		}
+		completed_sum += completed_one;
+	}
+	if (npolled)
+		mlx5_cq_set_ci(&cq->mcq);
+	spin_unlock_irqrestore(&cq->lock, flags);
+
+	*completed_wqes = completed_sum;
+	return npolled;
+}
+
 int mlx5_ib_arm_cq(struct ib_cq *ibcq, enum ib_cq_notify_flags flags)
 {
 	struct mlx5_core_dev *mdev = to_mdev(ibcq->device)->mdev;

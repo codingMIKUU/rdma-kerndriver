@@ -1490,17 +1490,16 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
                                      struct mlx5_ib_srm_sched_stats *stats)
 {
     struct mlx5_ib_sched_worker *credit_worker;
-    struct mlx5_ib_cqbuf *cqb;
     int cqe_num;
     u32 completed_wqes;
-    int i;
     u64 phase_start;
-    u64 iter_start;
     u64 total_start;
-    u64 post_poll_start;
-    struct mlx5_srm_ctrl_complete_entry complete_cache[SRM_CTRL_COMPLETE_CACHE];
-    int complete_cache_cnt = 0;
-    struct mlx5_srm_cqe_publish_lane *lane;
+
+    /* Completion delivery is now a userspace watermark query. */
+    (void)sq_ctrl_pool;
+    (void)wc;
+    (void)cqe;
+    (void)workspace;
 
     total_start = mlx5_ib_srm_begin_cq_timing(stats) ? ktime_get_ns() : 0;
     mlx5_srm_refresh_poll_budget(sched, srmc);
@@ -1509,78 +1508,24 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
 
     if (srmc->sig_cnt)
     {
-        DEBUG_LOG("distributing cqe\n");
+        DEBUG_LOG("polling hollow RC completion progress\n");
 
         // memset(&wc, 1, sizeof wc);
         cqe_num = 0;
         completed_wqes = 0;
         phase_start = mlx5_ib_srm_cq_timing_active(stats) ?
                           ktime_get_ns() : 0;
-        if ((cqe_num = mlx5_ib_poll_cq_with_cqe(
-                 srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe,
-                 &completed_wqes)))
+        cqe_num = mlx5_ib_poll_srm_progress(
+            srmc->ini_cb.cq, srmc->sig_cnt, &completed_wqes);
+        if (cqe_num > 0)
         {
             mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_KERNEL_POLL,
                                         phase_start);
-            post_poll_start = mlx5_ib_srm_cq_timing_active(stats) ?
-                                  ktime_get_ns() : 0;
             mlx5_ib_srm_record_timed_cqes(stats, cqe_num);
             srmc->last_cqe_jiffies = jiffies;
-            mlx5_srm_cq_workspace_reset(workspace);
-            // pr_info("sig_cnt cqe_num:%d,sig_cnt:%d\n", cqe_num, srmc->sig_cnt);
-            //  cnt2++;
-            for (i = 0; i < cqe_num; i++)
-            {
-                struct mlx5_srm_cqe_publish_entry entry;
-
-                iter_start = mlx5_ib_srm_cq_timing_active(stats) ?
-                                 ktime_get_ns() : 0;
-                mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_LOOP_BASE,
-                                            iter_start);
-                phase_start = mlx5_ib_srm_cq_timing_active(stats) ?
-                                  ktime_get_ns() : 0;
-
-                if (!mlx5_srm_resolve_cqe_ctx(sched, sq_ctrl_pool,
-                                              wc[i].wr_id, workspace,
-                                              &entry)) {
-                    mlx5_srm_complete_wrid_ctrl(
-                        sq_ctrl_pool, wc[i].wr_id, complete_cache,
-                        &complete_cache_cnt);
-                    mlx5_ib_srm_record_cq_phase(stats,
-                                                SRM_CQ_PHASE_INFO_LOOKUP,
-                                                phase_start);
-                    continue;
-                }
-
-                cqb = entry.cqb;
-                mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_INFO_LOOKUP,
-                                            phase_start);
-                lane = mlx5_srm_get_publish_lane(
-                    srmc, workspace, cqb, complete_cache,
-                    &complete_cache_cnt, stats);
-                entry.cqe64 = cqe[i];
-                lane->entries[lane->count++] = entry;
-                if (lane->count == SRM_CQE_PUBLISH_BATCH)
-                    mlx5_srm_flush_cqe_publish_lane(
-                        srmc, lane, complete_cache,
-                        &complete_cache_cnt, stats);
-            }
-            mlx5_srm_flush_cqe_publish_lane(
-                srmc, &workspace->publish_lane, complete_cache,
-                &complete_cache_cnt, stats);
-            phase_start = mlx5_ib_srm_cq_timing_active(stats) ?
-                              ktime_get_ns() : 0;
-            mlx5_srm_ctrl_complete_flush(complete_cache,
-                                         &complete_cache_cnt);
-            mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_CTRL_COMPLETE,
-                                        phase_start);
-            mlx5_ib_srm_record_cq_post_poll(stats, post_poll_start);
             /*
-             * Publish credit only after CQ routing and per-KQP SQ recycle
-             * are complete.  One signaled CQE cumulatively completes every
-             * preceding unsignaled WQE on that physical KQP, so return the
-             * WQE span reconstructed from the hardware wqe_counter rather
-             * than the number of CQEs polled.
+             * Per-KQP cons_idx has already been release-published by the CQ
+             * poller.  Return scheduler-wide credits once per poll batch.
              */
             if (likely(credit_worker && credit_worker->credit_ctrl))
                 atomic64_add(completed_wqes,
@@ -1589,6 +1534,10 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
         } else {
             mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_KERNEL_POLL,
                                         phase_start);
+            if (unlikely(cqe_num < 0))
+                pr_warn_ratelimited(
+                    "hollow RC progress poll failed: cq_depth=%u error=%d\n",
+                    srmc->ini_cb.cq->cqe, cqe_num);
         }
 
         mlx5_ib_srm_record_cq_once(stats, total_start);
@@ -1834,7 +1783,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 32;
+const int num_kqps = 256;
 
 static inline int mlx5_srm_effective_kqps(void)
 {
@@ -5365,6 +5314,12 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
             ret = -EINVAL;
             goto err2;
         }
+        /* CQ polling publishes this KQP's cumulative hardware completion
+         * cursor directly to the mmap-visible control slot. */
+        srmc->ctrl_page = ctrl_page;
+        WRITE_ONCE(ctrl_page->completion_error_idx, U64_MAX);
+        WRITE_ONCE(ctrl_page->completion_error_status, IB_WC_SUCCESS);
+        WRITE_ONCE(ctrl_page->completion_error_vendor, 0);
         WRITE_ONCE(ctrl_page->bf_offset, cb->qp->bf.offset);
         WRITE_ONCE(ctrl_page->direct_db_batch,
                    MLX5_SRM_DIRECT_DB_MAX_BATCH);

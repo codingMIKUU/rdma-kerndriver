@@ -1490,6 +1490,8 @@ int mlx5_ib_poll_cq(struct ib_cq *ibcq, int num_entries, struct ib_wc *wc);
 int mlx5_ib_poll_cq_with_cqe(struct ib_cq *ibcq, int num_entries,
 			     struct ib_wc *wc, void **cqe,
 			     u32 *completed_wqes);
+int mlx5_ib_poll_srm_progress(struct ib_cq *ibcq, int num_entries,
+			      u32 *completed_wqes);
 int mlx5_ib_arm_cq(struct ib_cq *ibcq, enum ib_cq_notify_flags flags);
 int mlx5_ib_modify_cq(struct ib_cq *cq, u16 cq_count, u16 cq_period);
 int mlx5_ib_resize_cq(struct ib_cq *ibcq, int entries, struct ib_udata *udata);
