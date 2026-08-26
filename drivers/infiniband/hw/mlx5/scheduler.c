@@ -431,35 +431,6 @@ static inline struct mlx5_sq_ctrl_page *mlx5_sq_ctrl_get_slot(
                pool->pages[page_idx]) + page_off);
 }
 
-/*
- * Move one KQP to the head of a scheduler-private circular list.  Every KQP
- * remains in the ring exactly once, so no hint means ordinary round-robin
- * polling and cold KQPs cannot starve.
- */
-static __always_inline void mlx5_srm_poll_ring_move_front(
-    u32 *next, u32 *prev, u32 *head, u32 kqp_idx)
-{
-    u32 old_head = *head;
-    u32 tail;
-
-    if (kqp_idx == old_head)
-        return;
-    if (next[kqp_idx] == kqp_idx) {
-        *head = kqp_idx;
-        return;
-    }
-
-    next[prev[kqp_idx]] = next[kqp_idx];
-    prev[next[kqp_idx]] = prev[kqp_idx];
-
-    tail = prev[old_head];
-    next[tail] = kqp_idx;
-    prev[kqp_idx] = tail;
-    next[kqp_idx] = old_head;
-    prev[old_head] = kqp_idx;
-    *head = kqp_idx;
-}
-
 struct mlx5_srm_direct_db_snapshot {
     u32 attempts;
     u32 not_head;
@@ -1812,7 +1783,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 32;
+const int num_kqps = 256;
 
 static inline int mlx5_srm_effective_kqps(void)
 {
@@ -3022,11 +2993,6 @@ int scheduler_polling(void *sched_data)
     struct mlx5_ib_sched_worker *worker;
     u32 kqp_begin;
     u32 kqp_end;
-    u32 kqp_count;
-    u32 *poll_ring_next = NULL;
-    u32 *poll_ring_prev = NULL;
-    u32 poll_ring_head = 0;
-    u64 last_hot_hint = 0;
     u64 worker_limit;
     struct mlx5_ib_sqbuf *sqb;
     struct mlx5_ib_cqbuf *cqb;
@@ -3039,7 +3005,6 @@ int scheduler_polling(void *sched_data)
     int op_own;
     int uidx, idx;
     int i, j, k;
-    u32 poll_step;
 
     void *seg, *useg;
     struct mlx5_wqe_ctrl_seg *ctrl, *uctrl;
@@ -3079,23 +3044,7 @@ int scheduler_polling(void *sched_data)
     worker = &sched->workers[worker_id];
     kqp_begin = worker->kqp_begin;
     kqp_end = worker->kqp_end;
-    kqp_count = kqp_end - kqp_begin;
     worker_limit = worker->limit_batch;
-
-    poll_ring_next = mlx5_ib_srm_kvcalloc_node(
-        NUM_SRMC, sizeof(*poll_ring_next));
-    poll_ring_prev = mlx5_ib_srm_kvcalloc_node(
-        NUM_SRMC, sizeof(*poll_ring_prev));
-    if (!poll_ring_next || !poll_ring_prev || !kqp_count) {
-        WRITE_ONCE(sched->init_error, -ENOMEM);
-        wake_up_all(&sched->init_wait);
-        goto out;
-    }
-    poll_ring_head = kqp_begin;
-    for (i = kqp_begin; i < kqp_end; i++) {
-        poll_ring_next[i] = i + 1 < kqp_end ? i + 1 : kqp_begin;
-        poll_ring_prev[i] = i > kqp_begin ? i - 1 : kqp_end - 1;
-    }
 
     cqe = mlx5_ib_srm_kvcalloc_node(SQ_DEPTH, sizeof(*cqe));
     wc = mlx5_ib_srm_kvcalloc_node(SQ_DEPTH, sizeof(*wc));
@@ -3261,11 +3210,6 @@ int scheduler_polling(void *sched_data)
     u64 db_batch_log_poll_inline_empty = 0;
     u64 db_batch_log_ready_fast_hits = 0;
     u64 db_batch_log_ready_fast_wqes = 0;
-    u64 db_batch_log_hot_hints = 0;
-    u64 db_batch_log_hot_scans = 0;
-    u64 db_batch_log_hot_owner_busy = 0;
-    u64 db_batch_log_hot_db_calls = 0;
-    u64 db_batch_log_hot_db_wqes = 0;
 #endif
 
     srm_stats = kvzalloc_node(sizeof(*srm_stats), GFP_KERNEL,
@@ -3332,38 +3276,7 @@ int scheduler_polling(void *sched_data)
             id, worker, sq_ctrl_pool, &direct_db_stats_active,
             &direct_db_stats_previous, &direct_db_stats_last_report);
 
-        for (poll_step = 0; poll_step < kqp_count; poll_step++) {
-            bool current_from_hot = false;
-            struct mlx5_sq_ctrl_page *hot_ctrl =
-                READ_ONCE(worker->credit_ctrl);
-
-            /*
-             * Userspace publishes only the newest fallback.  A changed
-             * mailbox value moves that KQP to the head in O(1); advancing
-             * head after selection naturally moves the processed KQP to the
-             * tail.  With no changes this is exactly round-robin.
-             */
-            if (likely(hot_ctrl)) {
-                u64 hot_hint = smp_load_acquire(
-                    &hot_ctrl->latest_hot_hint);
-
-                if (unlikely(hot_hint != last_hot_hint)) {
-                    u32 hot_idx = (u16)hot_hint;
-
-                    last_hot_hint = hot_hint;
-                    if (hot_idx >= kqp_begin && hot_idx < kqp_end) {
-                        mlx5_srm_poll_ring_move_front(
-                            poll_ring_next, poll_ring_prev,
-                            &poll_ring_head, hot_idx);
-                        current_from_hot = true;
-#if MLX5_SRM_ENABLE_DB_BATCH_LOG
-                        db_batch_log_hot_hints++;
-#endif
-                    }
-                }
-            }
-            i = poll_ring_head;
-            poll_ring_head = poll_ring_next[i];
+        for (i = kqp_begin; i < kqp_end; i++) {
 
 
             {
@@ -3415,7 +3328,7 @@ int scheduler_polling(void *sched_data)
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
             db_batch_log_scans++;
             if (unlikely(db_batch_log_scans >= MLX5_SRM_DB_BATCH_LOG_INTERVAL)) {
-                pr_info("hollow RC db batch sched=%d worker=%u scans=%llu db_calls=%llu active_pct_x100=%llu db_wqes=%llu db_avg_x100=%llu db_max=%llu limit_stalls=%llu poll_inline_calls=%llu poll_inline_cqes=%llu poll_inline_avg_x100=%llu poll_inline_empty=%llu poll_inline_empty_pct_x100=%llu ready_fast_enabled=%u ready_fast_hits=%llu ready_fast_wqes=%llu ready_fast_avg_x100=%llu hot_hints=%llu hot_scans=%llu hot_owner_busy=%llu hot_db_calls=%llu hot_db_wqes=%llu hot_db_avg_x100=%llu\n",
+                pr_info("hollow RC db batch sched=%d worker=%u scans=%llu db_calls=%llu active_pct_x100=%llu db_wqes=%llu db_avg_x100=%llu db_max=%llu limit_stalls=%llu poll_inline_calls=%llu poll_inline_cqes=%llu poll_inline_avg_x100=%llu poll_inline_empty=%llu poll_inline_empty_pct_x100=%llu ready_fast_enabled=%u ready_fast_hits=%llu ready_fast_wqes=%llu ready_fast_avg_x100=%llu\n",
                         id, worker_id, db_batch_log_scans,
                         db_batch_log_calls,
                         div64_u64(db_batch_log_calls * 10000,
@@ -3444,15 +3357,6 @@ int scheduler_polling(void *sched_data)
                         db_batch_log_ready_fast_hits ?
                             div64_u64(db_batch_log_ready_fast_wqes * 100,
                                       db_batch_log_ready_fast_hits) :
-                            0,
-                        db_batch_log_hot_hints,
-                        db_batch_log_hot_scans,
-                        db_batch_log_hot_owner_busy,
-                        db_batch_log_hot_db_calls,
-                        db_batch_log_hot_db_wqes,
-                        db_batch_log_hot_db_calls ?
-                            div64_u64(db_batch_log_hot_db_wqes * 100,
-                                      db_batch_log_hot_db_calls) :
                             0);
                 db_batch_log_scans = 0;
                 db_batch_log_calls = 0;
@@ -3464,11 +3368,6 @@ int scheduler_polling(void *sched_data)
                 db_batch_log_poll_inline_empty = 0;
                 db_batch_log_ready_fast_hits = 0;
                 db_batch_log_ready_fast_wqes = 0;
-                db_batch_log_hot_hints = 0;
-                db_batch_log_hot_scans = 0;
-                db_batch_log_hot_owner_busy = 0;
-                db_batch_log_hot_db_calls = 0;
-                db_batch_log_hot_db_wqes = 0;
             }
 #endif
 
@@ -3612,17 +3511,8 @@ int scheduler_polling(void *sched_data)
                 if (cmpxchg(&ctrl_page->db_owner,
                             MLX5_SRM_DB_OWNER_FREE,
                             MLX5_SRM_DB_OWNER_KERNEL) !=
-                    MLX5_SRM_DB_OWNER_FREE) {
-#if MLX5_SRM_ENABLE_DB_BATCH_LOG
-                    if (current_from_hot)
-                        db_batch_log_hot_owner_busy++;
-#endif
+                    MLX5_SRM_DB_OWNER_FREE)
                     continue;
-                }
-#if MLX5_SRM_ENABLE_DB_BATCH_LOG
-                if (current_from_hot)
-                    db_batch_log_hot_scans++;
-#endif
 
                 srmc->sched_post_idx =
                     smp_load_acquire(&ctrl_page->db_tail);
@@ -3857,10 +3747,6 @@ int scheduler_polling(void *sched_data)
                 db_batch_log_wqes += sent;
                 if (sent > db_batch_log_max)
                     db_batch_log_max = sent;
-                if (current_from_hot) {
-                    db_batch_log_hot_db_calls++;
-                    db_batch_log_hot_db_wqes += sent;
-                }
 #endif
                 if (srm_stats_enable) {
                     struct mlx5_ib_srm_kqp_stats *kstats =
@@ -3944,8 +3830,6 @@ out:
     kvfree(pre_srmcs);
     kvfree(in_queue);
     kvfree(level_qp_st_arr);
-    kvfree(poll_ring_next);
-    kvfree(poll_ring_prev);
 
     // // 文件
     // filp_close(filp, NULL);
@@ -3968,8 +3852,6 @@ err:
     kvfree(pre_srmcs);
     kvfree(in_queue);
     kvfree(level_qp_st_arr);
-    kvfree(poll_ring_next);
-    kvfree(poll_ring_prev);
 
     // // 文件
     // filp_close(filp, NULL);
@@ -5461,7 +5343,6 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
             WRITE_ONCE(ctrl_page->direct_stats_db_calls, 0);
             WRITE_ONCE(ctrl_page->direct_stats_db_wqes, 0);
             WRITE_ONCE(ctrl_page->direct_stats_db_max, 0);
-            WRITE_ONCE(ctrl_page->latest_hot_hint, 0);
             smp_store_release(&worker->credit_ctrl, ctrl_page);
         }
     } else {
