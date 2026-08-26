@@ -64,7 +64,7 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
  */
 #define MLX5_SRM_ENABLE_READY_FASTPATH 0
 
-static u64 LIMIT_BATCHING = 2000;
+static u64 LIMIT_BATCHING = 10000;
 #define DEBUG_LOG \
     if (debug)    \
     printk
@@ -114,8 +114,13 @@ struct mlx5_sq_ctrl_page {
     __u32 completion_error_vendor;
     /* Must exactly match rdma-core/providers/mlx5/mlx5.h. */
     __u8 credit_pad[8];
+	/* Dedicated per-worker latest-hot mailbox cacheline. */
+	__u64 latest_hot_hint;
+	__u8 hot_hint_pad[56];
+	/* Power-of-two stride: a slot must never cross discontiguous pool pages. */
+	__u8 slot_pad[192];
 } CACHELINE_ALIGNED_USER;
-static_assert(sizeof(struct mlx5_sq_ctrl_page) == 256);
+static_assert(sizeof(struct mlx5_sq_ctrl_page) == 512);
 
 #define MLX5_SRM_DB_OWNER_FREE   0U
 #define MLX5_SRM_DB_OWNER_USER   1U
