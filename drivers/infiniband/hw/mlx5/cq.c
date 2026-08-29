@@ -1010,12 +1010,18 @@ repoll:
 		mlx5_handle_error_cqe(dev, err_cqe, &error_wc);
 		absolute_post = mlx5_ib_srmc_complete_post(
 			*cur_qp, wq, wqe_ctr, completed_wqes);
-		WRITE_ONCE(srmc->ctrl_page->completion_error_idx,
-			   absolute_post + 1);
-		WRITE_ONCE(srmc->ctrl_page->completion_error_status,
-			   error_wc.status);
-		WRITE_ONCE(srmc->ctrl_page->completion_error_vendor,
-			   error_wc.vendor_err);
+		/* Preserve the first failing WQE.  It carries the real syndrome;
+		 * later WQEs on the failed shared RC SQ are reconstructed by
+		 * userspace as flushed.  Overwriting this cursor could otherwise
+		 * lose an older logical QP's signaled completion. */
+		if (READ_ONCE(srmc->ctrl_page->completion_error_idx) == U64_MAX) {
+			WRITE_ONCE(srmc->ctrl_page->completion_error_status,
+				   error_wc.status);
+			WRITE_ONCE(srmc->ctrl_page->completion_error_vendor,
+				   error_wc.vendor_err);
+			WRITE_ONCE(srmc->ctrl_page->completion_error_idx,
+				   absolute_post + 1);
+		}
 		break;
 	default:
 		pr_warn_ratelimited(
