@@ -3419,7 +3419,14 @@ int scheduler_polling(void *sched_data)
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
             db_batch_log_scans++;
             if (unlikely(db_batch_log_scans >= MLX5_SRM_DB_BATCH_LOG_INTERVAL)) {
-                pr_info("hollow RC db batch sched=%d worker=%u scans=%llu db_calls=%llu active_pct_x100=%llu db_wqes=%llu db_avg_x100=%llu db_max=%llu limit_stalls=%llu poll_inline_calls=%llu poll_inline_cqes=%llu poll_inline_avg_x100=%llu poll_inline_empty=%llu poll_inline_empty_pct_x100=%llu ready_fast_enabled=%u ready_fast_hits=%llu ready_fast_wqes=%llu ready_fast_avg_x100=%llu hot_hints=%llu hot_scans=%llu hot_owner_busy=%llu hot_db_calls=%llu hot_db_wqes=%llu hot_db_avg_x100=%llu\n",
+                /*
+                 * An idle scheduler reaches the scan threshold extremely
+                 * quickly.  Do not let zero-work samples overwrite setup
+                 * failures in the kernel log ring buffer.
+                 */
+                if (db_batch_log_calls || db_batch_log_poll_inline_cqes ||
+                    db_batch_log_hot_hints)
+                    pr_info("hollow RC db batch sched=%d worker=%u scans=%llu db_calls=%llu active_pct_x100=%llu db_wqes=%llu db_avg_x100=%llu db_max=%llu limit_stalls=%llu poll_inline_calls=%llu poll_inline_cqes=%llu poll_inline_avg_x100=%llu poll_inline_empty=%llu poll_inline_empty_pct_x100=%llu ready_fast_enabled=%u ready_fast_hits=%llu ready_fast_wqes=%llu ready_fast_avg_x100=%llu hot_hints=%llu hot_scans=%llu hot_owner_busy=%llu hot_db_calls=%llu hot_db_wqes=%llu hot_db_avg_x100=%llu\n",
                         id, worker_id, db_batch_log_scans,
                         db_batch_log_calls,
                         div64_u64(db_batch_log_calls * 10000,

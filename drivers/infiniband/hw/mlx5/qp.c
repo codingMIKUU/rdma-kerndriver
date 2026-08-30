@@ -1181,83 +1181,80 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 	struct mlx5_ib_srmc *selected = NULL;
 	struct mlx5_ib_usr_rc_route *route;
 	struct mlx5_ib_cqbuf *cqb;
-	u32 seen = 0;
-	u32 target;
 	u32 hash;
+	u32 start;
 	u16 owner_worker;
+	u32 indexed = 0;
+	u32 gid_matches = 0;
+	u32 worker_matches = 0;
+	u32 usable_matches = 0;
 	int si;
 	int i;
 
 	if (usr_rc_id >= ARRAY_SIZE(sched_group.usr_rc_routes))
 		return NULL;
-	route = &sched_group.usr_rc_routes[usr_rc_id];
-	cqb = smp_load_acquire(&route->cqb);
-	if (!cqb)
-		return NULL;
-	owner_worker = READ_ONCE(cqb->owner_worker);
+
+	/*
+	 * With one scheduler worker every KQP is owned by worker zero.  Do not
+	 * make KQP attachment depend on the lifetime/timing of the userspace CQ
+	 * route in that case.  This matters during highly concurrent MPI setup,
+	 * where CQ teardown from an aborting rank may race with other ranks still
+	 * attaching their logical QPs.
+	 */
+	if (sched_group.scheds && sched_group.num_sched > 0 &&
+	    sched_group.scheds[0].worker_count <= 1) {
+		owner_worker = 0;
+	} else {
+		route = &sched_group.usr_rc_routes[usr_rc_id];
+		cqb = smp_load_acquire(&route->cqb);
+		if (!cqb) {
+			pr_err("hollow RC select KQP: usr_rc=%u has no active CQ route\n",
+			       usr_rc_id);
+			return NULL;
+		}
+		owner_worker = READ_ONCE(cqb->owner_worker);
+	}
+
+	hash = jhash(dgid->raw, sizeof(dgid->raw), 0x5a17c9e3);
+	hash = jhash_2words(hash, usr_rc_id, 0x9e3779b9);
+	start = hash % num_kqps;
 
 	for (si = 0; si < max_t(int, 1, sched_group.num_sched); si++) {
 		struct mlx5_ib_sched *sched = &sched_group.scheds[si];
 
 		mutex_lock(&sched->srmc_lock);
-		for (i = 0; i < NUM_SRMC; i++) {
-			struct mlx5_ib_srmc *srmc = sched->srmc_tb[i];
+		/*
+		 * srmc_tb is a mixed GID hash table used by both initiator KQPs
+		 * and incoming target connections.  Bidirectional MPI setup can
+		 * therefore change its probe layout while all initiator KQPs are
+		 * still healthy.  srmc_by_idx is the authoritative table populated
+		 * only after an initiator KQP has been created successfully.
+		 */
+		for (i = 0; i < num_kqps; i++) {
+			u32 kqp_idx = (start + i) % num_kqps;
+			struct mlx5_ib_srmc *srmc = sched->srmc_by_idx[kqp_idx];
 
 			if (!srmc)
 				continue;
 			if (IS_ERR(srmc)) {
-				pr_warn_ratelimited("hollow RC attach: dropping invalid srmc slot %d: %ld\n",
-						    i, PTR_ERR(srmc));
-				sched->srmc_tb[i] = NULL;
+				pr_warn_ratelimited("hollow RC attach: invalid indexed srmc %u: %ld\n",
+						    kqp_idx, PTR_ERR(srmc));
 				continue;
 			}
+			indexed++;
 
 			if (memcmp(srmc->dgid.raw, dgid->raw,
 				   sizeof(srmc->dgid.raw)) != 0)
 				continue;
-			if (srmc->srmc_idx >= num_kqps)
-				continue;
+			gid_matches++;
 			if (srmc->owner_worker != owner_worker)
 				continue;
+			worker_matches++;
 			if (!srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
 				continue;
-
-			seen++;
-		}
-
-		if (!seen) {
-			mutex_unlock(&sched->srmc_lock);
-			continue;
-		}
-
-		hash = jhash(dgid->raw, sizeof(dgid->raw), 0x5a17c9e3);
-		hash = jhash_2words(hash, usr_rc_id, 0x9e3779b9);
-		target = hash % seen;
-		seen = 0;
-		for (i = 0; i < NUM_SRMC; i++) {
-			struct mlx5_ib_srmc *srmc = sched->srmc_tb[i];
-
-			if (!srmc)
-				continue;
-			if (IS_ERR(srmc)) {
-				pr_warn_ratelimited("hollow RC attach: dropping invalid srmc slot %d: %ld\n",
-						    i, PTR_ERR(srmc));
-				sched->srmc_tb[i] = NULL;
-				continue;
-			}
-			if (memcmp(srmc->dgid.raw, dgid->raw,
-				   sizeof(srmc->dgid.raw)) != 0)
-				continue;
-			if (srmc->srmc_idx >= num_kqps)
-				continue;
-			if (srmc->owner_worker != owner_worker)
-				continue;
-			if (!srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
-				continue;
-			if (seen++ == target) {
-				selected = srmc;
-				break;
-			}
+			usable_matches++;
+			selected = srmc;
+			break;
 		}
 
 		if (selected) {
@@ -1268,6 +1265,13 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 
 		mutex_unlock(&sched->srmc_lock);
 	}
+
+	pr_err("hollow RC select KQP failed: usr_rc=%u worker=%u gid=%pI6c indexed=%u gid_matches=%u worker_matches=%u usable_matches=%u ready_total=%zu expected=%u\n",
+	       usr_rc_id, owner_worker, dgid->raw, indexed, gid_matches,
+	       worker_matches, usable_matches,
+	       sched_group.scheds ?
+	       smp_load_acquire(&sched_group.scheds[0].ready_srmc_cnt) : 0,
+	       num_kqps);
 
 	return NULL;
 }
@@ -1768,6 +1772,7 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 	struct mlx5_ib_srmc *srmc;
 	struct mlx5_ib_srmc *large_srmc = NULL;
 	union ib_gid dgid = {};
+	const char *fail_stage = "initial-validation";
 	int si;
 	int err;
 
@@ -1780,6 +1785,7 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 
 	context = rdma_udata_to_drv_context(udata, struct mlx5_ib_ucontext,
 					    ibucontext);
+	fail_stage = "bind-shared-pd";
 	err = mlx5_ib_bind_hollow_rc_shared_pd(dev, pd, context);
 	if (err)
 		return err;
@@ -1800,6 +1806,7 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 
 	if (!qp->srmc_owner) {
 		for (si = 0; si < max_t(int, 1, sched_group.num_sched); si++) {
+			fail_stage = "ensure-kqp-group";
 			err = is_xrc_exists(&sched_group.scheds[si], pd, &dgid,
 					    SRMC_CREATE_FLAG_INIT_QP, 0,
 					    qp->sq.max_post);
@@ -1807,6 +1814,7 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 				goto out_owner_unlock;
 		}
 
+		fail_stage = "select-kqp";
 		srmc = mlx5_ib_find_pseudo_random_srmc_by_gid(
 			&dgid, qp->usr_rc_id_valid ?
 			       qp->usr_rc_id : qp->ibqp.qp_num);
@@ -1853,20 +1861,24 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 				srmc->ini_cb.refcnt);
 		}
 
+	fail_stage = "prepare-sq-mmap";
 	err = mlx5_ib_modify_qp_sq_mmap(dev, context, qp, resp);
 	if (err)
 		goto out_owner_unlock;
 
+	fail_stage = "prepare-ctrl-mmap";
 	err = mlx5_ib_create_qp_ctrl_mmap(dev, context, qp, resp);
 	if (err)
 		goto out_owner_unlock;
 
+	fail_stage = "prepare-publish-mmap";
 	err = mlx5_ib_create_qp_publish_mmap(context, qp, resp);
 	if (err)
 		goto out_owner_unlock;
 
 	mlx5_ib_fill_kernel_qp_info(qp, resp);
 
+	fail_stage = "prepare-direct-db-mmaps";
 	err = mlx5_ib_prepare_farm_db_mmaps(dev, context, qp, resp);
 	if (err)
 		goto out_owner_unlock;
@@ -1900,6 +1912,13 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 	err = 0;
 
 out_owner_unlock:
+	if (err)
+		pr_err("hollow RC attach failed: usr_rc=%u stage=%s error=%d owner=%d ready=%zu expected=%u\n",
+		       qp->ibqp.qp_num, fail_stage, err,
+		       qp->srmc_owner ? qp->srmc_owner->srmc_idx : -1,
+		       sched_group.scheds ?
+		       smp_load_acquire(&sched_group.scheds[0].ready_srmc_cnt) : 0,
+		       num_kqps);
 	mutex_unlock(&sched_group.owner_lock);
 	return err;
 }
@@ -6004,6 +6023,7 @@ int mlx5_ib_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	struct mlx5_ib_modify_qp ucmd = {};
 	enum ib_qp_type qp_type;
 	enum ib_qp_state cur_state, new_state;
+	const char *hollow_fail_stage = "pre-validation";
 	int err = -EINVAL;
 
 	if (!mlx5_ib_modify_qp_allowed(dev, qp))
@@ -6065,6 +6085,7 @@ int mlx5_ib_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	new_state = attr_mask & IB_QP_STATE ? attr->qp_state : cur_state;
 
 	if (qp->flags & IB_QP_CREATE_SOURCE_QPN) {
+		hollow_fail_stage = "source-qpn-mask";
 		if (attr_mask & ~(IB_QP_STATE | IB_QP_CUR_STATE)) {
 			mlx5_ib_dbg(dev, "invalid attr_mask 0x%x when underlay QP is used\n",
 				    attr_mask);
@@ -6073,6 +6094,7 @@ int mlx5_ib_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	} else if (!ignored_ts_check(qp_type) &&
 		   !ib_modify_qp_is_ok(cur_state, new_state, qp_type,
 				       attr_mask)) {
+		hollow_fail_stage = "state-transition";
 		mlx5_ib_dbg(dev, "invalid QP state transition from %d to %d, qp_type %d, attr_mask 0x%x\n",
 			    cur_state, new_state, qp->type, attr_mask);
 		goto out;
@@ -6084,10 +6106,12 @@ int mlx5_ib_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	}
 	if ((attr_mask & IB_QP_PKEY_INDEX) &&
 	    attr->pkey_index >= dev->pkey_table_len) {
+		hollow_fail_stage = "pkey-index";
 		mlx5_ib_dbg(dev, "invalid pkey index %d\n", attr->pkey_index);
 		goto out;
 	}
 
+	hollow_fail_stage = "rd-atomic";
 	if (!validate_rd_atomic(dev, attr, attr_mask, qp_type))
 		goto out;
 
@@ -6098,10 +6122,12 @@ int mlx5_ib_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 
 	if (mlx5_ib_is_hollow_rc_qp(qp)) {
 		err = 0;
-		if (new_state == IB_QPS_RTR)
+		if (new_state == IB_QPS_RTR) {
+			hollow_fail_stage = "attach";
 			err = mlx5_ib_attach_hollow_rc_srmc(dev, ibqp->pd, qp,
 							    udata, attr,
 							    attr_mask, &resp);
+		}
 		if (!err) {
 			qp->state = new_state;
 			if (attr_mask & IB_QP_ACCESS_FLAGS)
@@ -6128,11 +6154,17 @@ int mlx5_ib_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 
 	/* resp.response_length is set in ECE supported flows only */
 	if (!err && resp.response_length &&
-	    udata->outlen >= resp.response_length)
+	    udata->outlen >= resp.response_length) {
 		/* Return -EFAULT to the user and expect him to destroy QP. */
+		hollow_fail_stage = "copy-response";
 		err = ib_copy_to_udata(udata, &resp, resp.response_length);
+	}
 
 out:
+	if (err && mlx5_ib_is_hollow_rc_qp(qp))
+		pr_err("hollow RC modify failed: usr_rc=%u stage=%s cur=%d new=%d mask=0x%x error=%d\n",
+		       qp->ibqp.qp_num, hollow_fail_stage, cur_state, new_state,
+		       attr_mask, err);
 	mutex_unlock(&qp->mutex);
 	return err;
 }
