@@ -4515,6 +4515,33 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
     pr_info("mlx5_sched_exit success\n");
     // mlx5_ib_unmap_ubuf(sched,0);
 }
+struct server_conn_info
+{
+    struct list_head node;
+    struct rdma_cm_id *cm_id;
+    struct mlx5_ib_server *server;
+    struct srm_cb *cb;
+    struct ib_cq *cq;
+    struct ib_pd *pd;
+    int flags;
+};
+
+static void mlx5_ib_server_untrack_conn(struct server_conn_info *conn_info)
+{
+    struct mlx5_ib_server *server;
+
+    if (!conn_info)
+        return;
+    server = conn_info->server;
+    if (!server)
+        return;
+
+    mutex_lock(&server->conn_lock);
+    if (!list_empty(&conn_info->node))
+        list_del_init(&conn_info->node);
+    mutex_unlock(&server->conn_lock);
+}
+
 int mlx5_ib_server_init(struct mlx5_ib_server *server)
 {
     u32 server_cpu;
@@ -4539,6 +4566,8 @@ int mlx5_ib_server_init(struct mlx5_ib_server *server)
 
     atomic_set(&server->conn_tasks, 0);
     init_waitqueue_head(&server->conn_wait);
+    mutex_init(&server->conn_lock);
+    INIT_LIST_HEAD(&server->conn_list);
     WRITE_ONCE(server->stopping, false);
     mlx5_ib_srm_cb_init_waitqueue(&server->server_cb);
     server->task = kthread_create_on_node(mlx5_sched_run_server,
@@ -4566,10 +4595,15 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
     int i, j;
     struct mlx5_ib_sched *sched;
     struct mlx5_ib_srmc *srmc;
-    struct srm_cb *cb;
+    struct server_conn_info *conn_info, *next;
+    LIST_HEAD(conn_list);
+    u32 destroyed_cm_ids = 0;
     long waited;
 
+    /* Serialize the stop flag with CONNECT_REQUEST registration. */
+    mutex_lock(&server->conn_lock);
     WRITE_ONCE(server->stopping, true);
+    mutex_unlock(&server->conn_lock);
     if (server->task && !IS_ERR(server->task)) {
         mlx5_ib_srm_cb_wake_all(&server->server_cb);
         kthread_stop(server->task);
@@ -4607,40 +4641,48 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
                atomic_read(&server->conn_tasks) == 0);
 
     /*
-     * Never hold srmc_lock while destroying CM resources. CM teardown can
-     * sleep and invoke callbacks.
+     * The SRMC table is not a lifetime registry: initiator and target
+     * objects share its slots, and a failed/overlapping setup can replace a
+     * target pointer.  Keep every accepted child CM ID in conn_list and
+     * destroy that authoritative list before any SRMC storage is freed.
+     * rdma_destroy_id() waits for its event handler, so no callback can use
+     * cb after this loop completes.
      */
-    for (i = 0; i < sched_group->num_sched; i++) {
-        sched = &sched_group->scheds[i];
-        for (j = 0; j < NUM_SRMC; j++) {
-            mutex_lock(&sched->srmc_lock);
-            srmc = sched->srmc_tb[j];
-            if (mlx5_ib_srmc_is_invalid(srmc, "mlx5_ib_server_exit destroy", j)) {
-                sched->srmc_tb[j] = NULL;
-                mutex_unlock(&sched->srmc_lock);
-                continue;
-            }
-            cb = srmc ? &srmc->tgt_cb : NULL;
-            mutex_unlock(&sched->srmc_lock);
-            if (!cb || !cb->cm_id)
-                continue;
+    mutex_lock(&server->conn_lock);
+    list_splice_init(&server->conn_list, &conn_list);
+    mutex_unlock(&server->conn_lock);
+    list_for_each_entry_safe(conn_info, next, &conn_list, node) {
+        struct rdma_cm_id *cm_id = conn_info->cm_id;
+        struct srm_cb *cb = conn_info->cb;
+        bool owns_cb = cb && cb->cm_id == cm_id;
 
-            if (cb->cm_id->qp)
-                rdma_destroy_qp(cb->cm_id);
-            cb->qp = NULL;
-            if (cb->cq && !IS_ERR(cb->cq))
-                ib_destroy_cq(cb->cq);
-            cb->cq = NULL;
-            if (cb->pd && !IS_ERR(cb->pd))
-                ib_dealloc_pd(cb->pd);
-            cb->pd = NULL;
-            cb->state = ERROR;
-            rdma_destroy_id(cb->cm_id);
+        list_del_init(&conn_info->node);
+        if (cm_id && cm_id->qp)
+            rdma_destroy_qp(cm_id);
+        if (conn_info->cq && !IS_ERR(conn_info->cq))
+            ib_destroy_cq(conn_info->cq);
+        if (conn_info->pd && !IS_ERR(conn_info->pd))
+            ib_dealloc_pd(conn_info->pd);
+        if (owns_cb) {
             cb->cm_id = NULL;
+            if (cb->cq == conn_info->cq)
+                cb->cq = NULL;
+            if (cb->pd == conn_info->pd)
+                cb->pd = NULL;
+            cb->qp = NULL;
+            cb->state = ERROR;
             cb->refcnt = 0;
-            WRITE_ONCE(cb->sem_initialized, false);
         }
+        if (cm_id) {
+            rdma_destroy_id(cm_id);
+            destroyed_cm_ids++;
+        }
+        if (owns_cb)
+            WRITE_ONCE(cb->sem_initialized, false);
+        kfree(conn_info);
     }
+    pr_info("hollow RC server destroyed %u accepted CM IDs\n",
+            destroyed_cm_ids);
 
     if (server->server_cb.cm_id) {
         rdma_destroy_id(server->server_cb.cm_id);
@@ -4894,13 +4936,6 @@ int mlx5_sched_reg_mr(struct ib_mr *mr, struct mlx5_ib_qp *qp, char *dma_buf, si
 }
 
 
-struct server_conn_info
-{
-    struct rdma_cm_id *cm_id;
-    int flags;
-    struct mlx5_ib_server *server;
-};
-
 static void mlx5_ib_server_conn_done(struct mlx5_ib_server *server)
 {
     if (atomic_dec_and_test(&server->conn_tasks))
@@ -4976,6 +5011,7 @@ int srm_create_connection(void *data)
         {
             pr_err("srmc queue is full\n");
             mutex_unlock(&sched->srmc_lock);
+            mlx5_ib_server_untrack_conn(conn_info);
             rdma_destroy_id(cm_id);
             kfree(conn_info);
             mlx5_ib_server_conn_done(server);
@@ -4990,6 +5026,7 @@ int srm_create_connection(void *data)
         if (!srmc) {
             mutex_unlock(&sched->srmc_lock);
             rdma_reject(cm_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);
+            mlx5_ib_server_untrack_conn(conn_info);
             rdma_destroy_id(cm_id);
             kfree(conn_info);
             mlx5_ib_server_conn_done(server);
@@ -5084,7 +5121,9 @@ int srm_create_connection(void *data)
     DEBUG_LOG("accept\n");
 
     DEBUG_LOG("srm_create_connection success\n");
-    kfree(conn_info);
+    conn_info->cb = cb;
+    conn_info->cq = cb->cq;
+    conn_info->pd = cb->pd;
     mlx5_ib_server_conn_done(server);
     return 0;
 
@@ -5105,6 +5144,7 @@ err0:
     cb->cm_id = NULL;
     cb->refcnt = 0;
     rdma_reject(cm_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);
+    mlx5_ib_server_untrack_conn(conn_info);
     rdma_destroy_id(cm_id);
     kfree(conn_info);
     mlx5_ib_server_conn_done(server);
@@ -5161,12 +5201,24 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
         conn_info->cm_id = cma_id;
         conn_info->flags = flags;
         conn_info->server = server;
+        INIT_LIST_HEAD(&conn_info->node);
+        mutex_lock(&server->conn_lock);
+        if (READ_ONCE(server->stopping)) {
+            mutex_unlock(&server->conn_lock);
+            kfree(conn_info);
+            rdma_reject(cma_id, NULL, 0,
+                        IB_CM_REJ_CONSUMER_DEFINED);
+            break;
+        }
+        list_add_tail(&conn_info->node, &server->conn_list);
+        mutex_unlock(&server->conn_lock);
         atomic_inc(&server->conn_tasks);
         task = kthread_create_on_node(srm_create_connection, conn_info,
                                       srm_numa_node,
                                       "server connection thread");
         if (IS_ERR(task)) {
             ret = PTR_ERR(task);
+            mlx5_ib_server_untrack_conn(conn_info);
             kfree(conn_info);
             mlx5_ib_server_conn_done(server);
             rdma_reject(cma_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);

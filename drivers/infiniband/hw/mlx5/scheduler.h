@@ -407,6 +407,9 @@ struct mlx5_ib_server
     struct srm_cb server_cb;
     atomic_t conn_tasks;
     wait_queue_head_t conn_wait;
+    /* Every accepted child CM ID must remain reachable until teardown. */
+    struct mutex conn_lock;
+    struct list_head conn_list;
     bool stopping;
 };
 enum srmc_create_flag
