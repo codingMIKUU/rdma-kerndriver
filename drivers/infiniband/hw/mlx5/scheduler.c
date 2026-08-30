@@ -4763,12 +4763,16 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
 	        (smp_load_acquire(&sched->ready_srmc_cnt) < mlx5_srm_effective_kqps() ||
 	         READ_ONCE(sched->init_error))) {
 	        mutex_unlock(&sched->srmc_lock);
-	        ret = wait_event_interruptible_timeout(sched->init_wait,
+	        ret = wait_event_killable_timeout(sched->init_wait,
 	            READ_ONCE(sched->init_error) ||
 	            smp_load_acquire(&sched->ready_srmc_cnt) >= mlx5_srm_effective_kqps(),
 	            msecs_to_jiffies(SRMC_INIT_WAIT_TIMEOUT_MS));
-	        if (ret < 0)
+	        if (ret < 0) {
+	            pr_err("hollow RC KQP group wait interrupted: error=%d ready=%zu expected=%u\n",
+	                   ret, smp_load_acquire(&sched->ready_srmc_cnt),
+	                   mlx5_srm_effective_kqps());
 	            return ret;
+	        }
 	        if (!ret) {
 	            pr_err("hollow RC KQP group init timed out after %u ms: ready=%zu expected=%u\n",
 	                   SRMC_INIT_WAIT_TIMEOUT_MS,
@@ -5246,11 +5250,14 @@ static int srm_bind_client(struct srm_cb *cb)
         return ret;
     }
 
-    ret = wait_event_interruptible_timeout(cb->sem,
-                                           cb->state >= ROUTE_RESOLVED,
-                                           msecs_to_jiffies(5000));
-    if (ret <= 0)
+    ret = wait_event_killable_timeout(cb->sem,
+                                      cb->state >= ROUTE_RESOLVED,
+                                      msecs_to_jiffies(5000));
+    if (ret <= 0) {
+        if (ret < 0)
+            pr_err("hollow RC route wait interrupted: error=%d\n", ret);
         return ret < 0 ? ret : -ETIMEDOUT;
+    }
     if (cb->state != ROUTE_RESOLVED)
     {
         printk(KERN_ERR
@@ -5286,11 +5293,14 @@ static int srm_connect_client(struct srm_cb *cb, int flags)
         return ret;
     }
 
-    ret = wait_event_interruptible_timeout(cb->sem,
-                                           cb->state >= CONNECTED,
-                                           msecs_to_jiffies(5000));
-    if (ret <= 0)
+    ret = wait_event_killable_timeout(cb->sem,
+                                      cb->state >= CONNECTED,
+                                      msecs_to_jiffies(5000));
+    if (ret <= 0) {
+        if (ret < 0)
+            pr_err("hollow RC connect wait interrupted: error=%d\n", ret);
         return ret < 0 ? ret : -ETIMEDOUT;
+    }
     if (cb->state == ERROR)
     {
         printk(KERN_ERR "wait for CONNECTED state %d error %d\n",
@@ -5557,11 +5567,14 @@ int srm_accept(struct srm_cb *cb)
         return ret;
     }
 
-    ret = wait_event_interruptible_timeout(cb->sem,
-                                           cb->state >= CONNECTED,
-                                           msecs_to_jiffies(5000));
-    if (ret <= 0)
+    ret = wait_event_killable_timeout(cb->sem,
+                                      cb->state >= CONNECTED,
+                                      msecs_to_jiffies(5000));
+    if (ret <= 0) {
+        if (ret < 0)
+            pr_err("hollow RC accept wait interrupted: error=%d\n", ret);
         return ret < 0 ? ret : -ETIMEDOUT;
+    }
     if (cb->state == ERROR)
     {
         printk(KERN_ERR "wait for CONNECTED state %d\n",
