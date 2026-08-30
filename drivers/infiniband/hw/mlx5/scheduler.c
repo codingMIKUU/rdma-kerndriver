@@ -39,6 +39,10 @@
 #include "mlx5_avl_tree.h"
 #include <linux/mlx5/driver.h>
 
+/* A full KQP group performs multiple serial RDMA-CM handshakes.  Concurrent
+ * Hollow QP creators must wait for the complete group before returning. */
+#define SRMC_INIT_WAIT_TIMEOUT_MS 120000
+
 static struct aligned_u32 *user_wqe_table, *user_level_table;
 struct xrc_table_entry ***user_xrc_table;//三维数组
 // 用户态mmap表，表示当前多少个wqe已经下发
@@ -4762,11 +4766,16 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
 	        ret = wait_event_interruptible_timeout(sched->init_wait,
 	            READ_ONCE(sched->init_error) ||
 	            smp_load_acquire(&sched->ready_srmc_cnt) >= mlx5_srm_effective_kqps(),
-	            msecs_to_jiffies(5000));
+	            msecs_to_jiffies(SRMC_INIT_WAIT_TIMEOUT_MS));
 	        if (ret < 0)
 	            return ret;
-	        if (!ret)
+	        if (!ret) {
+	            pr_err("hollow RC KQP group init timed out after %u ms: ready=%zu expected=%u\n",
+	                   SRMC_INIT_WAIT_TIMEOUT_MS,
+	                   smp_load_acquire(&sched->ready_srmc_cnt),
+	                   mlx5_srm_effective_kqps());
 	            return -ETIMEDOUT;
+	        }
 	        ret = READ_ONCE(sched->init_error);
 	        if (ret)
 	            return ret;
