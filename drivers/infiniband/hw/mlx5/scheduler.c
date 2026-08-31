@@ -4728,8 +4728,19 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
         {
             break;
         }
-	        if (memcmp(srmc->dgid.raw, dgid->raw, sizeof(srmc->dgid.raw)) == 0)
-	        {
+	        if (memcmp(srmc->dgid.raw, dgid->raw,
+	                   sizeof(srmc->dgid.raw)) == 0) {
+	            /*
+	             * srmc_tb contains both outgoing initiator KQPs and
+	             * accepted target connections.  A target-only entry has the
+	             * same peer GID but cannot satisfy an initiator lookup.  Its
+	             * wqe_infos is NULL; initiator entries allocate wqe_infos
+	             * before being published in this table.  Keep probing past
+	             * target-only entries so bidirectional setup can create the
+	             * local KQP group instead of waiting forever for it.
+	             */
+	            if (!srmc->wqe_infos)
+	                continue;
 	            if (flags == SRMC_CREATE_FLAG_INIT_QP)
 	                ret = 0;
 	            has_srmc = 1;
