@@ -309,6 +309,13 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 	}
 
 	mlx5_ib_dbg(dev, "create SRQ with srqn 0x%x\n", srq->msrq.srqn);
+	if (init_attr->srq_type == IB_SRQT_XRC &&
+	    init_attr->ext.xrc.xrcd == READ_ONCE(dev->hollow_rc_xrcd))
+		pr_info("hollow RC SRQ identity: dev=%s srqn=%u xrcd=%px xrcdn=%u max_wr=%u\n",
+			dev_name(&dev->ib_dev.dev), srq->msrq.srqn,
+			init_attr->ext.xrc.xrcd,
+			to_mxrcd(init_attr->ext.xrc.xrcd)->xrcdn,
+			init_attr->attr.max_wr);
 
 	srq->msrq.event = mlx5_ib_srq_event;
 	srq->ibsrq.ext.xrc.srq_num = srq->msrq.srqn;
