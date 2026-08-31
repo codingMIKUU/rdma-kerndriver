@@ -4951,6 +4951,7 @@ int srm_create_connection(void *data)
     extern struct mlx5_ib_sched_group sched_group;
     struct mlx5_ib_srmc *srmc;
     struct mlx5_ib_sched *sched;
+    struct mlx5_ib_dev *ibdev;
     union ib_gid dgid;
     struct ib_cq_init_attr cq_attr;
     struct ib_qp_init_attr init_attr;
@@ -5090,7 +5091,8 @@ int srm_create_connection(void *data)
     init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     init_attr.qp_type = IB_QPT_XRC_TGT;
 
-    cb->xrcd = ((struct srm_cb *)cm_id->context)->xrcd;
+    ibdev = to_mdev(cm_id->device);
+    cb->xrcd = READ_ONCE(ibdev->hollow_rc_xrcd);
     init_attr.xrcd = cb->xrcd;
     DEBUG_LOG("xrcd = %p,txdepth = %d\n", init_attr.xrcd, init_attr.cap.max_recv_wr);
     if (cb->xrcd == NULL)

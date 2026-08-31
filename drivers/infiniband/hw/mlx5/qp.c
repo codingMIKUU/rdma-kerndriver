@@ -104,7 +104,6 @@ struct mlx5_ib_sqd {
 extern struct mlx5_ib_sched_group sched_group;
 extern const int num_kqps;
 
-extern struct mlx5_ib_server server;
 
 static bool mlx5_ib_is_hollow_rc_qp(struct mlx5_ib_qp *qp)
 {
@@ -6557,7 +6556,7 @@ int mlx5_ib_alloc_xrcd(struct ib_xrcd *ibxrcd, struct ib_udata *udata)
 	DEBUG_LOG("server_cb's xrcd is %p\n",xrcd);
 	err = mlx5_cmd_xrcd_alloc(dev->mdev, &xrcd->xrcdn, 0);
 	if (!err)
-		cmpxchg(&server.server_cb.xrcd, NULL, ibxrcd);
+		cmpxchg(&dev->hollow_rc_xrcd, NULL, ibxrcd);
 
 	return err;
 }
@@ -6570,7 +6569,7 @@ int mlx5_ib_dealloc_xrcd(struct ib_xrcd *ibxrcd, struct ib_udata *udata)
 
 	err = mlx5_cmd_xrcd_dealloc(dev->mdev, xrcdn, 0);
 	if (!err)
-		cmpxchg(&server.server_cb.xrcd, ibxrcd, NULL);
+		cmpxchg(&dev->hollow_rc_xrcd, ibxrcd, NULL);
 
 	return err;
 }
