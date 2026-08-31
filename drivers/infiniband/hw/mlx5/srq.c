@@ -253,6 +253,32 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 
 	in.type = init_attr->srq_type;
 
+	/*
+	 * Hollow RC shares one physical initiator SQ between user contexts.  Its
+	 * receive buffers must therefore be registered in the same shared PD as
+	 * the physical SQ.  MVAPICH creates the XRC SRQ before its logical send
+	 * QPs, so waiting for QP creation to bind the user PD leaves the SRQ on
+	 * the original PDN while its later MRs use the shared PDN.  The responder
+	 * then rejects SENDs when it resolves an lkey from that different PD.
+	 *
+	 * Bind as soon as the selected Hollow XRCD creates its XRC SRQ.  This is
+	 * setup-only; ordinary SRQs and XRC SRQs outside the selected Hollow XRCD
+	 * keep their existing PD.
+	 */
+	if (udata && init_attr->srq_type == IB_SRQT_XRC &&
+	    init_attr->ext.xrc.xrcd &&
+	    init_attr->ext.xrc.xrcd == READ_ONCE(dev->hollow_rc_xrcd)) {
+		struct mlx5_ib_ucontext *context =
+			rdma_udata_to_drv_context(udata,
+						   struct mlx5_ib_ucontext,
+						   ibucontext);
+
+		err = mlx5_ib_bind_hollow_rc_shared_pd(dev, ib_srq->pd,
+							context);
+		if (err)
+			return err;
+	}
+
 	if (udata)
 		err = create_srq_user(ib_srq->pd, srq, &in, udata, buf_size);
 	else
@@ -312,10 +338,12 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 	if (init_attr->srq_type == IB_SRQT_XRC &&
 	    init_attr->ext.xrc.xrcd &&
 	    init_attr->ext.xrc.xrcd == READ_ONCE(dev->hollow_rc_xrcd))
-		pr_info("hollow RC SRQ identity: dev=%s srqn=%u xrcd=%px xrcdn=%u max_wr=%u\n",
+		pr_info("hollow RC SRQ identity: dev=%s srqn=%u xrcd=%px xrcdn=%u pdn=%u original_pdn=%u max_wr=%u\n",
 			dev_name(&dev->ib_dev.dev), srq->msrq.srqn,
 			init_attr->ext.xrc.xrcd,
 			to_mxrcd(init_attr->ext.xrc.xrcd)->xrcdn,
+			mlx5_ib_effective_pdn(ib_srq->pd),
+			to_mpd(ib_srq->pd)->pdn,
 			init_attr->attr.max_wr);
 
 	srq->msrq.event = mlx5_ib_srq_event;
