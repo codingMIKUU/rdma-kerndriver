@@ -13,7 +13,18 @@ static int debug = 0;
 // 对于接收端，NUM_SRMC等于num_kqps*2才行（因为只有一个调度器，发送端两个调度器全发往它了）
 #define NUM_SQB 35000
 #define NUM_LEVEL 2
-#define MLX5_SRM_ENABLE_LARGE_KERNEL_QP 1
+/*
+ * Size-aware dual-KQP mode.  Keep the original single-KQP path as the
+ * default; set this to 1 (or override it from the compiler command line) to
+ * create one small and one large KQP for every destination lane.
+ */
+#ifndef MLX5_SRM_ENABLE_LARGE_KERNEL_QP
+#define MLX5_SRM_ENABLE_LARGE_KERNEL_QP 0
+#endif
+#if MLX5_SRM_ENABLE_LARGE_KERNEL_QP != 0 && \
+    MLX5_SRM_ENABLE_LARGE_KERNEL_QP != 1
+#error "MLX5_SRM_ENABLE_LARGE_KERNEL_QP must be 0 or 1"
+#endif
 #define MLX5_SRM_LARGE_MSG_THRESHOLD (4U * 1024U)
 #define MLX5_SRM_KERNEL_QP_LEVELS \
     (MLX5_SRM_ENABLE_LARGE_KERNEL_QP ? NUM_LEVEL : 1)
