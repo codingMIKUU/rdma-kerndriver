@@ -297,38 +297,6 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 
 	in.type = init_attr->srq_type;
 
-	/*
-	 * Hollow RC shares one physical initiator SQ between user contexts.  Its
-	 * receive buffers must therefore be registered in the same shared PD as
-	 * the physical SQ.  MVAPICH creates the XRC SRQ before its logical send
-	 * QPs, so waiting for QP creation to bind the user PD leaves the SRQ on
-	 * the original PDN while its later MRs use the shared PDN.  The responder
-	 * then rejects SENDs when it resolves an lkey from that different PD.
-	 *
-	 * Bind as soon as the selected Hollow XRCD creates its XRC SRQ.  This is
-	 * setup-only; ordinary SRQs and XRC SRQs outside the selected Hollow XRCD
-	 * keep their existing PD.
-	 */
-	if (udata && init_attr->srq_type == IB_SRQT_XRC && srq->hollow_rc) {
-		struct mlx5_ib_ucontext *context =
-			rdma_udata_to_drv_context(udata,
-						   struct mlx5_ib_ucontext,
-						   ibucontext);
-
-		if (!init_attr->ext.xrc.xrcd)
-			return -EINVAL;
-
-		err = mlx5_ib_register_hollow_rc_xrcd(dev, srq,
-						       init_attr->ext.xrc.xrcd);
-		if (err)
-			return err;
-
-		err = mlx5_ib_bind_hollow_rc_shared_pd(dev, ib_srq->pd,
-							context);
-		if (err)
-			goto err_hollow_xrcd;
-	}
-
 	if (udata)
 		err = create_srq_user(ib_srq->pd, srq, &in, udata, buf_size);
 	else
@@ -338,6 +306,34 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 		mlx5_ib_warn(dev, "create srq %s failed, err %d\n",
 			     udata ? "user" : "kernel", err);
 		goto err_hollow_xrcd;
+	}
+
+	/*
+	 * create_srq_user() parses the provider command and sets hollow_rc.
+	 * Register the explicitly marked XRCD only after that parsing, but before
+	 * creating the hardware SRQ, whose PDN must match the shared initiator SQ.
+	 * Native XRC SRQs never enter this block.
+	 */
+	if (udata && init_attr->srq_type == IB_SRQT_XRC && srq->hollow_rc) {
+		struct mlx5_ib_ucontext *context =
+			rdma_udata_to_drv_context(udata,
+						   struct mlx5_ib_ucontext,
+						   ibucontext);
+
+		if (!init_attr->ext.xrc.xrcd) {
+			err = -EINVAL;
+			goto err_usr_kern_srq;
+		}
+
+		err = mlx5_ib_register_hollow_rc_xrcd(dev, srq,
+						       init_attr->ext.xrc.xrcd);
+		if (err)
+			goto err_usr_kern_srq;
+
+		err = mlx5_ib_bind_hollow_rc_shared_pd(dev, ib_srq->pd,
+							context);
+		if (err)
+			goto err_usr_kern_srq;
 	}
 
 	in.log_size = ilog2(srq->msrq.max);
