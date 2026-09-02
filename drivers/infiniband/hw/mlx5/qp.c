@@ -6569,9 +6569,21 @@ int mlx5_ib_dealloc_xrcd(struct ib_xrcd *ibxrcd, struct ib_udata *udata)
 	u32 xrcdn = to_mxrcd(ibxrcd)->xrcdn;
 	int err;
 
+	mutex_lock(&dev->hollow_rc_shared_pd_lock);
+	if (dev->hollow_rc_xrcd == ibxrcd &&
+	    dev->hollow_rc_xrcd_refcnt) {
+		mutex_unlock(&dev->hollow_rc_shared_pd_lock);
+		return -EBUSY;
+	}
+	mutex_unlock(&dev->hollow_rc_shared_pd_lock);
+
 	err = mlx5_cmd_xrcd_dealloc(dev->mdev, xrcdn, 0);
-	if (!err)
-		cmpxchg(&dev->hollow_rc_xrcd, ibxrcd, NULL);
+	if (!err) {
+		mutex_lock(&dev->hollow_rc_shared_pd_lock);
+		if (dev->hollow_rc_xrcd == ibxrcd)
+			WRITE_ONCE(dev->hollow_rc_xrcd, NULL);
+		mutex_unlock(&dev->hollow_rc_shared_pd_lock);
+	}
 
 	return err;
 }

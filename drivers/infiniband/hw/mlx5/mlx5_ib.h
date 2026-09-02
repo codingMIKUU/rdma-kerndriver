@@ -672,6 +672,7 @@ struct mlx5_ib_srq {
 	struct mutex		mutex;
 	int			wq_sig;
 	bool			hollow_rc;
+	bool			hollow_xrcd_registered;
 };
 
 struct mlx5_ib_xrcd {
@@ -1282,6 +1283,7 @@ struct mlx5_ib_dev {
 	u32			hollow_rc_shared_refcnt;
 	/* XRC receive resources are device-local; never select them globally. */
 	struct ib_xrcd		*hollow_rc_xrcd;
+	u32			hollow_rc_xrcd_refcnt;
 	struct mlx5_dc_tracer   dctr;
 	u32                     num_dc_cnak_qps;
 	u32                     max_dc_cnak_qps;

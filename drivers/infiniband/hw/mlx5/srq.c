@@ -10,6 +10,49 @@
 #include "mlx5_ib.h"
 #include "srq.h"
 
+static int mlx5_ib_register_hollow_rc_xrcd(struct mlx5_ib_dev *dev,
+					    struct mlx5_ib_srq *srq,
+					    struct ib_xrcd *xrcd)
+{
+	int err = 0;
+
+	mutex_lock(&dev->hollow_rc_shared_pd_lock);
+	if (dev->hollow_rc_xrcd && dev->hollow_rc_xrcd != xrcd) {
+		err = -EBUSY;
+		goto out;
+	}
+
+	WRITE_ONCE(dev->hollow_rc_xrcd, xrcd);
+	dev->hollow_rc_xrcd_refcnt++;
+	srq->hollow_xrcd_registered = true;
+	pr_info("hollow RC XRCD registered: dev=%s xrcd=%px refs=%u\n",
+		dev_name(&dev->ib_dev.dev), xrcd,
+		dev->hollow_rc_xrcd_refcnt);
+out:
+	mutex_unlock(&dev->hollow_rc_shared_pd_lock);
+	return err;
+}
+
+static void mlx5_ib_unregister_hollow_rc_xrcd(struct mlx5_ib_dev *dev,
+					       struct mlx5_ib_srq *srq)
+{
+	if (!srq->hollow_xrcd_registered)
+		return;
+
+	mutex_lock(&dev->hollow_rc_shared_pd_lock);
+	if (WARN_ON(!dev->hollow_rc_xrcd_refcnt))
+		goto out;
+
+	dev->hollow_rc_xrcd_refcnt--;
+	if (!dev->hollow_rc_xrcd_refcnt)
+		WRITE_ONCE(dev->hollow_rc_xrcd, NULL);
+	srq->hollow_xrcd_registered = false;
+	pr_info("hollow RC XRCD released: dev=%s refs=%u\n",
+		dev_name(&dev->ib_dev.dev), dev->hollow_rc_xrcd_refcnt);
+out:
+	mutex_unlock(&dev->hollow_rc_shared_pd_lock);
+}
+
 static void *get_wqe(struct mlx5_ib_srq *srq, int n)
 {
 	return mlx5_frag_buf_get_wqe(&srq->fbc, n);
@@ -271,20 +314,19 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 			rdma_udata_to_drv_context(udata,
 						   struct mlx5_ib_ucontext,
 						   ibucontext);
-		struct ib_xrcd *old;
 
 		if (!init_attr->ext.xrc.xrcd)
 			return -EINVAL;
 
-		old = cmpxchg(&dev->hollow_rc_xrcd, NULL,
-			      init_attr->ext.xrc.xrcd);
-		if (old && old != init_attr->ext.xrc.xrcd)
-			return -EBUSY;
+		err = mlx5_ib_register_hollow_rc_xrcd(dev, srq,
+						       init_attr->ext.xrc.xrcd);
+		if (err)
+			return err;
 
 		err = mlx5_ib_bind_hollow_rc_shared_pd(dev, ib_srq->pd,
 							context);
 		if (err)
-			return err;
+			goto err_hollow_xrcd;
 	}
 
 	if (udata)
@@ -295,7 +337,7 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 	if (err) {
 		mlx5_ib_warn(dev, "create srq %s failed, err %d\n",
 			     udata ? "user" : "kernel", err);
-		return err;
+		goto err_hollow_xrcd;
 	}
 
 	in.log_size = ilog2(srq->msrq.max);
@@ -381,6 +423,8 @@ err_usr_kern_srq:
 	else
 		destroy_srq_kernel(dev, srq);
 
+err_hollow_xrcd:
+	mlx5_ib_unregister_hollow_rc_xrcd(dev, srq);
 	return err;
 }
 
@@ -451,6 +495,7 @@ int mlx5_ib_destroy_srq(struct ib_srq *srq, struct ib_udata *udata)
 		destroy_srq_user(srq->pd, msrq, udata);
 	else
 		destroy_srq_kernel(dev, msrq);
+	mlx5_ib_unregister_hollow_rc_xrcd(dev, msrq);
 	return 0;
 }
 

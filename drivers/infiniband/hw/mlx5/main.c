@@ -4507,6 +4507,8 @@ static int mlx5_ib_stage_init_init(struct mlx5_ib_dev *dev)
 	dev->hollow_rc_shared_pdn = 0;
 	dev->hollow_rc_shared_uid = 0;
 	dev->hollow_rc_shared_refcnt = 0;
+	dev->hollow_rc_xrcd = NULL;
+	dev->hollow_rc_xrcd_refcnt = 0;
 	INIT_LIST_HEAD(&dev->qp_list);
 	spin_lock_init(&dev->reset_flow_resource_lock);
 	xa_init(&dev->odp_mkeys);
