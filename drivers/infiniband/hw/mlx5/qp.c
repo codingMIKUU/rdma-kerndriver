@@ -1756,6 +1756,7 @@ static void mlx5_ib_fill_large_kernel_qp_info(struct mlx5_ib_srmc *srmc,
 	resp->large_kernel_sq_max_gs = kqp->sq.max_gs;
 	resp->large_kernel_sq_qp_state_max_gs = kqp->sq.max_gs;
 	resp->large_kernel_max_inline_data = kqp->max_inline_data;
+	resp->large_msg_threshold = MLX5_SRM_LARGE_MSG_THRESHOLD;
 }
 
 static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
@@ -1846,11 +1847,12 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 			qp->srm_owner_registered = 1;
 		}
 		if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP)
-			pr_info("hollow RC attach: usr_rc=%u small_srmc=%d small_qpn=%u large_srmc=%d large_qpn=%u users=%d\n",
+			pr_info("hollow RC attach: usr_rc=%u small_srmc=%d small_qpn=%u large_srmc=%d large_qpn=%u threshold=%u users=%d\n",
 				qp->ibqp.qp_num, srmc->srmc_idx,
 				srmc->ini_cb.qp->ibqp.qp_num,
 				large_srmc->srmc_idx,
 				large_srmc->ini_cb.qp->ibqp.qp_num,
+				MLX5_SRM_LARGE_MSG_THRESHOLD,
 				srmc->ini_cb.refcnt);
 		else
 			pr_info("hollow RC attach: usr_rc=%u srmc=%d worker=%u qpn=%u users=%d\n",
@@ -1917,7 +1919,7 @@ out_owner_unlock:
 		       qp->srmc_owner ? qp->srmc_owner->srmc_idx : -1,
 		       sched_group.scheds ?
 		       smp_load_acquire(&sched_group.scheds[0].ready_srmc_cnt) : 0,
-		       num_kqps);
+		       num_kqps * MLX5_SRM_KERNEL_QP_LEVELS);
 	mutex_unlock(&sched_group.owner_lock);
 	return err;
 }

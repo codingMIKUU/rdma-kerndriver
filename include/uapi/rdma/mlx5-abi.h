@@ -498,7 +498,7 @@ struct mlx5_ib_modify_qp_resp {
 	__u32	farm_direct_db_batch;
 	__u32	farm_reserved;
 	__u32	large_sq_state_slot_idx;
-	__u32	large_reserved1;
+	__u32	large_msg_threshold;
 	__u64	large_sq_mmap_offset;
 	__u32	large_sq_mmap_len;
 	__u32	large_reserved2;

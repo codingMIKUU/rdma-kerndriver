@@ -3030,6 +3030,8 @@ int scheduler_polling(void *sched_data)
     u32 *poll_ring_next = NULL;
     u32 *poll_ring_prev = NULL;
     u32 poll_ring_head = 0;
+    u32 poll_ring_small_head = 0;
+    u32 poll_ring_large_head = 0;
     u64 last_hot_hint = 0;
     u64 worker_limit;
     struct mlx5_ib_sqbuf *sqb;
@@ -3095,10 +3097,29 @@ int scheduler_polling(void *sched_data)
         wake_up_all(&sched->init_wait);
         goto out;
     }
-    poll_ring_head = kqp_begin;
-    for (i = kqp_begin; i < kqp_end; i++) {
-        poll_ring_next[i] = i + 1 < kqp_end ? i + 1 : kqp_begin;
-        poll_ring_prev[i] = i > kqp_begin ? i - 1 : kqp_end - 1;
+    if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
+        /* Large/small mode currently requires one scheduler worker, so each
+         * class is one independent circular list of num_kqps entries.  Keeping
+         * the rings separate prevents a small-flow hot hint from jumping in
+         * front of the large-flow priority pass. */
+        poll_ring_small_head = 0;
+        poll_ring_large_head = num_kqps;
+        for (i = 0; i < num_kqps; i++) {
+            poll_ring_next[i] = i + 1 < num_kqps ? i + 1 : 0;
+            poll_ring_prev[i] = i ? i - 1 : num_kqps - 1;
+        }
+        for (i = num_kqps; i < 2 * num_kqps; i++) {
+            poll_ring_next[i] = i + 1 < 2 * num_kqps ?
+                                i + 1 : num_kqps;
+            poll_ring_prev[i] = i > num_kqps ?
+                                i - 1 : 2 * num_kqps - 1;
+        }
+    } else {
+        poll_ring_head = kqp_begin;
+        for (i = kqp_begin; i < kqp_end; i++) {
+            poll_ring_next[i] = i + 1 < kqp_end ? i + 1 : kqp_begin;
+            poll_ring_prev[i] = i > kqp_begin ? i - 1 : kqp_end - 1;
+        }
     }
 
     cqe = mlx5_ib_srm_kvcalloc_node(SQ_DEPTH, sizeof(*cqe));
@@ -3338,6 +3359,7 @@ int scheduler_polling(void *sched_data)
 
         for (poll_step = 0; poll_step < kqp_count; poll_step++) {
             bool current_from_hot = false;
+            u32 moved_hot_idx = U32_MAX;
             struct mlx5_sq_ctrl_page *hot_ctrl =
                 READ_ONCE(worker->credit_ctrl);
 
@@ -3356,18 +3378,38 @@ int scheduler_polling(void *sched_data)
 
                     last_hot_hint = hot_hint;
                     if (hot_idx >= kqp_begin && hot_idx < kqp_end) {
+                        u32 *class_head = &poll_ring_head;
+
+                        if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP)
+                            class_head = hot_idx >= num_kqps ?
+                                &poll_ring_large_head :
+                                &poll_ring_small_head;
                         mlx5_srm_poll_ring_move_front(
                             poll_ring_next, poll_ring_prev,
-                            &poll_ring_head, hot_idx);
-                        current_from_hot = true;
+                            class_head, hot_idx);
+                        moved_hot_idx = hot_idx;
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
                         db_batch_log_hot_hints++;
 #endif
                     }
                 }
             }
-            i = poll_ring_head;
-            poll_ring_head = poll_ring_next[i];
+            if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
+                /* One complete large-flow pass precedes every small-flow
+                 * pass.  Empty large queues only pay the normal cursor check;
+                 * active large queues therefore reach DB before small ones. */
+                if (poll_step < num_kqps) {
+                    i = poll_ring_large_head;
+                    poll_ring_large_head = poll_ring_next[i];
+                } else {
+                    i = poll_ring_small_head;
+                    poll_ring_small_head = poll_ring_next[i];
+                }
+            } else {
+                i = poll_ring_head;
+                poll_ring_head = poll_ring_next[i];
+            }
+            current_from_hot = i == moved_hot_idx;
 
 
             {
@@ -4787,8 +4829,10 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
             sched->srmc_cnt++;
 
             mutex_unlock(&sched->srmc_lock);
-            ret = create_srmc_qp_cm(srmc, pd, dgid, MESSAGE_SIZE_SMALL,
-                                    sched->id, depth);
+            ret = create_srmc_qp_cm(
+                srmc, pd, dgid,
+                i >= num_kqps ? MESSAGE_SIZE_LARGE : MESSAGE_SIZE_SMALL,
+                sched->id, depth);
             pr_info("create_srmc_qp_cm ret:%d\n", ret);
             mutex_lock(&sched->srmc_lock);
             if (ret <= 0 || !srmc->ini_cb.qp) {
