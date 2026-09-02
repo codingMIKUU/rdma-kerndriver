@@ -58,6 +58,7 @@ enum {
 
 enum {
 	MLX5_SRQ_FLAG_SIGNATURE		= 1 << 0,
+	MLX5_SRQ_FLAG_HOLLOW_RC		= 1 << 1,
 };
 
 enum {

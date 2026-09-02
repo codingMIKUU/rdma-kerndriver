@@ -74,6 +74,7 @@ static int create_srq_user(struct ib_pd *pd, struct mlx5_ib_srq *srq,
 	}
 
 	srq->wq_sig = !!(ucmd.flags & MLX5_SRQ_FLAG_SIGNATURE);
+	srq->hollow_rc = !!(ucmd.flags & MLX5_SRQ_FLAG_HOLLOW_RC);
 
 #ifdef HAVE_MMU_INTERVAL_NOTIFIER
 	srq->umem = ib_umem_get_peer(pd->device, ucmd.buf_addr, buf_size, 0, 0);
@@ -265,13 +266,20 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 	 * setup-only; ordinary SRQs and XRC SRQs outside the selected Hollow XRCD
 	 * keep their existing PD.
 	 */
-	if (udata && init_attr->srq_type == IB_SRQT_XRC &&
-	    init_attr->ext.xrc.xrcd &&
-	    init_attr->ext.xrc.xrcd == READ_ONCE(dev->hollow_rc_xrcd)) {
+	if (udata && init_attr->srq_type == IB_SRQT_XRC && srq->hollow_rc) {
 		struct mlx5_ib_ucontext *context =
 			rdma_udata_to_drv_context(udata,
 						   struct mlx5_ib_ucontext,
 						   ibucontext);
+		struct ib_xrcd *old;
+
+		if (!init_attr->ext.xrc.xrcd)
+			return -EINVAL;
+
+		old = cmpxchg(&dev->hollow_rc_xrcd, NULL,
+			      init_attr->ext.xrc.xrcd);
+		if (old && old != init_attr->ext.xrc.xrcd)
+			return -EBUSY;
 
 		err = mlx5_ib_bind_hollow_rc_shared_pd(dev, ib_srq->pd,
 							context);
@@ -335,9 +343,7 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 	}
 
 	mlx5_ib_dbg(dev, "create SRQ with srqn 0x%x\n", srq->msrq.srqn);
-	if (init_attr->srq_type == IB_SRQT_XRC &&
-	    init_attr->ext.xrc.xrcd &&
-	    init_attr->ext.xrc.xrcd == READ_ONCE(dev->hollow_rc_xrcd))
+	if (init_attr->srq_type == IB_SRQT_XRC && srq->hollow_rc)
 		pr_info("hollow RC SRQ identity: dev=%s srqn=%u xrcd=%px xrcdn=%u pdn=%u original_pdn=%u max_wr=%u\n",
 			dev_name(&dev->ib_dev.dev), srq->msrq.srqn,
 			init_attr->ext.xrc.xrcd,

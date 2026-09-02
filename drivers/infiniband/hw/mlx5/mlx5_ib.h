@@ -671,6 +671,7 @@ struct mlx5_ib_srq {
 	 */
 	struct mutex		mutex;
 	int			wq_sig;
+	bool			hollow_rc;
 };
 
 struct mlx5_ib_xrcd {

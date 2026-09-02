@@ -6554,20 +6554,12 @@ int mlx5_ib_alloc_xrcd(struct ib_xrcd *ibxrcd, struct ib_udata *udata)
 {
 	struct mlx5_ib_dev *dev = to_mdev(ibxrcd->device);
 	struct mlx5_ib_xrcd *xrcd = to_mxrcd(ibxrcd);
-	struct ib_xrcd *old;
 	int err;
 
 	if (!MLX5_CAP_GEN(dev->mdev, xrc))
 		return -EOPNOTSUPP;
 	DEBUG_LOG("server_cb's xrcd is %p\n",xrcd);
 	err = mlx5_cmd_xrcd_alloc(dev->mdev, &xrcd->xrcdn, 0);
-	if (!err) {
-		old = cmpxchg(&dev->hollow_rc_xrcd, NULL, ibxrcd);
-		pr_info("hollow RC XRCD identity: dev=%s xrcd=%px xrcdn=%u selected=%u current=%px\n",
-			dev_name(&dev->ib_dev.dev), ibxrcd, xrcd->xrcdn,
-			old == NULL, old ? old : ibxrcd);
-	}
-
 	return err;
 }
 
