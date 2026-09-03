@@ -73,7 +73,7 @@ module_param_named(srm_stats_sample_rate, srm_stats_sample_rate, uint, 0644);
 MODULE_PARM_DESC(srm_stats_sample_rate,
                  "Sample one in N hollow RC CQ polls for detailed timing");
 
-static unsigned int srm_sched_cpu_num = 1;
+static unsigned int srm_sched_cpu_num = 2;
 module_param_named(srm_sched_cpu_num, srm_sched_cpu_num, uint, 0444);
 MODULE_PARM_DESC(srm_sched_cpu_num,
                  "Number of hollow RC scheduler CPUs");
@@ -3035,7 +3035,6 @@ int scheduler_polling(void *sched_data)
     u64 last_hot_hint = 0;
     u64 worker_limit;
     struct mlx5_ib_sqbuf *sqb;
-    struct mlx5_ib_cqbuf *cqb;
     struct mlx5_ib_srmc *srmc;
     struct mlx5_ib_srm_sched_stats *srm_stats = NULL;
     struct mlx5_srm_cq_workspace *cq_workspace = NULL;
@@ -3043,7 +3042,7 @@ int scheduler_polling(void *sched_data)
     void **cqe, *ucqe;
     int qpn;
     int op_own;
-    int uidx, idx;
+    int idx;
     int i, j, k;
     u32 poll_step;
 
@@ -3739,7 +3738,6 @@ int scheduler_polling(void *sched_data)
                 while (sent < batch) {
                     uint32_t usr_rc_cnt;
                     u64 publish_token;
-                    struct mlx5_ib_usr_rc_route *route;
                     u32 opmod_idx_opcode;
                     u32 qpn_ds;
                     u16 wqe_idx;
@@ -3788,17 +3786,6 @@ int scheduler_polling(void *sched_data)
                             usr_rc_cnt, srmc->srmc_idx);
                         break;
                     }
-                    route = &sched_group.usr_rc_routes[usr_rc_cnt];
-                    cqb = smp_load_acquire(&route->cqb);
-                    uidx = READ_ONCE(route->uidx);
-                    if (unlikely(!cqb ||
-                                 uidx == MLX5_IB_DEFAULT_UIDX)) {
-                        pr_warn_ratelimited(
-                            "inactive hollow RC id %u for srmc %d\n",
-                            usr_rc_cnt, srmc->srmc_idx);
-                        break;
-                    }
-
 #if MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
                     wqe_bytes = mlx5_srm_wqe_payload_bytes(ctrl);
                     if (sent_bytes + wqe_bytes > SCHED_SIZE_LIMIT && sent)

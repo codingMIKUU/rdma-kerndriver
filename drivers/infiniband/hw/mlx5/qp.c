@@ -1178,10 +1178,9 @@ static struct mlx5_ib_srmc *
 mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 {
 	struct mlx5_ib_srmc *selected = NULL;
-	struct mlx5_ib_usr_rc_route *route;
-	struct mlx5_ib_cqbuf *cqb;
 	u32 hash;
 	u32 start;
+	u32 worker_count;
 	u16 owner_worker;
 	u32 indexed = 0;
 	u32 gid_matches = 0;
@@ -1193,26 +1192,23 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 	if (usr_rc_id >= ARRAY_SIZE(sched_group.usr_rc_routes))
 		return NULL;
 
+	if (unlikely(!sched_group.scheds || sched_group.num_sched <= 0 ||
+		     !sched_group.scheds[0].workers))
+		return NULL;
+	worker_count = READ_ONCE(sched_group.scheds[0].worker_count);
+	if (unlikely(!worker_count))
+		return NULL;
+
 	/*
-	 * With one scheduler worker every KQP is owned by worker zero.  Do not
-	 * make KQP attachment depend on the lifetime/timing of the userspace CQ
-	 * route in that case.  This matters during highly concurrent MPI setup,
-	 * where CQ teardown from an aborting rank may race with other ranks still
-	 * attaching their logical QPs.
+	 * Completion delivery no longer copies CQEs into the userspace CQ.  Each
+	 * KQP publishes its own completion watermark, so tying worker ownership
+	 * to a CQ-buffer route is both unnecessary and racy during concurrent CQ
+	 * setup/teardown.  usr_rc_id is allocated before QP attachment and stays
+	 * fixed for the QP lifetime; use it to spread logical QPs deterministically
+	 * across workers.  The selected KQP, shared credit slot, hot-hint mailbox
+	 * and hardware CQ consequently all belong to the same worker.
 	 */
-	if (sched_group.scheds && sched_group.num_sched > 0 &&
-	    sched_group.scheds[0].worker_count <= 1) {
-		owner_worker = 0;
-	} else {
-		route = &sched_group.usr_rc_routes[usr_rc_id];
-		cqb = smp_load_acquire(&route->cqb);
-		if (!cqb) {
-			pr_err("hollow RC select KQP: usr_rc=%u has no active CQ route\n",
-			       usr_rc_id);
-			return NULL;
-		}
-		owner_worker = READ_ONCE(cqb->owner_worker);
-	}
+	owner_worker = usr_rc_id % worker_count;
 
 	hash = jhash(dgid->raw, sizeof(dgid->raw), 0x5a17c9e3);
 	hash = jhash_2words(hash, usr_rc_id, 0x9e3779b9);
