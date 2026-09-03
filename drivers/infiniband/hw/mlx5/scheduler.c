@@ -3123,8 +3123,8 @@ int scheduler_polling(void *sched_data)
     }
     if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
         /* Each worker owns matching lane ranges in both size classes.  Keep
-         * two worker-private rings so every pass drains the worker's large
-         * lanes before visiting its small lanes. */
+         * two worker-private rings so every pass visits the worker's small
+         * lanes before its large lanes. */
         poll_ring_small_head = kqp_begin;
         poll_ring_large_head = num_kqps + kqp_begin;
         for (i = kqp_begin; i < kqp_end; i++) {
@@ -3419,15 +3419,15 @@ int scheduler_polling(void *sched_data)
                 }
             }
             if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
-                /* One complete large-flow pass precedes every small-flow
-                 * pass.  Empty large queues only pay the normal cursor check;
-                 * active large queues therefore reach DB before small ones. */
+                /* One complete small-flow pass precedes every large-flow
+                 * pass.  This favors latency-sensitive small WQEs while each
+                 * class remains round-robin within the worker. */
                 if (poll_step < lane_count) {
-                    i = poll_ring_large_head;
-                    poll_ring_large_head = poll_ring_next[i];
-                } else {
                     i = poll_ring_small_head;
                     poll_ring_small_head = poll_ring_next[i];
+                } else {
+                    i = poll_ring_large_head;
+                    poll_ring_large_head = poll_ring_next[i];
                 }
             } else {
                 i = poll_ring_head;
