@@ -1175,17 +1175,15 @@ static u64 mlx5_qp_entry_to_mmap_offset(struct mlx5_user_mmap_entry *entry)
 }
 
 static struct mlx5_ib_srmc *
-mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
+mlx5_ib_find_balanced_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 {
 	struct mlx5_ib_srmc *selected = NULL;
 	u32 hash;
 	u32 start;
-	u32 worker_count;
-	u16 owner_worker;
 	u32 indexed = 0;
 	u32 gid_matches = 0;
-	u32 worker_matches = 0;
 	u32 usable_matches = 0;
+	int selected_refcnt = INT_MAX;
 	int si;
 	int i;
 
@@ -1193,23 +1191,21 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 		return NULL;
 
 	if (unlikely(!sched_group.scheds || sched_group.num_sched <= 0 ||
-		     !sched_group.scheds[0].workers))
-		return NULL;
-	worker_count = READ_ONCE(sched_group.scheds[0].worker_count);
-	if (unlikely(!worker_count))
+		     !sched_group.scheds[0].workers || !num_kqps))
 		return NULL;
 
 	/*
 	 * Completion delivery no longer copies CQEs into the userspace CQ.  Each
-	 * KQP publishes its own completion watermark, so tying worker ownership
-	 * to a CQ-buffer route is both unnecessary and racy during concurrent CQ
-	 * setup/teardown.  usr_rc_id is allocated before QP attachment and stays
-	 * fixed for the QP lifetime; use it to spread logical QPs deterministically
-	 * across workers.  The selected KQP, shared credit slot, hot-hint mailbox
-	 * and hardware CQ consequently all belong to the same worker.
+	 * KQP publishes its own completion watermark, so a logical QP does not
+	 * need to select its worker before selecting a KQP.  Select the least-used
+	 * usable KQP globally instead.  This keeps logical-QP counts balanced per
+	 * physical KQP even when workers own contiguous KQP ranges; the selected
+	 * KQP then determines the shared credit slot, hot-hint mailbox and CQ.
+	 *
+	 * Start the scan at a stable hash so equal-load ties do not systematically
+	 * prefer the lowest index.  srmc_lock serializes selection and the refcnt
+	 * increment; every new attachment therefore goes to a current minimum.
 	 */
-	owner_worker = usr_rc_id % worker_count;
-
 	hash = jhash(dgid->raw, sizeof(dgid->raw), 0x5a17c9e3);
 	hash = jhash_2words(hash, usr_rc_id, 0x9e3779b9);
 	start = hash % num_kqps;
@@ -1242,14 +1238,15 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 				   sizeof(srmc->dgid.raw)) != 0)
 				continue;
 			gid_matches++;
-			if (srmc->owner_worker != owner_worker)
-				continue;
-			worker_matches++;
 			if (!srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags)
 				continue;
 			usable_matches++;
-			selected = srmc;
-			break;
+			if (srmc->ini_cb.refcnt < selected_refcnt) {
+				selected = srmc;
+				selected_refcnt = srmc->ini_cb.refcnt;
+				if (!selected_refcnt)
+					break;
+			}
 		}
 
 		if (selected) {
@@ -1261,9 +1258,8 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 		mutex_unlock(&sched->srmc_lock);
 	}
 
-	pr_err("hollow RC select KQP failed: usr_rc=%u worker=%u gid=%pI6c indexed=%u gid_matches=%u worker_matches=%u usable_matches=%u ready_total=%zu expected=%u\n",
-	       usr_rc_id, owner_worker, dgid->raw, indexed, gid_matches,
-	       worker_matches, usable_matches,
+	pr_err("hollow RC select KQP failed: usr_rc=%u gid=%pI6c indexed=%u gid_matches=%u usable_matches=%u ready_total=%zu expected=%u\n",
+	       usr_rc_id, dgid->raw, indexed, gid_matches, usable_matches,
 	       sched_group.scheds ?
 	       smp_load_acquire(&sched_group.scheds[0].ready_srmc_cnt) : 0,
 	       num_kqps);
@@ -1811,7 +1807,7 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 		}
 
 		fail_stage = "select-kqp";
-		srmc = mlx5_ib_find_pseudo_random_srmc_by_gid(
+		srmc = mlx5_ib_find_balanced_srmc_by_gid(
 			&dgid, qp->usr_rc_id_valid ?
 			       qp->usr_rc_id : qp->ibqp.qp_num);
 		if (!srmc || !srmc->ini_cb.qp || !srmc->ini_cb.qp->buf.frags) {
