@@ -330,6 +330,12 @@ struct mlx5_ib_sched_worker
     struct ib_cq *shared_cq[CQ_NUM];
     u32 worker_id;
     u32 cpu_id;
+    /*
+     * Base-lane range owned by this worker.  With one KQP level these are
+     * also the physical KQP indices.  With size splitting enabled the worker
+     * owns this range in every level, i.e. [begin,end) for small traffic and
+     * [num_kqps + begin,num_kqps + end) for large traffic.
+     */
     u32 kqp_begin;
     u32 kqp_end;
     u64 limit_batch;

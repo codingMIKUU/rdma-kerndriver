@@ -412,6 +412,9 @@ static struct mlx5_ib_srmc *mlx5_ib_sched_find_srmc_idx(struct mlx5_ib_sched *sc
 }
 
 static inline int mlx5_srm_effective_kqps(void);
+extern const int num_kqps;
+static inline bool mlx5_srm_worker_owns_kqp(
+    const struct mlx5_ib_sched_worker *worker, u32 kqp_idx);
 
 static inline struct mlx5_sq_ctrl_page *mlx5_sq_ctrl_get_slot(
     struct mlx5_qp_ctrl_pool *pool, u32 slot_idx)
@@ -506,23 +509,26 @@ static void mlx5_srm_direct_db_set_worker_flags(
     const struct mlx5_ib_sched_worker *worker,
     bool enable)
 {
+    u32 level;
     u32 i;
 
-    for (i = worker->kqp_begin; i < worker->kqp_end; i++) {
-        struct mlx5_sq_ctrl_page *ctrl =
-            mlx5_sq_ctrl_get_slot(pool, i);
-        u32 old_flags;
-        u32 new_flags;
+    for (level = 0; level < MLX5_SRM_KERNEL_QP_LEVELS; level++) {
+        for (i = worker->kqp_begin; i < worker->kqp_end; i++) {
+            struct mlx5_sq_ctrl_page *ctrl =
+                mlx5_sq_ctrl_get_slot(pool, level * num_kqps + i);
+            u32 old_flags;
+            u32 new_flags;
 
-        if (!ctrl)
-            continue;
-        old_flags = READ_ONCE(ctrl->flags);
-        if (enable)
-            new_flags = old_flags | MLX5_SRM_CTRL_F_DIRECT_DB_STATS;
-        else
-            new_flags = old_flags & ~MLX5_SRM_CTRL_F_DIRECT_DB_STATS;
-        if (new_flags != old_flags)
-            smp_store_release(&ctrl->flags, new_flags);
+            if (!ctrl)
+                continue;
+            old_flags = READ_ONCE(ctrl->flags);
+            if (enable)
+                new_flags = old_flags | MLX5_SRM_CTRL_F_DIRECT_DB_STATS;
+            else
+                new_flags = old_flags & ~MLX5_SRM_CTRL_F_DIRECT_DB_STATS;
+            if (new_flags != old_flags)
+                smp_store_release(&ctrl->flags, new_flags);
+        }
     }
 }
 
@@ -1826,13 +1832,29 @@ static inline int mlx5_srm_effective_kqps(void)
 static inline u32 mlx5_srm_kqp_owner(const struct mlx5_ib_sched *sched,
                                       u32 kqp_idx)
 {
-    u32 total = mlx5_srm_effective_kqps();
+    u32 lane_idx;
 
-    if (!sched || sched->worker_count <= 1 || !total)
+    if (!sched || sched->worker_count <= 1 || !num_kqps)
         return 0;
 
-    return min_t(u32, div_u64((u64)kqp_idx * sched->worker_count, total),
+    /* Keep the small and large KQP for one destination lane on the same
+     * worker.  Partitioning the flattened [small][large] array would assign
+     * an entire size class to one worker when worker_count == 2. */
+    lane_idx = kqp_idx % num_kqps;
+    return min_t(u32,
+                 div_u64((u64)lane_idx * sched->worker_count, num_kqps),
                  sched->worker_count - 1);
+}
+
+static inline bool mlx5_srm_worker_owns_kqp(
+    const struct mlx5_ib_sched_worker *worker, u32 kqp_idx)
+{
+    u32 lane_idx;
+
+    if (!worker || kqp_idx >= mlx5_srm_effective_kqps())
+        return false;
+    lane_idx = kqp_idx % num_kqps;
+    return lane_idx >= worker->kqp_begin && lane_idx < worker->kqp_end;
 }
 
 struct mlx5_ib_srm_kqp_stats {
@@ -3027,6 +3049,7 @@ int scheduler_polling(void *sched_data)
     u32 kqp_begin;
     u32 kqp_end;
     u32 kqp_count;
+    u32 lane_count;
     u32 *poll_ring_next = NULL;
     u32 *poll_ring_prev = NULL;
     u32 poll_ring_head = 0;
@@ -3045,6 +3068,7 @@ int scheduler_polling(void *sched_data)
     int idx;
     int i, j, k;
     u32 poll_step;
+    u32 level;
 
     void *seg, *useg;
     struct mlx5_wqe_ctrl_seg *ctrl, *uctrl;
@@ -3084,7 +3108,8 @@ int scheduler_polling(void *sched_data)
     worker = &sched->workers[worker_id];
     kqp_begin = worker->kqp_begin;
     kqp_end = worker->kqp_end;
-    kqp_count = kqp_end - kqp_begin;
+    lane_count = kqp_end - kqp_begin;
+    kqp_count = lane_count * MLX5_SRM_KERNEL_QP_LEVELS;
     worker_limit = worker->limit_batch;
 
     poll_ring_next = mlx5_ib_srm_kvcalloc_node(
@@ -3097,21 +3122,21 @@ int scheduler_polling(void *sched_data)
         goto out;
     }
     if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
-        /* Large/small mode currently requires one scheduler worker, so each
-         * class is one independent circular list of num_kqps entries.  Keeping
-         * the rings separate prevents a small-flow hot hint from jumping in
-         * front of the large-flow priority pass. */
-        poll_ring_small_head = 0;
-        poll_ring_large_head = num_kqps;
-        for (i = 0; i < num_kqps; i++) {
-            poll_ring_next[i] = i + 1 < num_kqps ? i + 1 : 0;
-            poll_ring_prev[i] = i ? i - 1 : num_kqps - 1;
+        /* Each worker owns matching lane ranges in both size classes.  Keep
+         * two worker-private rings so every pass drains the worker's large
+         * lanes before visiting its small lanes. */
+        poll_ring_small_head = kqp_begin;
+        poll_ring_large_head = num_kqps + kqp_begin;
+        for (i = kqp_begin; i < kqp_end; i++) {
+            poll_ring_next[i] = i + 1 < kqp_end ? i + 1 : kqp_begin;
+            poll_ring_prev[i] = i > kqp_begin ? i - 1 : kqp_end - 1;
         }
-        for (i = num_kqps; i < 2 * num_kqps; i++) {
-            poll_ring_next[i] = i + 1 < 2 * num_kqps ?
-                                i + 1 : num_kqps;
-            poll_ring_prev[i] = i > num_kqps ?
-                                i - 1 : 2 * num_kqps - 1;
+        for (i = num_kqps + kqp_begin;
+             i < num_kqps + kqp_end; i++) {
+            poll_ring_next[i] = i + 1 < num_kqps + kqp_end ?
+                                i + 1 : num_kqps + kqp_begin;
+            poll_ring_prev[i] = i > num_kqps + kqp_begin ?
+                                i - 1 : num_kqps + kqp_end - 1;
         }
     } else {
         poll_ring_head = kqp_begin;
@@ -3376,7 +3401,7 @@ int scheduler_polling(void *sched_data)
                     u32 hot_idx = (u16)hot_hint;
 
                     last_hot_hint = hot_hint;
-                    if (hot_idx >= kqp_begin && hot_idx < kqp_end) {
+                    if (mlx5_srm_worker_owns_kqp(worker, hot_idx)) {
                         u32 *class_head = &poll_ring_head;
 
                         if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP)
@@ -3397,7 +3422,7 @@ int scheduler_polling(void *sched_data)
                 /* One complete large-flow pass precedes every small-flow
                  * pass.  Empty large queues only pay the normal cursor check;
                  * active large queues therefore reach DB before small ones. */
-                if (poll_step < num_kqps) {
+                if (poll_step < lane_count) {
                     i = poll_ring_large_head;
                     poll_ring_large_head = poll_ring_next[i];
                 } else {
@@ -3579,29 +3604,35 @@ int scheduler_polling(void *sched_data)
                                 atomic64_read(&worker->credit_ctrl->completed_total),
                                 pre_srmc->ini_cb.qp->sq.head,
                                 pre_srmc->ini_cb.qp->sq.tail);
-                            for (j = kqp_begin; j < kqp_end; j++) {
-                                struct mlx5_ib_srmc *shared_srmc;
-                                struct mlx5_sq_ctrl_page *shared_ctrl;
+                            for (level = 0;
+                                 level < MLX5_SRM_KERNEL_QP_LEVELS;
+                                 level++) {
+                                for (j = kqp_begin; j < kqp_end; j++) {
+                                    u32 owned_idx = level * num_kqps + j;
+                                    struct mlx5_ib_srmc *shared_srmc;
+                                    struct mlx5_sq_ctrl_page *shared_ctrl;
 
-                                shared_srmc =
-                                    mlx5_ib_sched_find_srmc_idx(sched, j);
-                                if (!shared_srmc ||
-                                    shared_srmc->ini_cb.refcnt <= 1)
-                                    continue;
-                                shared_ctrl =
-                                    mlx5_sq_ctrl_get_slot(sq_ctrl_pool, j);
-                                if (!shared_ctrl)
-                                    continue;
-                                pr_warn(
-                                    "shared srmc=%d users=%d qpn=%u resv=%llu sched=%llu cons=%llu\n",
-                                    shared_srmc->srmc_idx,
-                                    shared_srmc->ini_cb.refcnt,
-                                    shared_srmc->ini_cb.qp->ibqp.qp_num,
-                                    smp_load_acquire(
-                                        &shared_ctrl->resv_idx),
-                                    shared_srmc->sched_post_idx,
-                                    smp_load_acquire(
-                                        &shared_ctrl->cons_idx));
+                                    shared_srmc =
+                                        mlx5_ib_sched_find_srmc_idx(
+                                            sched, owned_idx);
+                                    if (!shared_srmc ||
+                                        shared_srmc->ini_cb.refcnt <= 1)
+                                        continue;
+                                    shared_ctrl = mlx5_sq_ctrl_get_slot(
+                                        sq_ctrl_pool, owned_idx);
+                                    if (!shared_ctrl)
+                                        continue;
+                                    pr_warn(
+                                        "shared srmc=%d users=%d qpn=%u resv=%llu sched=%llu cons=%llu\n",
+                                        shared_srmc->srmc_idx,
+                                        shared_srmc->ini_cb.refcnt,
+                                        shared_srmc->ini_cb.qp->ibqp.qp_num,
+                                        smp_load_acquire(
+                                            &shared_ctrl->resv_idx),
+                                        shared_srmc->sched_post_idx,
+                                        smp_load_acquire(
+                                            &shared_ctrl->cons_idx));
+                                }
                             }
                         }
                         cond_resched();
@@ -4022,7 +4053,6 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
     int i, j;
     int ret;
     u32 worker_id;
-    u32 total_kqps = mlx5_srm_effective_kqps();
     char thread_info[64];
 
     if (srm_numa_node < 0 || srm_numa_node >= MAX_NUMNODES ||
@@ -4031,14 +4061,10 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
         return -EINVAL;
     }
 
-    if (!srm_sched_cpu_num || srm_sched_cpu_num > total_kqps) {
-        pr_err("invalid srm_sched_cpu_num=%u for %u KQPs\n",
-               srm_sched_cpu_num, total_kqps);
+    if (!srm_sched_cpu_num || srm_sched_cpu_num > num_kqps) {
+        pr_err("invalid srm_sched_cpu_num=%u for %u KQP lanes\n",
+               srm_sched_cpu_num, num_kqps);
         return -EINVAL;
-    }
-    if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP && srm_sched_cpu_num > 1) {
-        pr_err("multi-CPU scheduler does not support large/small KQP levels\n");
-        return -EOPNOTSUPP;
     }
     if (LIMIT_BATCHING < srm_sched_cpu_num) {
         pr_err("LIMIT_BATCHING=%llu is smaller than worker count %u\n",
@@ -4128,9 +4154,9 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
             worker->sched = sched;
             worker->worker_id = worker_id;
             worker->cpu_id = srm_sched_cpu_base + worker_id;
-            worker->kqp_begin = div_u64((u64)total_kqps * worker_id,
+            worker->kqp_begin = div_u64((u64)num_kqps * worker_id,
                                         sched->worker_count);
-            worker->kqp_end = div_u64((u64)total_kqps * (worker_id + 1),
+            worker->kqp_end = div_u64((u64)num_kqps * (worker_id + 1),
                                       sched->worker_count);
             worker->limit_batch = div_u64(LIMIT_BATCHING,
                                            sched->worker_count);
@@ -4163,9 +4189,18 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
 
             kthread_bind(worker->task, worker->cpu_id);
             wake_up_process(worker->task);
-            pr_info("SRM worker sched=%d worker=%u cpu=%u kqp=[%u,%u) limit_batch=%llu\n",
-                    i, worker_id, worker->cpu_id, worker->kqp_begin,
-                    worker->kqp_end, worker->limit_batch);
+            if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP)
+                pr_info("SRM worker sched=%d worker=%u cpu=%u small_kqp=[%u,%u) large_kqp=[%u,%u) limit_batch=%llu\n",
+                        i, worker_id, worker->cpu_id,
+                        worker->kqp_begin, worker->kqp_end,
+                        num_kqps + worker->kqp_begin,
+                        num_kqps + worker->kqp_end,
+                        worker->limit_batch);
+            else
+                pr_info("SRM worker sched=%d worker=%u cpu=%u kqp=[%u,%u) limit_batch=%llu\n",
+                        i, worker_id, worker->cpu_id,
+                        worker->kqp_begin, worker->kqp_end,
+                        worker->limit_batch);
         }
     }
     // sched_group->cq_task =  kthread_create(polling_cqe,NULL,"polling_cqe");

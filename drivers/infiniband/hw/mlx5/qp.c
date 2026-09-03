@@ -1831,6 +1831,14 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 				err = -EINVAL;
 				goto out_owner_unlock;
 			}
+			if (large_srmc->owner_worker != srmc->owner_worker) {
+				pr_err("hollow RC paired KQPs have different workers: small=%d worker=%u large=%d worker=%u\n",
+				       srmc->srmc_idx, srmc->owner_worker,
+				       large_srmc->srmc_idx,
+				       large_srmc->owner_worker);
+				err = -EINVAL;
+				goto out_owner_unlock;
+			}
 			large_srmc->ini_cb.refcnt++;
 			qp->large_srmc_owner = large_srmc;
 		}
