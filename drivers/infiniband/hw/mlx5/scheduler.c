@@ -5420,6 +5420,10 @@ static int srm_connect_client(struct srm_cb *cb, int flags)
     conn_param.responder_resources = 1;
     conn_param.initiator_depth = 1;
     conn_param.retry_count = 5;
+    /* A shared KQP can briefly outrun userspace SRQ replenishment under
+     * all-to-all fan-in.  Seven is the RDMA CM encoding for infinite RNR
+     * retries, matching MVAPICH2's normal RC QP setting. */
+    conn_param.rnr_retry_count = 7;
 
     conn_param.private_data = &flags;
     conn_param.private_data_len = sizeof(int);
@@ -5697,6 +5701,7 @@ int srm_accept(struct srm_cb *cb)
     memset(&conn_param, 0, sizeof conn_param);
     conn_param.responder_resources = 1;
     conn_param.initiator_depth = 1;
+    conn_param.rnr_retry_count = 7;
 
     ret = rdma_accept(cb->cm_id, &conn_param);
     if (ret)
