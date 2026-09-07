@@ -509,13 +509,13 @@ static void mlx5_srm_direct_db_set_worker_flags(
     const struct mlx5_ib_sched_worker *worker,
     bool enable)
 {
-    u32 level;
     u32 i;
+    u32 slots = smp_load_acquire(&worker->sched->kqp_slots);
 
-    for (level = 0; level < MLX5_SRM_KERNEL_QP_LEVELS; level++) {
-        for (i = worker->kqp_begin; i < worker->kqp_end; i++) {
+    for (i = 0; i < slots; i++) {
+        if (mlx5_srm_worker_owns_kqp(worker, i)) {
             struct mlx5_sq_ctrl_page *ctrl =
-                mlx5_sq_ctrl_get_slot(pool, level * num_kqps + i);
+                mlx5_sq_ctrl_get_slot(pool, i);
             u32 old_flags;
             u32 new_flags;
 
@@ -1256,7 +1256,7 @@ static inline bool mlx5_srm_resolve_cqe_ctx(
     kqp_idx = mlx5_srm_wrid_kqp(wrid);
     post_idx = mlx5_srm_wrid_post(wrid);
 
-    if (unlikely(kqp_idx >= mlx5_srm_effective_kqps())) {
+    if (unlikely(kqp_idx >= smp_load_acquire(&sched->kqp_slots))) {
         pr_warn_ratelimited("invalid hollow RC wrid kqp %u post %llu\n",
                             kqp_idx, post_idx);
         return false;
@@ -1396,7 +1396,7 @@ static inline void mlx5_srm_complete_wrid_ctrl(
 
     kqp_idx = mlx5_srm_wrid_kqp(wrid);
     post_idx = mlx5_srm_wrid_post(wrid);
-    if (kqp_idx >= mlx5_srm_effective_kqps())
+    if (kqp_idx >= NUM_SRMC)
         return;
 
     ctrl_page = mlx5_sq_ctrl_get_slot(sq_ctrl_pool, kqp_idx);
@@ -1832,29 +1832,23 @@ static inline int mlx5_srm_effective_kqps(void)
 static inline u32 mlx5_srm_kqp_owner(const struct mlx5_ib_sched *sched,
                                       u32 kqp_idx)
 {
-    u32 lane_idx;
-
     if (!sched || sched->worker_count <= 1 || !num_kqps)
         return 0;
 
     /* Keep the small and large KQP for one destination lane on the same
      * worker.  Partitioning the flattened [small][large] array would assign
      * an entire size class to one worker when worker_count == 2. */
-    lane_idx = kqp_idx % num_kqps;
-    return min_t(u32,
-                 div_u64((u64)lane_idx * sched->worker_count, num_kqps),
-                 sched->worker_count - 1);
+    return mlx5_srm_layout_owner(kqp_idx, num_kqps, sched->worker_count);
 }
 
 static inline bool mlx5_srm_worker_owns_kqp(
     const struct mlx5_ib_sched_worker *worker, u32 kqp_idx)
 {
-    u32 lane_idx;
-
-    if (!worker || kqp_idx >= mlx5_srm_effective_kqps())
+    if (!worker ||
+        kqp_idx >= smp_load_acquire(&worker->sched->kqp_slots))
         return false;
-    lane_idx = kqp_idx % num_kqps;
-    return lane_idx >= worker->kqp_begin && lane_idx < worker->kqp_end;
+    return mlx5_srm_layout_owns(kqp_idx, num_kqps,
+                                worker->kqp_begin, worker->kqp_end);
 }
 
 struct mlx5_ib_srm_kqp_stats {
@@ -2128,7 +2122,8 @@ static void mlx5_ib_srm_report_stats(
     if (!stats->kqp)
         return;
 
-    for (i = 0; i < min(mlx5_srm_effective_kqps(), stats->kqp_cnt); i++) {
+    for (i = 0; i < min_t(u32, smp_load_acquire(&sched->kqp_slots),
+                          stats->kqp_cnt); i++) {
         struct mlx5_ib_srm_kqp_stats *k = &stats->kqp[i];
 
         scans += k->scans;
@@ -3050,6 +3045,7 @@ int scheduler_polling(void *sched_data)
     u32 kqp_end;
     u32 kqp_count;
     u32 lane_count;
+    u32 poll_slots = 0;
     u32 *poll_ring_next = NULL;
     u32 *poll_ring_prev = NULL;
     u32 poll_ring_head = 0;
@@ -3121,30 +3117,7 @@ int scheduler_polling(void *sched_data)
         wake_up_all(&sched->init_wait);
         goto out;
     }
-    if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
-        /* Each worker owns matching lane ranges in both size classes.  Keep
-         * two worker-private rings so every pass visits the worker's small
-         * lanes before its large lanes. */
-        poll_ring_small_head = kqp_begin;
-        poll_ring_large_head = num_kqps + kqp_begin;
-        for (i = kqp_begin; i < kqp_end; i++) {
-            poll_ring_next[i] = i + 1 < kqp_end ? i + 1 : kqp_begin;
-            poll_ring_prev[i] = i > kqp_begin ? i - 1 : kqp_end - 1;
-        }
-        for (i = num_kqps + kqp_begin;
-             i < num_kqps + kqp_end; i++) {
-            poll_ring_next[i] = i + 1 < num_kqps + kqp_end ?
-                                i + 1 : num_kqps + kqp_begin;
-            poll_ring_prev[i] = i > num_kqps + kqp_begin ?
-                                i - 1 : num_kqps + kqp_end - 1;
-        }
-    } else {
-        poll_ring_head = kqp_begin;
-        for (i = kqp_begin; i < kqp_end; i++) {
-            poll_ring_next[i] = i + 1 < kqp_end ? i + 1 : kqp_begin;
-            poll_ring_prev[i] = i > kqp_begin ? i - 1 : kqp_end - 1;
-        }
-    }
+    /* Rings are built after a complete peer group has been published. */
 
     cqe = mlx5_ib_srm_kvcalloc_node(SQ_DEPTH, sizeof(*cqe));
     wc = mlx5_ib_srm_kvcalloc_node(SQ_DEPTH, sizeof(*wc));
@@ -3327,7 +3300,7 @@ int scheduler_polling(void *sched_data)
                                  kthread_should_stop());
         goto out;
     }
-    srm_stats->kqp_cnt = mlx5_srm_effective_kqps();
+    srm_stats->kqp_cnt = NUM_SRMC;
     srm_stats->kqp = mlx5_ib_srm_kvcalloc_node(
         srm_stats->kqp_cnt, sizeof(*srm_stats->kqp));
     if (!srm_stats->kqp) {
@@ -3377,6 +3350,30 @@ int scheduler_polling(void *sched_data)
             }
         }
 
+        /* A newly connected peer extends the worker-private rings once.
+         * A single acquire per pass is the only steady-state growth check.
+         */
+        {
+            u32 slots = smp_load_acquire(&sched->kqp_slots);
+
+            if (unlikely(slots != poll_slots)) {
+                u32 heads[2], counts[2];
+
+                mlx5_srm_layout_build_rings(
+                    poll_ring_next, poll_ring_prev, heads, counts,
+                    slots, num_kqps, MLX5_SRM_KERNEL_QP_LEVELS,
+                    kqp_begin, kqp_end);
+                poll_ring_head = poll_ring_small_head = heads[0];
+                poll_ring_large_head = heads[1];
+                lane_count = counts[0];
+                kqp_count = counts[0] + counts[1];
+                poll_slots = slots;
+                mlx5_srm_direct_db_set_worker_flags(
+                    sq_ctrl_pool, worker,
+                    READ_ONCE(srm_direct_db_stats_enable));
+            }
+        }
+
         mlx5_srm_direct_db_stats_tick(
             id, worker, sq_ctrl_pool, &direct_db_stats_active,
             &direct_db_stats_previous, &direct_db_stats_last_report);
@@ -3401,11 +3398,14 @@ int scheduler_polling(void *sched_data)
                     u32 hot_idx = (u16)hot_hint;
 
                     last_hot_hint = hot_hint;
-                    if (mlx5_srm_worker_owns_kqp(worker, hot_idx)) {
+                    if (hot_idx < poll_slots &&
+                        mlx5_srm_worker_owns_kqp(worker, hot_idx)) {
                         u32 *class_head = &poll_ring_head;
 
                         if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP)
-                            class_head = hot_idx >= num_kqps ?
+                            class_head = mlx5_srm_layout_large(
+                                hot_idx, num_kqps,
+                                MLX5_SRM_KERNEL_QP_LEVELS) ?
                                 &poll_ring_large_head :
                                 &poll_ring_small_head;
                         mlx5_srm_poll_ring_move_front(
@@ -3604,11 +3604,9 @@ int scheduler_polling(void *sched_data)
                                 atomic64_read(&worker->credit_ctrl->completed_total),
                                 pre_srmc->ini_cb.qp->sq.head,
                                 pre_srmc->ini_cb.qp->sq.tail);
-                            for (level = 0;
-                                 level < MLX5_SRM_KERNEL_QP_LEVELS;
-                                 level++) {
-                                for (j = kqp_begin; j < kqp_end; j++) {
-                                    u32 owned_idx = level * num_kqps + j;
+                            for (j = 0; j < poll_slots; j++) {
+                                if (mlx5_srm_worker_owns_kqp(worker, j)) {
+                                    u32 owned_idx = j;
                                     struct mlx5_ib_srmc *shared_srmc;
                                     struct mlx5_sq_ctrl_page *shared_ctrl;
 
@@ -3716,7 +3714,8 @@ int scheduler_polling(void *sched_data)
 
                 batch = min_t(u32, batch, cq_avail);
 #if MLX5_SRM_LARGE_DB_LIMIT_ACTIVE
-                if (srmc->srmc_idx >= num_kqps)
+                if (mlx5_srm_layout_large(srmc->srmc_idx, num_kqps,
+                                          MLX5_SRM_KERNEL_QP_LEVELS))
                     batch = min_t(u32, batch, LARGE_DB_LIMIT);
 #endif
                 if (!batch) {
@@ -4133,8 +4132,10 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
         memset(sched->srmc_by_idx, 0, sizeof(sched->srmc_by_idx));
         sched->srmc_cnt = 0;
         sched->ready_srmc_cnt = 0;
+        sched->kqp_slots = 0;
         sched->init_error = 0;
         init_waitqueue_head(&sched->init_wait);
+        mutex_init(&sched->peer_lock);
         mutex_init(&sched->srmc_lock);
 
         sched->worker_count = srm_sched_cpu_num;
@@ -4422,6 +4423,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
         memset(sched->srmc_by_idx, 0, sizeof(sched->srmc_by_idx));
         sched->srmc_cnt = 0;
         sched->ready_srmc_cnt = 0;
+        sched->kqp_slots = 0;
     }
     mlx5_ib_unmap_all_cq_ubufs(sched_group);
     //     mutex_lock(&sched->srmc_lock);
@@ -4763,158 +4765,135 @@ void mlx5_ib_gid2ip(char addr[4], union ib_gid *gid)
 // return 0 means xrc exists, other means xrc not exists
 int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *dgid, int flags, int qpn, u32 sq_depth)
 {
-
-    DEBUG_LOG("in is_xrc_exists,gid.in_id = %llx, gid.subnet = %llx\n", dgid->global.interface_id, dgid->global.subnet_prefix);
-    DEBUG_LOG("gid.raw[15]:%u\n", dgid->raw[15]);
-    pr_info("in is_xrc_exists, sq_depth:%u\n", sq_depth);
     struct mlx5_ib_srmc *srmc;
-    int ret = 1;
-    int i, j;
-    int hash_id;
-    int has_srmc = 0;
+    struct mlx5_ib_dev *dev = to_mdev(pd->device);
     u32 depth = sq_depth ? sq_depth : SQ_DEPTH;
+    u32 group_size = mlx5_srm_effective_kqps();
+    u32 base, i, probe, hash_id, j = 0;
+    int ret;
 
-    if (depth > SQ_DEPTH)
+    if (depth > SQ_DEPTH || !group_size ||
+        group_size > NUM_SRMC)
         return -EINVAL;
-    if (mlx5_srm_effective_kqps() > NUM_SRMC)
-        return -EINVAL;
-    hash_id = sched_hash_ip((char *)dgid->raw + 12, NUM_SRMC);
-    mutex_lock(&sched->srmc_lock);
-    for (i = 0; i < NUM_SRMC; i++)
-    {
-        j = (hash_id + i) % NUM_SRMC;
-        srmc = sched->srmc_tb[j];
-        if (mlx5_ib_srmc_is_invalid(srmc, "is_xrc_exists", j)) {
-            sched->srmc_tb[j] = NULL;
-            break;
+
+    /*
+     * Serialize complete outgoing-group creation.  CM callbacks only take
+     * srmc_lock, never peer_lock, so waiting for CONNECTED cannot deadlock
+     * the receiver.  Both the Hollow QP and legacy AH entry points use this
+     * lock.  A group's published base slot is the authoritative GID key;
+     * target-only hash entries must not satisfy an initiator lookup.
+     */
+    mutex_lock(&sched->peer_lock);
+    ret = READ_ONCE(sched->init_error);
+    if (ret)
+        goto out_unlock;
+
+    for (base = 0; base < sched->kqp_slots; base += group_size) {
+        srmc = READ_ONCE(sched->srmc_by_idx[base]);
+        if (srmc && !memcmp(srmc->dgid.raw, dgid->raw,
+                            sizeof(srmc->dgid.raw))) {
+            ret = flags == SRMC_CREATE_FLAG_INIT_QP ? 0 : 1;
+            goto out_unlock;
         }
-        if (srmc == NULL)
-        {
-            break;
-        }
-	        if (memcmp(srmc->dgid.raw, dgid->raw,
-	                   sizeof(srmc->dgid.raw)) == 0) {
-	            /*
-	             * srmc_tb contains both outgoing initiator KQPs and
-	             * accepted target connections.  A target-only entry has the
-	             * same peer GID but cannot satisfy an initiator lookup.  Its
-	             * wqe_infos is NULL; initiator entries allocate wqe_infos
-	             * before being published in this table.  Keep probing past
-	             * target-only entries so bidirectional setup can create the
-	             * local KQP group instead of waiting forever for it.
-	             */
-	            if (!srmc->wqe_infos)
-	                continue;
-	            if (flags == SRMC_CREATE_FLAG_INIT_QP)
-	                ret = 0;
-	            has_srmc = 1;
-	            break;
-	        }
     }
 
-	    if (!has_srmc)
-	    {
-	        if (sched->srmc_tb[j] != NULL)
-	        {
-	            pr_err("srmc queue is full\n");
-            mutex_unlock(&sched->srmc_lock);
-            return -1;
+    base = sched->kqp_slots;
+    if (base > NUM_SRMC - group_size ||
+        base + group_size > dev->sq_ctrl_pool.slot_cnt) {
+        pr_err("hollow RC peer slots exhausted: gid=%pI6c used=%u group=%u capacity=%u\n",
+               dgid->raw, base, group_size,
+               min_t(u32, NUM_SRMC, dev->sq_ctrl_pool.slot_cnt));
+        ret = -ENOSPC;
+        goto out_unlock;
+    }
+
+    hash_id = sched_hash_ip((char *)dgid->raw + 12, NUM_SRMC);
+    for (i = 0; i < group_size; i++) {
+        srmc = kzalloc_node(sizeof(*srmc), GFP_KERNEL, srm_numa_node);
+        if (!srmc) {
+            ret = -ENOMEM;
+            goto failed;
         }
-        for (i = 0; i < mlx5_srm_effective_kqps(); i++)
-        {
-            // srmc no exists
-            srmc = kzalloc_node(sizeof(struct mlx5_ib_srmc), GFP_KERNEL,
-                                srm_numa_node);
-            if (!srmc) {
-                ret = -ENOMEM;
-                WRITE_ONCE(sched->init_error, ret);
-                wake_up_all(&sched->init_wait);
-                break;
-            }
-            srmc->wqe_infos = mlx5_ib_srm_kvcalloc_node(
-                SQ_DEPTH, sizeof(*srmc->wqe_infos));
-            if (!srmc->wqe_infos) {
-                kfree(srmc);
-                ret = -ENOMEM;
-                WRITE_ONCE(sched->init_error, ret);
-                wake_up_all(&sched->init_wait);
-                break;
-            }
-            memcpy(srmc->dgid.raw, dgid->raw, sizeof(srmc->dgid.raw));
-            if (flags == SRMC_CREATE_FLAG_INIT_QP)
-                srmc->ini_cb.refcnt = 0;
-            srmc->idx = j;
-            srmc->srmc_idx = i;
-            srmc->owner_worker = mlx5_srm_kqp_owner(sched, i);
+        srmc->wqe_infos = mlx5_ib_srm_kvcalloc_node(
+            SQ_DEPTH, sizeof(*srmc->wqe_infos));
+        if (!srmc->wqe_infos) {
+            kfree(srmc);
+            ret = -ENOMEM;
+            goto failed;
+        }
+        memcpy(srmc->dgid.raw, dgid->raw, sizeof(srmc->dgid.raw));
+        srmc->srmc_idx = base + i;
+        srmc->owner_worker = mlx5_srm_kqp_owner(sched, base + i);
 
-            sched->srmc_tb[j] = srmc;
-            sched->srmc_cnt++;
-
+        mutex_lock(&sched->srmc_lock);
+        /* Incoming CM callbacks may insert target entries between every
+         * outgoing connection.  Find a free bucket EACH time; j++ alone
+         * could overwrite such entries even with unique control slots.
+         */
+        for (probe = 0; probe < NUM_SRMC; probe++) {
+            j = (hash_id + i + probe) % NUM_SRMC;
+            if (!sched->srmc_tb[j])
+                break;
+        }
+        if (probe == NUM_SRMC) {
             mutex_unlock(&sched->srmc_lock);
-            ret = create_srmc_qp_cm(
-                srmc, pd, dgid,
-                i >= num_kqps ? MESSAGE_SIZE_LARGE : MESSAGE_SIZE_SMALL,
-                sched->id, depth);
-            pr_info("create_srmc_qp_cm ret:%d\n", ret);
+            kvfree(srmc->wqe_infos);
+            kfree(srmc);
+            ret = -ENOSPC;
+            goto failed;
+        }
+        srmc->idx = j;
+        sched->srmc_tb[j] = srmc;
+        sched->srmc_cnt++;
+        mutex_unlock(&sched->srmc_lock);
+
+        ret = create_srmc_qp_cm(
+            srmc, pd, dgid,
+            i >= num_kqps ? MESSAGE_SIZE_LARGE : MESSAGE_SIZE_SMALL,
+            sched->id, depth);
+        if (ret <= 0 || !srmc->ini_cb.qp) {
+            ret = ret < 0 ? ret : -EINVAL;
             mutex_lock(&sched->srmc_lock);
-            if (ret <= 0 || !srmc->ini_cb.qp) {
-                ret = ret ?: -EINVAL;
-                if (sched->srmc_tb[j] == srmc)
-                    sched->srmc_tb[j] = NULL;
-                if (srmc->srmc_idx >= 0 &&
-                    srmc->srmc_idx < NUM_SRMC &&
-                    sched->srmc_by_idx[srmc->srmc_idx] == srmc)
-                    sched->srmc_by_idx[srmc->srmc_idx] = NULL;
-                if (sched->srmc_cnt)
-                    sched->srmc_cnt--;
-                WRITE_ONCE(sched->init_error, ret);
-                wake_up_all(&sched->init_wait);
-                mutex_unlock(&sched->srmc_lock);
-                mlx5_ib_free_srmc_publish(srmc);
-                kvfree(srmc->wqe_infos);
-                kfree(srmc);
-                mutex_lock(&sched->srmc_lock);
-                break;
-            }
+            if (sched->srmc_tb[j] == srmc)
+                sched->srmc_tb[j] = NULL;
+            if (sched->srmc_cnt)
+                sched->srmc_cnt--;
+            mutex_unlock(&sched->srmc_lock);
+            mlx5_ib_free_srmc_publish(srmc);
+            kvfree(srmc->wqe_infos);
+            kfree(srmc);
+            goto failed;
+        }
 
-            WRITE_ONCE(sched->srmc_by_idx[srmc->srmc_idx], srmc);
-            smp_store_release(&sched->ready_srmc_cnt,
-                              sched->ready_srmc_cnt + 1);
-            wake_up_all(&sched->init_wait);
-	            j = (j + 1) % NUM_SRMC;
-	        }
-	    }
+        WRITE_ONCE(sched->srmc_by_idx[base + i], srmc);
+    }
 
-	    if (has_srmc && flags == SRMC_CREATE_FLAG_INIT_QP &&
-	        (smp_load_acquire(&sched->ready_srmc_cnt) < mlx5_srm_effective_kqps() ||
-	         READ_ONCE(sched->init_error))) {
-	        mutex_unlock(&sched->srmc_lock);
-	        ret = wait_event_killable_timeout(sched->init_wait,
-	            READ_ONCE(sched->init_error) ||
-	            smp_load_acquire(&sched->ready_srmc_cnt) >= mlx5_srm_effective_kqps(),
-	            msecs_to_jiffies(SRMC_INIT_WAIT_TIMEOUT_MS));
-	        if (ret < 0) {
-	            pr_err("hollow RC KQP group wait interrupted: error=%d ready=%zu expected=%u\n",
-	                   ret, smp_load_acquire(&sched->ready_srmc_cnt),
-	                   mlx5_srm_effective_kqps());
-	            return ret;
-	        }
-	        if (!ret) {
-	            pr_err("hollow RC KQP group init timed out after %u ms: ready=%zu expected=%u\n",
-	                   SRMC_INIT_WAIT_TIMEOUT_MS,
-	                   smp_load_acquire(&sched->ready_srmc_cnt),
-	                   mlx5_srm_effective_kqps());
-	            return -ETIMEDOUT;
-	        }
-	        ret = READ_ONCE(sched->init_error);
-	        if (ret)
-	            return ret;
-	        return 0;
-	    }
+    /* Expose the entire group atomically to lookup, CQ decode and polling.
+     * All its control/credit slots are initialized before users can attach.
+     * New peers never reset the first group's per-worker shared credits.
+     */
+    smp_store_release(&sched->kqp_slots, base + group_size);
+    smp_store_release(&sched->ready_srmc_cnt, (size_t)(base + group_size));
+    wake_up_all(&sched->init_wait);
+    pr_info("hollow RC peer KQP group ready: gid=%pI6c base=%u count=%u total=%u workers=%u\n",
+            dgid->raw, base, group_size, base + group_size,
+            sched->worker_count);
+    ret = 1;
+    goto out_unlock;
 
-	    mutex_unlock(&sched->srmc_lock);
-
-    DEBUG_LOG("out is_xrc_exists,ret:%d\n", ret);
+failed:
+    /*
+     * Do not reuse a partially initialized block or expose it to users.
+     * Successfully created KQPs remain tracked for ordered module teardown;
+     * freeing them here could race CM callbacks.  Fail later attaches closed
+     * until reload, rather than treating another peer's ready count as ours.
+     */
+    WRITE_ONCE(sched->init_error, ret);
+    wake_up_all(&sched->init_wait);
+    pr_err("hollow RC peer KQP group failed: gid=%pI6c base=%u ready=%u expected=%u error=%d; reload required\n",
+           dgid->raw, base, i, group_size, ret);
+out_unlock:
+    mutex_unlock(&sched->peer_lock);
     return ret;
 }
 
@@ -5038,8 +5017,6 @@ int srm_create_connection(void *data)
     int ret;
 
     int i, hash_id, j;
-    int found;
-    int cnt;
 
     server_cb = (struct srm_cb *)cm_id->context;
 
@@ -5053,48 +5030,27 @@ int srm_create_connection(void *data)
     sched = &sched_group.scheds[idx];
 
     hash_id = sched_hash_ip(dgid.raw + 12, NUM_SRMC);
-    found = 0;
     mutex_lock(&sched->srmc_lock);
+    /* Target CM contexts have independent lifetimes.  Never attach a
+     * target callback to an outgoing SRMC: a failed initiator setup may
+     * free that object while the target callback is still alive.
+     */
     for (i = 0; i < NUM_SRMC; i++)
     {
         j = (hash_id + i) % NUM_SRMC;
         srmc = sched->srmc_tb[j];
-        if (mlx5_ib_srmc_is_invalid(srmc, "srm_create_connection lookup", j)) {
-            sched->srmc_tb[j] = NULL;
-            srmc = NULL;
-            break;
-        }
         if (srmc == NULL)
-        {
             break;
-        }
-        if (memcmp(srmc->dgid.raw, dgid.raw, sizeof(srmc->dgid.raw)) == 0)
-        {
-            found = 1;
-            break;
-        }
     }
-    cnt = 0;
-    while (srmc && srmc->tgt_cb.refcnt)
-    {
-        j = (j + 1) % NUM_SRMC;
-        srmc = sched->srmc_tb[j];
-        if (mlx5_ib_srmc_is_invalid(srmc, "srm_create_connection probe", j)) {
-            sched->srmc_tb[j] = NULL;
-            srmc = NULL;
-            break;
-        }
-        cnt++;
-        if (cnt > NUM_SRMC)
-        {
-            pr_err("srmc queue is full\n");
-            mutex_unlock(&sched->srmc_lock);
-            mlx5_ib_server_untrack_conn(conn_info);
-            rdma_destroy_id(cm_id);
-            kfree(conn_info);
-            mlx5_ib_server_conn_done(server);
-            return -1;
-        }
+    if (i == NUM_SRMC) {
+        pr_err("hollow RC target SRMC table full: gid=%pI6c\n", dgid.raw);
+        mutex_unlock(&sched->srmc_lock);
+        rdma_reject(cm_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);
+        mlx5_ib_server_untrack_conn(conn_info);
+        rdma_destroy_id(cm_id);
+        kfree(conn_info);
+        mlx5_ib_server_conn_done(server);
+        return -ENOSPC;
     }
 
     if (!srmc)
@@ -5112,6 +5068,8 @@ int srm_create_connection(void *data)
         }
         sched->srmc_cnt++;
         memcpy(srmc->dgid.raw, dgid.raw, sizeof(srmc->dgid.raw));
+        srmc->srmc_idx = -1; /* Not an initiator/control slot. */
+        srmc->idx = j;
         // 将srmc 加入到srmc_head中
         sched->srmc_tb[j] = srmc;
     }

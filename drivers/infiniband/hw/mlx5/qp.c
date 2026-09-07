@@ -1183,9 +1183,10 @@ mlx5_ib_find_balanced_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 	u32 indexed = 0;
 	u32 gid_matches = 0;
 	u32 usable_matches = 0;
+	u32 slots;
+	u32 i;
 	int selected_refcnt = INT_MAX;
 	int si;
-	int i;
 
 	if (usr_rc_id >= ARRAY_SIZE(sched_group.usr_rc_routes))
 		return NULL;
@@ -1214,6 +1215,7 @@ mlx5_ib_find_balanced_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 		struct mlx5_ib_sched *sched = &sched_group.scheds[si];
 
 		mutex_lock(&sched->srmc_lock);
+		slots = smp_load_acquire(&sched->kqp_slots);
 		/*
 		 * srmc_tb is a mixed GID hash table used by both initiator KQPs
 		 * and incoming target connections.  Bidirectional MPI setup can
@@ -1221,10 +1223,13 @@ mlx5_ib_find_balanced_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 		 * still healthy.  srmc_by_idx is the authoritative table populated
 		 * only after an initiator KQP has been created successfully.
 		 */
-		for (i = 0; i < num_kqps; i++) {
-			u32 kqp_idx = (start + i) % num_kqps;
+		for (i = 0; i < slots; i++) {
+			u32 kqp_idx = (start + i) % slots;
 			struct mlx5_ib_srmc *srmc = sched->srmc_by_idx[kqp_idx];
 
+			if (mlx5_srm_layout_large(kqp_idx, num_kqps,
+						 MLX5_SRM_KERNEL_QP_LEVELS))
+				continue;
 			if (!srmc)
 				continue;
 			if (IS_ERR(srmc)) {
@@ -1823,7 +1828,9 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 			large_srmc = sched_group.scheds[0].srmc_by_idx[
 				srmc->srmc_idx + num_kqps];
 			if (!large_srmc || !large_srmc->ini_cb.qp ||
-			    !large_srmc->ini_cb.qp->buf.frags) {
+			    !large_srmc->ini_cb.qp->buf.frags ||
+			    memcmp(large_srmc->dgid.raw, srmc->dgid.raw,
+				   sizeof(srmc->dgid.raw))) {
 				err = -EINVAL;
 				goto out_owner_unlock;
 			}

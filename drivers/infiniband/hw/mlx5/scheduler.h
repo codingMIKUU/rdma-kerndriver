@@ -6,6 +6,7 @@
 #include <linux/types.h>
 #include <linux/wait.h>
 #include <rdma/rdma_cm.h>
+#include "srm_kqp_layout.h"
 
 #define SQ_DEPTH 35000
 static int debug = 0;
@@ -311,7 +312,7 @@ struct mlx5_ib_srmc
     struct mlx5_sq_ctrl_page *ctrl_page;
     struct mlx5_wqe_info *wqe_infos;
     int idx;                  // 该srmc在表中的索引
-    int srmc_idx;             // 该srmc在创建顺序中排第几个(用于分配cq)
+    int srmc_idx;             // Global KQP/control slot, unique across peers
     u16 owner_worker;
     struct page **publish_pages;
     u32 publish_npages;
@@ -331,10 +332,9 @@ struct mlx5_ib_sched_worker
     u32 worker_id;
     u32 cpu_id;
     /*
-     * Base-lane range owned by this worker.  With one KQP level these are
-     * also the physical KQP indices.  With size splitting enabled the worker
-     * owns this range in every level, i.e. [begin,end) for small traffic and
-     * [num_kqps + begin,num_kqps + end) for large traffic.
+     * Peer-local lane range, repeated in each peer's disjoint slot block
+     * and in both size classes.  The first peer's small begin slot remains
+     * the worker's lifetime-stable shared credit/mailbox slot.
      */
     u32 kqp_begin;
     u32 kqp_end;
@@ -346,11 +346,17 @@ struct mlx5_ib_sched
 {
     struct mlx5_ib_sched_worker *workers;
     u32 worker_count;
+    /* Setup-only serialization; never held by CM callbacks or pollers. */
+    struct mutex peer_lock;
     struct mutex srmc_lock;
     struct mlx5_ib_srmc *srmc_tb[NUM_SRMC]; // single per-gid SRMC
     struct mlx5_ib_srmc *srmc_by_idx[NUM_SRMC]; // direct lookup by ctrl slot / srmc_idx
     size_t srmc_cnt;
     size_t ready_srmc_cnt;
+    /* Release-published end of COMPLETE peer blocks.  No slot reuse until
+     * module teardown.  A partial creation failure is sticky (init_error).
+     */
+    u32 kqp_slots;
     int init_error;
     wait_queue_head_t init_wait;
     int id;
