@@ -607,6 +607,9 @@ struct mlx5_ib_qp {
 	 */
 	u32                     counter_pending;
 	u16			gsi_lag_port;
+	/* Setup-only optional large-lane mappings; preserve existing offsets. */
+	struct mlx5_user_mmap_entry *large_farm_uar_mmap_entry;
+	struct mlx5_qp_farm_db_mmap_entry *large_farm_db_mmap_entry;
 };
 
 struct mlx5_ib_cq_buf {

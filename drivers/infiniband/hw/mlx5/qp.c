@@ -1652,20 +1652,31 @@ static void mlx5_ib_fill_kernel_qp_info(struct mlx5_ib_qp *qp,
 	resp->comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_KERNEL_QP_INFO;
 }
 
-static int mlx5_ib_prepare_farm_db_mmaps(
+static u32 mlx5_ib_modify_qp_resp_length(bool hollow, size_t outlen)
+{
+	/* The appended block is Hollow-only. Preserve ordinary/ECE/DCT's
+	 * pre-extension response size, including for an older provider. */
+	if (!hollow)
+		return offsetof(struct mlx5_ib_modify_qp_resp,
+				large_farm_uar_mmap_offset);
+	return min_t(size_t, outlen, sizeof(struct mlx5_ib_modify_qp_resp));
+}
+
+static int mlx5_ib_prepare_srmc_farm_db_mmaps(
 	struct mlx5_ib_dev *dev, struct mlx5_ib_ucontext *context,
-	struct mlx5_ib_qp *qp, struct mlx5_ib_modify_qp_resp *resp)
+	struct mlx5_ib_srmc *srmc,
+	struct mlx5_user_mmap_entry **uar_mmap_entry,
+	struct mlx5_qp_farm_db_mmap_entry **db_mmap_entry,
+	struct mlx5_ib_modify_qp_resp *resp)
 {
 	struct mlx5_qp_farm_db_mmap_entry *db_entry;
 	struct mlx5_user_mmap_entry *uar_entry;
 	struct mlx5_ib_sched_worker *worker;
-	struct mlx5_ib_srmc *srmc;
 	struct mlx5_ib_qp *kqp;
 	unsigned int fw_uars_per_page;
 	size_t db_offset;
 	int err;
 
-	srmc = qp->srmc_owner;
 	if (!srmc || !srmc->ini_cb.qp || !sched_group.scheds ||
 	    !sched_group.num_sched)
 		return -EINVAL;
@@ -1679,7 +1690,7 @@ static int mlx5_ib_prepare_farm_db_mmaps(
 	if (!worker->credit_ctrl)
 		return -EAGAIN;
 
-	if (!qp->farm_uar_mmap_entry) {
+	if (!*uar_mmap_entry) {
 		uar_entry = kzalloc(sizeof(*uar_entry), GFP_KERNEL);
 		if (!uar_entry)
 			return -ENOMEM;
@@ -1697,10 +1708,10 @@ static int mlx5_ib_prepare_farm_db_mmaps(
 			kfree(uar_entry);
 			return err;
 		}
-		qp->farm_uar_mmap_entry = uar_entry;
+		*uar_mmap_entry = uar_entry;
 	}
 
-	if (!qp->farm_db_mmap_entry) {
+	if (!*db_mmap_entry) {
 		db_entry = kzalloc(sizeof(*db_entry), GFP_KERNEL);
 		if (!db_entry)
 			return -ENOMEM;
@@ -1717,23 +1728,63 @@ static int mlx5_ib_prepare_farm_db_mmaps(
 			kfree(db_entry);
 			return err;
 		}
-		qp->farm_db_mmap_entry = db_entry;
+		*db_mmap_entry = db_entry;
 	}
 
 	resp->farm_uar_mmap_offset = mlx5_qp_entry_to_mmap_offset(
-		qp->farm_uar_mmap_entry);
+		*uar_mmap_entry);
 	resp->farm_uar_mmap_len = PAGE_SIZE;
 	resp->farm_uar_reg_offset =
 		(char __iomem *)kqp->bf.bfreg->map -
 		(char __iomem *)kqp->bf.bfreg->up->map;
 	resp->farm_db_mmap_offset = mlx5_qp_entry_to_mmap_offset(
-		&qp->farm_db_mmap_entry->mentry);
+		&(*db_mmap_entry)->mentry);
 	resp->farm_db_mmap_len = PAGE_SIZE;
 	resp->farm_db_offset = kqp->db.index * cache_line_size();
 	resp->farm_bf_buf_size = kqp->bf.buf_size;
 	resp->farm_credit_slot_idx = worker->kqp_begin;
 	resp->farm_direct_db_batch = MLX5_SRM_DIRECT_DB_MAX_BATCH;
 	resp->comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_FARM_DB;
+	return 0;
+}
+
+static int mlx5_ib_prepare_farm_db_mmaps(
+	struct mlx5_ib_dev *dev, struct mlx5_ib_ucontext *context,
+	struct mlx5_ib_qp *qp, struct mlx5_ib_modify_qp_resp *resp)
+{
+	return mlx5_ib_prepare_srmc_farm_db_mmaps(dev, context,
+		qp->srmc_owner, &qp->farm_uar_mmap_entry,
+		&qp->farm_db_mmap_entry, resp);
+}
+
+static int mlx5_ib_prepare_large_farm_db_mmaps(
+	struct mlx5_ib_dev *dev, struct mlx5_ib_ucontext *context,
+	struct mlx5_ib_qp *qp, struct mlx5_ib_modify_qp_resp *resp)
+{
+	struct mlx5_ib_modify_qp_resp lane = {};
+	int err;
+
+	/* Old providers keep using the kernel-only large-lane fallback. */
+	if (resp->response_length <
+	    offsetofend(struct mlx5_ib_modify_qp_resp, large_farm_reserved))
+		return 0;
+
+	err = mlx5_ib_prepare_srmc_farm_db_mmaps(dev, context,
+		qp->large_srmc_owner, &qp->large_farm_uar_mmap_entry,
+		&qp->large_farm_db_mmap_entry, &lane);
+	if (err)
+		return err;
+
+	resp->large_farm_uar_mmap_offset = lane.farm_uar_mmap_offset;
+	resp->large_farm_uar_mmap_len = lane.farm_uar_mmap_len;
+	resp->large_farm_uar_reg_offset = lane.farm_uar_reg_offset;
+	resp->large_farm_db_mmap_offset = lane.farm_db_mmap_offset;
+	resp->large_farm_db_mmap_len = lane.farm_db_mmap_len;
+	resp->large_farm_db_offset = lane.farm_db_offset;
+	resp->large_farm_bf_buf_size = lane.farm_bf_buf_size;
+	resp->large_farm_credit_slot_idx = lane.farm_credit_slot_idx;
+	resp->large_farm_direct_db_batch = lane.farm_direct_db_batch;
+	resp->comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_LARGE_FARM_DB;
 	return 0;
 }
 
@@ -1916,6 +1967,10 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 			goto out_owner_unlock;
 
 		mlx5_ib_fill_large_kernel_qp_info(qp->large_srmc_owner, resp);
+		fail_stage = "prepare-large-direct-db-mmaps";
+		err = mlx5_ib_prepare_large_farm_db_mmaps(dev, context, qp, resp);
+		if (err)
+			goto out_owner_unlock;
 	}
 	err = 0;
 
@@ -2151,6 +2206,16 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 			rdma_user_mmap_entry_remove(
 				&qp->large_sq_publish_entry->mentry.rdma_entry);
 			qp->large_sq_publish_entry = NULL;
+		}
+		if (qp->large_farm_uar_mmap_entry) {
+			rdma_user_mmap_entry_remove(
+				&qp->large_farm_uar_mmap_entry->rdma_entry);
+			qp->large_farm_uar_mmap_entry = NULL;
+		}
+		if (qp->large_farm_db_mmap_entry) {
+			rdma_user_mmap_entry_remove(
+				&qp->large_farm_db_mmap_entry->mentry.rdma_entry);
+			qp->large_farm_db_mmap_entry = NULL;
 		}
 
 		/* Keep ordinary RC QP teardown out of the Hollow RC owner path. */
@@ -5680,7 +5745,8 @@ static int __mlx5_ib_modify_qp(struct ib_qp *ibqp,
 			resp->ece_options =
 				MLX5_CAP_GEN(dev->mdev, ece_support) ?
 					ucmd->ece_options : 0;
-			resp->response_length = sizeof(*resp);
+			resp->response_length =
+				mlx5_ib_modify_qp_resp_length(false, udata->outlen);
 		}
 		err = mlx5_core_qp_modify(dev, op, optpar, qpc, &base->mqp,
 					  &resp->ece_options);
@@ -5868,6 +5934,7 @@ static int mlx5_ib_modify_dct(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 		struct mlx5_ib_modify_qp_resp resp = {};
 		u32 out[MLX5_ST_SZ_DW(create_dct_out)] = {};
 		u32 min_resp_len = offsetofend(typeof(resp), dctn);
+		u32 legacy_resp_len = mlx5_ib_modify_qp_resp_length(false, 0);
 		u8 tclass = attr->ah_attr.grh.traffic_class;
 		u8 port = MLX5_GET(dctc, dctc, port);
 
@@ -5877,9 +5944,9 @@ static int mlx5_ib_modify_dct(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 		 * If we don't have enough space for the ECE options,
 		 * simply indicate it with resp.response_length.
 		 */
-		resp.response_length = (udata->outlen < sizeof(resp)) ?
+		resp.response_length = (udata->outlen < legacy_resp_len) ?
 					       min_resp_len :
-					       sizeof(resp);
+					       legacy_resp_len;
 
 		required |= IB_QP_MIN_RNR_TIMER | IB_QP_AV | IB_QP_PATH_MTU;
 		if (!is_valid_mask(attr_mask, required, 0))
@@ -6073,8 +6140,12 @@ int mlx5_ib_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 			qp->is_ooo_rq = 1;
 		}
 	}
-	if (udata)
-		resp.response_length = sizeof(resp);
+	if (udata) {
+		/* Appended Hollow fields must not suppress an older provider's
+		 * complete mapping response just because its buffer is shorter. */
+		resp.response_length = mlx5_ib_modify_qp_resp_length(
+			mlx5_ib_is_hollow_rc_qp(qp), udata->outlen);
+	}
 	if (mlx5_ib_is_skip_kern_qp(qp))
 		return 0;
 	if (qp->type == IB_QPT_GSI)

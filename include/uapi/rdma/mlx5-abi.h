@@ -513,6 +513,17 @@ struct mlx5_ib_modify_qp_resp {
 	__u32	large_kernel_sq_qp_state_max_gs;
 	__u32	large_kernel_max_inline_data;
 	__u32	large_reserved3;
+	/* Optional large-lane direct doorbell mappings; keep the old prefix. */
+	__u64	large_farm_uar_mmap_offset;
+	__u32	large_farm_uar_mmap_len;
+	__u32	large_farm_uar_reg_offset;
+	__u64	large_farm_db_mmap_offset;
+	__u32	large_farm_db_mmap_len;
+	__u32	large_farm_db_offset;
+	__u32	large_farm_bf_buf_size;
+	__u32	large_farm_credit_slot_idx;
+	__u32	large_farm_direct_db_batch;
+	__u32	large_farm_reserved;
 };
 
 enum mlx5_ib_modify_qp_resp_mask {
@@ -521,6 +532,7 @@ enum mlx5_ib_modify_qp_resp_mask {
 	MLX5_IB_MODIFY_QP_RESP_MASK_SQ_MMAP = 1UL << 2,
 	MLX5_IB_MODIFY_QP_RESP_MASK_PUBLISH_MMAP = 1UL << 3,
 	MLX5_IB_MODIFY_QP_RESP_MASK_FARM_DB = 1UL << 4,
+	MLX5_IB_MODIFY_QP_RESP_MASK_LARGE_FARM_DB = 1UL << 5,
 };
 
 struct mlx5_ib_create_wq_resp {
