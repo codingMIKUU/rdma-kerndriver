@@ -457,12 +457,18 @@ struct mlx5_ib_burst_info {
 
 enum mlx5_ib_modify_qp_mask {
 	MLX5_IB_MODIFY_QP_OOO_DP = 1 << 0,
+	/* Provider understands the negotiated Hollow completion delivery mode. */
+	MLX5_IB_MODIFY_QP_SRM_CQ_MODE = 1 << 1,
 };
 
 struct mlx5_ib_modify_qp {
 	__u32			   comp_mask;
 	struct mlx5_ib_burst_info  burst_info;
 	__u32			   ece_options;
+	/* Optional private software CQ, used only for Hollow dispatch mode. */
+	__u64			   srm_cq_buf_addr;
+	__u32			   srm_cq_buf_size;
+	__u32			   srm_cq_depth;
 };
 
 struct mlx5_ib_modify_qp_resp {
@@ -533,6 +539,31 @@ enum mlx5_ib_modify_qp_resp_mask {
 	MLX5_IB_MODIFY_QP_RESP_MASK_PUBLISH_MMAP = 1UL << 3,
 	MLX5_IB_MODIFY_QP_RESP_MASK_FARM_DB = 1UL << 4,
 	MLX5_IB_MODIFY_QP_RESP_MASK_LARGE_FARM_DB = 1UL << 5,
+	MLX5_IB_MODIFY_QP_RESP_MASK_CQ_MODE = 1UL << 6,
+	MLX5_IB_MODIFY_QP_RESP_MASK_CQ_DISPATCH = 1UL << 7,
+};
+
+/* Native-endian CPU-to-CPU CQ; never aliases a hardware receive CQ.
+ * producer/consumer are monotonic modulo-2^64 counts, with at most depth
+ * records outstanding. Publish producer/consumer with release semantics
+ * and read the other side's counter with acquire semantics. */
+#define MLX5_SRM_SW_CQ_MAX_DEPTH (1U << 20)
+
+struct mlx5_srm_sw_cqe {
+	__u64 post_idx;
+	__u32 kqp_idx;
+	__u32 usr_rc;
+	__u32 status;
+	__u32 vendor_err;
+	__u64 reserved;
+};
+
+struct mlx5_srm_sw_cq {
+	__u64 producer;
+	__u8 producer_pad[56];
+	__u64 consumer;
+	__u8 consumer_pad[56];
+	struct mlx5_srm_sw_cqe entries[];
 };
 
 struct mlx5_ib_create_wq_resp {

@@ -28,6 +28,8 @@
 #include <linux/random.h>
 #include <linux/jiffies.h>
 #include <linux/cpu.h>
+
+extern struct mlx5_ib_sched_group sched_group;
 #include <linux/percpu.h>
 #include <linux/nodemask.h>
 #include <asm/msr.h>
@@ -265,6 +267,11 @@ static void mlx5_ib_cqb_release(struct mlx5_ib_cqbuf *cqb)
     if (!cqb)
         return;
 
+    if (cqb->sw_buf) {
+        vunmap(cqb->sw_buf);
+        put_user_pages(cqb->sw_pages, cqb->sw_size / PAGE_SIZE);
+        kvfree(cqb->sw_pages);
+    }
     vunmap(cqb->buf);
     npages = DIV_ROUND_UP(cqb->cq_size, PAGE_SIZE);
     put_user_pages(cqb->pages, npages);
@@ -827,10 +834,12 @@ int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group,
         goto err_shrink_slot;
     }
     uq->cqn = cqn;
+    uq->buf_addr = virt_addr;
     uq->cq_size = size;
     uq->buf = vmap(pages, npages, VM_MAP, PAGE_KERNEL);
     uq->pages = pages;
     uq->cqe_sz = 64;
+    spin_lock_init(&uq->sw_lock);
     if (sched_group->num_sched > 0 && sched_group->scheds &&
         sched_group->scheds[0].worker_count)
         uq->owner_worker = (u32)cqn %
@@ -862,6 +871,79 @@ err_unlock_pages:
     return ret;
 }
 
+int mlx5_ib_map_srm_cq_ubuf(struct mlx5_ib_sched_group *group, int cqn,
+                           u64 addr, u32 size, u32 depth)
+{
+    struct mlx5_ib_cqbuf *cqb;
+    struct mlx5_srm_sw_cq *sw;
+    struct page **pages;
+    unsigned long npages;
+    int pinned, ret = 0;
+
+    if (!addr || addr != (unsigned long)addr ||
+        !IS_ALIGNED(addr, PAGE_SIZE) || !is_power_of_2(depth) ||
+        depth > MLX5_SRM_SW_CQ_MAX_DEPTH ||
+        size != PAGE_ALIGN(sizeof(*sw) + (size_t)depth * sizeof(sw->entries[0])) ||
+        addr + size < addr)
+        return -EINVAL;
+
+    mutex_lock(&group->cq_lock);
+    cqb = mlx5_ib_find_cqb_by_cqn_locked(group, cqn);
+    if (!cqb) {
+        ret = -ENOENT;
+        goto out_unlock;
+    }
+    if (cqb->sw_buf) {
+        ret = cqb->sw_addr == addr && cqb->sw_size == size &&
+              cqb->sw_depth == depth ? 0 : -EINVAL;
+        goto out_unlock;
+    }
+    if (addr < cqb->buf_addr + cqb->cq_size &&
+        addr + size > cqb->buf_addr) {
+        ret = -EINVAL;
+        goto out_unlock;
+    }
+
+    npages = size / PAGE_SIZE;
+    pages = kvmalloc_array(npages, sizeof(*pages), GFP_KERNEL);
+    if (!pages) {
+        ret = -ENOMEM;
+        goto out_unlock;
+    }
+    pinned = get_user_pages(addr, npages, FOLL_WRITE, pages, NULL);
+    if (pinned != npages) {
+        if (pinned > 0)
+            put_user_pages(pages, pinned);
+        ret = pinned < 0 ? pinned : -EFAULT;
+        goto out_pages;
+    }
+    sw = vmap(pages, npages, VM_MAP, PAGE_KERNEL);
+    if (!sw) {
+        ret = -ENOMEM;
+        goto out_unpin;
+    }
+    if (READ_ONCE(sw->producer) || READ_ONCE(sw->consumer)) {
+        vunmap(sw);
+        ret = -EINVAL;
+        goto out_unpin;
+    }
+    cqb->sw_pages = pages;
+    cqb->sw_addr = addr;
+    cqb->sw_size = size;
+    cqb->sw_depth = depth;
+    cqb->sw_producer = 0;
+    smp_store_release(&cqb->sw_buf, sw);
+    goto out_unlock;
+
+out_unpin:
+    put_user_pages(pages, npages);
+out_pages:
+    kvfree(pages);
+out_unlock:
+    mutex_unlock(&group->cq_lock);
+    return ret;
+}
+
 int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn)
 {
     struct mlx5_ib_cqbuf *cqb = NULL;
@@ -888,9 +970,15 @@ int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn)
 
     for (j = 0; j < ARRAY_SIZE(sched_group->usr_rc_routes); j++) {
         if (READ_ONCE(sched_group->usr_rc_routes[j].cqb) == cqb) {
-            smp_store_release(&sched_group->usr_rc_routes[j].cqb, NULL);
-            WRITE_ONCE(sched_group->usr_rc_routes[j].uidx,
-                       MLX5_IB_DEFAULT_UIDX);
+            struct mlx5_ib_usr_rc_route *route =
+                &sched_group->usr_rc_routes[j];
+            unsigned long flags;
+
+            spin_lock_irqsave(&route->dispatch_lock, flags);
+            route->dispatch_ready = false;
+            smp_store_release(&route->cqb, NULL);
+            WRITE_ONCE(route->uidx, MLX5_IB_DEFAULT_UIDX);
+            spin_unlock_irqrestore(&route->dispatch_lock, flags);
         }
     }
     cqb->retire_epoch =
@@ -911,6 +999,8 @@ int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
                            u32 usr_rc_cnt, int cqn, u32 uidx)
 {
     struct mlx5_ib_cqbuf *cqb;
+    struct mlx5_ib_usr_rc_route *route;
+    unsigned long flags;
 
     if (!sched_group)
         return -EINVAL;
@@ -927,8 +1017,12 @@ int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
         return -ENOENT;
     }
 
-    WRITE_ONCE(sched_group->usr_rc_routes[usr_rc_cnt].uidx, uidx);
-    smp_store_release(&sched_group->usr_rc_routes[usr_rc_cnt].cqb, cqb);
+    route = &sched_group->usr_rc_routes[usr_rc_cnt];
+    spin_lock_irqsave(&route->dispatch_lock, flags);
+    route->dispatch_ready = false;
+    WRITE_ONCE(route->uidx, uidx);
+    smp_store_release(&route->cqb, cqb);
+    spin_unlock_irqrestore(&route->dispatch_lock, flags);
     mutex_unlock(&sched_group->cq_lock);
 
     return 0;
@@ -938,6 +1032,7 @@ void mlx5_ib_unbind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
                               u32 usr_rc_cnt)
 {
     struct mlx5_ib_usr_rc_route *route;
+    unsigned long flags;
 
     if (!sched_group ||
         usr_rc_cnt >= ARRAY_SIZE(sched_group->usr_rc_routes))
@@ -945,9 +1040,108 @@ void mlx5_ib_unbind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
 
     mutex_lock(&sched_group->cq_lock);
     route = &sched_group->usr_rc_routes[usr_rc_cnt];
+    spin_lock_irqsave(&route->dispatch_lock, flags);
+    route->dispatch_ready = false;
     smp_store_release(&route->cqb, NULL);
     WRITE_ONCE(route->uidx, MLX5_IB_DEFAULT_UIDX);
+    spin_unlock_irqrestore(&route->dispatch_lock, flags);
     mutex_unlock(&sched_group->cq_lock);
+}
+
+int mlx5_ib_activate_srm_cq_route(struct mlx5_ib_sched_group *group, u32 usr_rc,
+                                 struct mlx5_ib_srmc *small,
+                                 struct mlx5_ib_srmc *large)
+{
+    struct mlx5_ib_usr_rc_route *route;
+    unsigned long flags;
+    int ret = 0;
+
+    if (usr_rc >= ARRAY_SIZE(group->usr_rc_routes) || !small ||
+        !small->ctrl_page || (large && !large->ctrl_page))
+        return -EINVAL;
+    mutex_lock(&group->cq_lock);
+    route = &group->usr_rc_routes[usr_rc];
+    spin_lock_irqsave(&route->dispatch_lock, flags);
+    if (!route->cqb || !route->cqb->sw_buf) {
+        ret = -EINVAL;
+    } else if (!route->dispatch_ready) {
+        /* IDs can be reused while old WQEs remain in flight. A new QP
+         * cannot own any reservation preceding its successful RTR. */
+        route->small_kqp_idx = small->srmc_idx;
+        route->small_post_floor = smp_load_acquire(&small->ctrl_page->resv_idx);
+        route->large_kqp_idx = large ? large->srmc_idx : U32_MAX;
+        route->large_post_floor = large ?
+            smp_load_acquire(&large->ctrl_page->resv_idx) : 0;
+        route->dispatch_ready = true;
+    }
+    spin_unlock_irqrestore(&route->dispatch_lock, flags);
+    mutex_unlock(&group->cq_lock);
+    return ret;
+}
+
+int mlx5_ib_srm_dispatch_completion(struct mlx5_ib_srmc *srmc,
+                                    u64 post_idx, u32 status, u32 vendor)
+{
+    struct mlx5_ib_usr_rc_route *route;
+    struct mlx5_ib_cqbuf *cqb;
+    struct mlx5_srm_sw_cq *sw;
+    struct mlx5_srm_sw_cqe *entry;
+    unsigned long flags;
+    u64 token, producer, consumer;
+    u64 floor;
+    u32 usr_rc;
+    int ret = 0;
+
+    token = mlx5_ib_srmc_get_publish_token(srmc, post_idx);
+    if (mlx5_srm_publish_seq(token) !=
+        ((post_idx + 1) & MLX5_SRM_PUBLISH_SEQ_MASK))
+        return -EIO;
+    usr_rc = mlx5_srm_publish_usr_rc(token);
+    if (usr_rc >= ARRAY_SIZE(sched_group.usr_rc_routes))
+        return -EINVAL;
+    route = &sched_group.usr_rc_routes[usr_rc];
+    spin_lock_irqsave(&route->dispatch_lock, flags);
+    cqb = smp_load_acquire(&route->cqb);
+    /* Before RTR an ID-reusing QP cannot have posted a dispatch WQE. */
+    if (!cqb || !route->dispatch_ready)
+        goto out_route;
+    if (srmc->srmc_idx == route->small_kqp_idx)
+        floor = route->small_post_floor;
+    else if (srmc->srmc_idx == route->large_kqp_idx)
+        floor = route->large_post_floor;
+    else
+        goto out_route;
+    if ((s64)(post_idx - floor) < 0)
+        goto out_route;
+    sw = smp_load_acquire(&cqb->sw_buf);
+    if (unlikely(!sw)) {
+        pr_err_ratelimited("hollow RC CQ dispatch has no software ring: usr_rc=%u cqn=%d\n",
+                           usr_rc, cqb->cqn);
+        ret = -EINVAL;
+        goto out_route;
+    }
+
+    spin_lock(&cqb->sw_lock);
+    producer = cqb->sw_producer;
+    consumer = smp_load_acquire(&sw->consumer);
+    if (producer - consumer >= cqb->sw_depth) {
+        ret = producer - consumer == cqb->sw_depth ? -EAGAIN : -EIO;
+        goto out;
+    }
+    entry = &sw->entries[producer & (cqb->sw_depth - 1)];
+    entry->post_idx = post_idx;
+    entry->kqp_idx = srmc->srmc_idx;
+    entry->usr_rc = usr_rc;
+    entry->status = status;
+    entry->vendor_err = vendor;
+    entry->reserved = 0;
+    cqb->sw_producer = producer + 1;
+    smp_store_release(&sw->producer, producer + 1);
+out:
+    spin_unlock(&cqb->sw_lock);
+out_route:
+    spin_unlock_irqrestore(&route->dispatch_lock, flags);
+    return ret;
 }
 
 struct mlx5_ib_sqbuf *mlx5_ib_find_sqbuf_by_qpn(struct mlx5_ib_sched_group *sched_group, int qpn)
@@ -1136,8 +1330,6 @@ struct mlx5_srm_cq_workspace {
     struct mlx5_ib_srmc *cached_srmc;
     struct mlx5_sq_ctrl_page *cached_ctrl_page;
 };
-
-extern struct mlx5_ib_sched_group sched_group;
 
 static __always_inline struct mlx5_ib_sched_worker *
 mlx5_srm_cq_worker(struct mlx5_ib_sched *sched,
@@ -1534,7 +1726,7 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
     u64 phase_start;
     u64 total_start;
 
-    /* Completion delivery is now a userspace watermark query. */
+    /* Both pollers manage their delivery channel before recycling SQ slots. */
     (void)sq_ctrl_pool;
     (void)wc;
     (void)cqe;
@@ -1547,15 +1739,20 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
 
     if (srmc->sig_cnt)
     {
-        DEBUG_LOG("polling hollow RC completion progress\n");
+        DEBUG_LOG("polling hollow RC completions\n");
 
         // memset(&wc, 1, sizeof wc);
         cqe_num = 0;
         completed_wqes = 0;
         phase_start = mlx5_ib_srm_cq_timing_active(stats) ?
                           ktime_get_ns() : 0;
+#if MLX5_SRM_ENABLE_CQE_SIMPLIFY
         cqe_num = mlx5_ib_poll_srm_progress(
             srmc->ini_cb.cq, srmc->sig_cnt, &completed_wqes);
+#else
+        cqe_num = mlx5_ib_poll_srm_dispatch(
+            srmc->ini_cb.cq, srmc->sig_cnt, &completed_wqes);
+#endif
         if (cqe_num > 0)
         {
             mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_KERNEL_POLL,
@@ -1575,7 +1772,7 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
                                         phase_start);
             if (unlikely(cqe_num < 0))
                 pr_warn_ratelimited(
-                    "hollow RC progress poll failed: cq_depth=%u error=%d\n",
+                    "hollow RC completion poll failed: cq_depth=%u error=%d\n",
                     srmc->ini_cb.cq->cqe, cqe_num);
         }
 
@@ -4109,8 +4306,10 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
     memset(sched_group->cqb_arr, 0, sizeof(sched_group->cqb_arr));
     memset(sched_group->usr_rc_routes, 0,
            sizeof(sched_group->usr_rc_routes));
-    for (i = 0; i < ARRAY_SIZE(sched_group->usr_rc_routes); i++)
+    for (i = 0; i < ARRAY_SIZE(sched_group->usr_rc_routes); i++) {
         sched_group->usr_rc_routes[i].uidx = MLX5_IB_DEFAULT_UIDX;
+        spin_lock_init(&sched_group->usr_rc_routes[i].dispatch_lock);
+    }
     memset(sched_group->xrc_bf_arr, 0, sizeof(sched_group->xrc_bf_arr));
 
     sched_group->num_sched = num;
@@ -4307,8 +4506,10 @@ static void mlx5_ib_unmap_all_cq_ubufs(struct mlx5_ib_sched_group *sched_group)
     mutex_lock(&sched_group->cq_lock);
     memset(sched_group->usr_rc_routes, 0,
            sizeof(sched_group->usr_rc_routes));
-    for (i = 0; i < ARRAY_SIZE(sched_group->usr_rc_routes); i++)
+    for (i = 0; i < ARRAY_SIZE(sched_group->usr_rc_routes); i++) {
         sched_group->usr_rc_routes[i].uidx = MLX5_IB_DEFAULT_UIDX;
+        spin_lock_init(&sched_group->usr_rc_routes[i].dispatch_lock);
+    }
 
     for (i = 0; i < sched_group->cqb_cnt; i++) {
         cqb = sched_group->cqb_arr[i];

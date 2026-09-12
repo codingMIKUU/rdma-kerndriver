@@ -14,6 +14,14 @@ static int debug = 0;
 // 对于接收端，NUM_SRMC等于num_kqps*2才行（因为只有一个调度器，发送端两个调度器全发往它了）
 #define NUM_SQB 35000
 #define NUM_LEVEL 2
+/* 0 distributes each hardware CQE; 1 publishes completion watermarks only. */
+#ifndef MLX5_SRM_ENABLE_CQE_SIMPLIFY
+#define MLX5_SRM_ENABLE_CQE_SIMPLIFY 0
+#endif
+#if MLX5_SRM_ENABLE_CQE_SIMPLIFY != 0 && \
+    MLX5_SRM_ENABLE_CQE_SIMPLIFY != 1
+#error "MLX5_SRM_ENABLE_CQE_SIMPLIFY must be 0 or 1"
+#endif
 /*
  * Size-aware dual-KQP mode.  Keep the original single-KQP path as the
  * default; set this to 1 (or override it from the compiler command line) to
@@ -224,6 +232,15 @@ struct mlx5_ib_cqbuf
     u16 owner_worker;
     u64 retire_epoch;
     struct mlx5_ib_cqbuf *next; // not loop
+    /* Separate from the hardware CQ: receives may share the logical CQ. */
+    unsigned long buf_addr;
+    struct mlx5_srm_sw_cq *sw_buf;
+    struct page **sw_pages;
+    unsigned long sw_addr;
+    size_t sw_size;
+    u32 sw_depth;
+    u64 sw_producer;
+    spinlock_t sw_lock;
 } CACHELINE_ALIGNED;
 struct mlx5_ib_sqbuf
 {
@@ -365,6 +382,12 @@ struct mlx5_ib_sched
 struct mlx5_ib_usr_rc_route {
     struct mlx5_ib_cqbuf *cqb;
     u32 uidx;
+    spinlock_t dispatch_lock;
+    bool dispatch_ready;
+    u32 small_kqp_idx;
+    u32 large_kqp_idx;
+    u64 small_post_floor;
+    u64 large_post_floor;
 };
 struct mlx5_ib_sched_id
 {
@@ -448,6 +471,15 @@ enum srmc_create_flag
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx);
 int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int cqn);
 int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn);
+int mlx5_ib_map_srm_cq_ubuf(struct mlx5_ib_sched_group *group, int cqn,
+                          u64 addr, u32 size, u32 depth);
+int mlx5_ib_srm_dispatch_completion(struct mlx5_ib_srmc *srmc,
+                                   u64 post_idx, u32 status, u32 vendor);
+int mlx5_ib_activate_srm_cq_route(struct mlx5_ib_sched_group *group, u32 usr_rc,
+                                struct mlx5_ib_srmc *small,
+                                struct mlx5_ib_srmc *large);
+int mlx5_ib_poll_srm_dispatch(struct ib_cq *ibcq, int num_entries,
+                             u32 *completed_wqes);
 int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
 			   u32 usr_rc_cnt, int cqn, u32 uidx);
 void mlx5_ib_unbind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,

@@ -1079,6 +1079,119 @@ int mlx5_ib_poll_srm_progress(struct ib_cq *ibcq, int num_entries,
 	return npolled;
 }
 
+/* The dispatch path must reserve user-ring space before consuming a CQE.
+ * In particular, a full software CQ cannot recycle its SQ or return credits. */
+static int mlx5_poll_one_srm_dispatch(struct mlx5_ib_cq *cq,
+				     struct mlx5_ib_qp **cur_qp,
+				     u32 *completed_wqes)
+{
+	struct mlx5_ib_dev *dev = to_mdev(cq->ibcq.device);
+	struct mlx5_ib_srmc *srmc;
+	struct mlx5_cqe64 *cqe64;
+	struct mlx5_core_qp *mqp;
+	struct mlx5_ib_wq *wq;
+	struct ib_wc wc = { .status = IB_WC_SUCCESS };
+	u64 expected, absolute_post;
+	u16 wqe_ctr, forward;
+	u32 qpn;
+	u8 opcode;
+	void *cqe;
+	int ret;
+
+repoll:
+	cqe = next_cqe_sw(cq);
+	if (!cqe)
+		return -EAGAIN;
+	cqe64 = cq->mcq.cqe_sz == 64 ? cqe : cqe + 64;
+	rmb();
+	opcode = get_cqe_opcode(cqe64);
+	if (unlikely(opcode == MLX5_CQE_RESIZE_CQ)) {
+		if (!cq->resize_buf)
+			return -EIO;
+		++cq->mcq.cons_index;
+		free_cq_buf(dev, &cq->buf);
+		cq->buf = *cq->resize_buf;
+		kfree(cq->resize_buf);
+		cq->resize_buf = NULL;
+		goto repoll;
+	}
+	if (unlikely(opcode != MLX5_CQE_REQ && opcode != MLX5_CQE_REQ_ERR))
+		return -EOPNOTSUPP;
+
+	qpn = be32_to_cpu(cqe64->sop_drop_qpn) & 0xffffff;
+	if (!*cur_qp || (*cur_qp)->ibqp.qp_num != qpn) {
+		mqp = radix_tree_lookup(&dev->qp_table.tree, qpn);
+		if (!mqp)
+			return -ENOENT;
+		*cur_qp = to_mibqp(mqp);
+	}
+	if (!(*cur_qp)->is_srmc_kernel_qp || !(*cur_qp)->srmc_owner)
+		return -EINVAL;
+	srmc = (*cur_qp)->srmc_owner;
+	if (!srmc->ctrl_page)
+		return -EINVAL;
+	wq = &(*cur_qp)->sq;
+	wqe_ctr = be16_to_cpu(cqe64->wqe_counter);
+	expected = READ_ONCE(srmc->cq_complete_idx);
+	forward = wqe_ctr - (u16)expected;
+	if (unlikely(forward >= wq->wqe_cnt))
+		return -EIO;
+	absolute_post = expected + forward;
+	if (opcode == MLX5_CQE_REQ_ERR)
+		mlx5_handle_error_cqe(dev, (struct mlx5_err_cqe *)cqe64, &wc);
+
+	ret = mlx5_ib_srm_dispatch_completion(srmc, absolute_post,
+					      wc.status, wc.vendor_err);
+	if (ret)
+		return ret;
+
+	/* The event now owns immutable completion identity. Nothing below
+	 * accesses the user route, publish token, or hardware CQE again. */
+	++cq->mcq.cons_index;
+	mlx5_ib_srmc_complete_post(*cur_qp, wq, wqe_ctr, completed_wqes);
+	if (opcode == MLX5_CQE_REQ_ERR &&
+	    READ_ONCE(srmc->ctrl_page->completion_error_idx) == U64_MAX) {
+		WRITE_ONCE(srmc->ctrl_page->completion_error_status, wc.status);
+		WRITE_ONCE(srmc->ctrl_page->completion_error_vendor, wc.vendor_err);
+		WRITE_ONCE(srmc->ctrl_page->completion_error_idx, absolute_post + 1);
+	}
+	smp_store_release(&srmc->ctrl_page->cons_idx, absolute_post + 1);
+	return 0;
+}
+
+int mlx5_ib_poll_srm_dispatch(struct ib_cq *ibcq, int num_entries,
+			      u32 *completed_wqes)
+{
+	struct mlx5_ib_cq *cq = to_mcq(ibcq);
+	struct mlx5_ib_qp *cur_qp = NULL;
+	struct mlx5_ib_dev *dev = to_mdev(ibcq->device);
+	unsigned long flags;
+	u32 initial_cons, completed_sum = 0;
+	int npolled = 0, ret = 0;
+
+	*completed_wqes = 0;
+	if (unlikely(dev->mdev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR))
+		return -EIO;
+	spin_lock_irqsave(&cq->lock, flags);
+	initial_cons = cq->mcq.cons_index;
+	while (npolled < num_entries) {
+		u32 completed_one = 0;
+
+		ret = mlx5_poll_one_srm_dispatch(cq, &cur_qp, &completed_one);
+		if (ret)
+			break;
+		completed_sum += completed_one;
+		npolled++;
+	}
+	if (cq->mcq.cons_index != initial_cons)
+		mlx5_cq_set_ci(&cq->mcq);
+	spin_unlock_irqrestore(&cq->lock, flags);
+	*completed_wqes = completed_sum;
+	if (unlikely(ret && ret != -EAGAIN))
+		pr_warn_ratelimited("hollow RC CQ dispatch failed: error=%d\n", ret);
+	return npolled ? npolled : (ret == -EAGAIN ? 0 : ret);
+}
+
 int mlx5_ib_arm_cq(struct ib_cq *ibcq, enum ib_cq_notify_flags flags)
 {
 	struct mlx5_core_dev *mdev = to_mdev(ibcq->device)->mdev;
