@@ -153,7 +153,7 @@ static_assert(sizeof(struct mlx5_sq_ctrl_page) == 512);
 /* Match the provider's mlx5.h; disabled builds allocate no timestamp array
  * and execute no timing instructions in the scheduler hot path. */
 #ifndef MLX5_SRM_ENABLE_WQE_TIMING
-#define MLX5_SRM_ENABLE_WQE_TIMING 0
+#define MLX5_SRM_ENABLE_WQE_TIMING 1
 #endif
 #if MLX5_SRM_ENABLE_WQE_TIMING != 0 && MLX5_SRM_ENABLE_WQE_TIMING != 1
 #error "MLX5_SRM_ENABLE_WQE_TIMING must be 0 or 1"
