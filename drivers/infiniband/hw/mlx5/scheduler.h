@@ -7,7 +7,7 @@
 #include <rdma/rdma_cm.h>
 #include <rdma/mlx5-abi.h>
 #ifndef MLX5_SRM_ENABLE_WQE_TIMING
-#define MLX5_SRM_ENABLE_WQE_TIMING 0
+#define MLX5_SRM_ENABLE_WQE_TIMING 1
 #endif
 #if MLX5_SRM_ENABLE_WQE_TIMING != 0 && MLX5_SRM_ENABLE_WQE_TIMING != 1
 #error "MLX5_SRM_ENABLE_WQE_TIMING must be 0 or 1"
