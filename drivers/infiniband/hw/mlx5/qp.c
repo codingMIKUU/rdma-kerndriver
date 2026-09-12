@@ -1250,6 +1250,10 @@ err_bfreg:
 static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 		       struct mlx5_ib_qp_base *base, struct ib_udata *udata)
 {
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    if (qp->type == IB_QPT_SRM)
+        mlx5_srm_unmap_timing(&sched_group, base->mqp.qpn);
+#endif
 	struct mlx5_ib_ucontext *context = rdma_udata_to_drv_context(
 		udata, struct mlx5_ib_ucontext, ibucontext);
 
@@ -2591,7 +2595,7 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 					   &params->resp, init_attr);
 	} else
 		err = mlx5_qpc_create_qp(dev, &base->mqp, in, inlen, out);
-	if(init_attr->qp_type == IB_QPT_SRM){
+	if(!err && init_attr->qp_type == IB_QPT_SRM){
 		if(init_attr->send_cq){
 			send_cq = to_mcq(init_attr->send_cq);
 			if(mlx5_ib_map_cq_ubuf(&sched_group,send_cq->buf.umem->address,(send_cq->ibcq.cqe+1)*send_cq->cqe_size,send_cq->mcq.cqn)){
@@ -2600,10 +2604,14 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 		}else{
 			pr_err("send cq is null\n");
 		}
-		if(mlx5_ib_map_ubuf(&sched_group,base->ubuffer.buf_addr,base->ubuffer.buf_size,
-		base->mqp.qpn,to_mcq(init_attr->send_cq)->mcq.cqn,uidx)){
+		err = mlx5_ib_map_ubuf(&sched_group,base->ubuffer.buf_addr,base->ubuffer.buf_size,
+		base->mqp.qpn,to_mcq(init_attr->send_cq)->mcq.cqn,uidx,ucmd);
+		if(err){
 			pr_err("map sq buffer failed\n");
+			mlx5_core_destroy_qp(dev, &base->mqp);
 		}
+		if (!err && ucmd->srm_timing_version)
+			params->resp.comp_mask |= MLX5_IB_CREATE_QP_RESP_MASK_SRM_TIMING;
 	}
 	kvfree(in);
 	if (err)
@@ -3456,8 +3464,14 @@ static int check_ucmd_data(struct mlx5_ib_dev *dev,
 		 * create_qp input struct, so their data is always valid.
 		 */
 		last = sizeof(struct mlx5_ib_create_qp_rss);
-	else
-		last = offsetof(struct mlx5_ib_create_qp, reserved);
+	else {
+		size_t reserved = offsetof(struct mlx5_ib_create_qp, reserved);
+		if (udata->inlen > reserved &&
+		    !ib_is_udata_cleared(udata, reserved,
+			min_t(size_t, sizeof(__u16), udata->inlen - reserved)))
+			return -EINVAL;
+		last = sizeof(struct mlx5_ib_create_qp);
+	}
 
 	if (udata->inlen <= last)
 		return 0;
@@ -3548,6 +3562,27 @@ int mlx5_ib_create_qp(struct ib_qp *ibqp, struct ib_qp_init_attr *attr,
 		err = ib_copy_from_udata(params.ucmd, udata, params.inlen);
 		if (err)
 			goto free_ucmd;
+		if (!params.is_rss_raw) {
+			struct mlx5_ib_create_qp *ucmd = params.ucmd;
+			if (ucmd->srm_timing_addr || ucmd->srm_timing_count ||
+			    ucmd->srm_timing_version) {
+#if MLX5_SRM_ENABLE_WQE_TIMING
+				if (attr->qp_type != IB_QPT_SRM ||
+				    ucmd->srm_timing_version != MLX5_SRM_TIMING_ABI_VERSION ||
+				    !ucmd->srm_timing_addr || !ucmd->srm_timing_count ||
+				    (ucmd->srm_timing_addr & (PAGE_SIZE - 1)) ||
+				    ucmd->srm_timing_count != ucmd->sq_wqe_count ||
+				    !is_power_of_2(ucmd->srm_timing_count) || ucmd->rq_wqe_count) {
+					err = -EINVAL;
+					goto free_ucmd;
+				}
+#else
+				pr_err("SRM timing requested but MLX5_SRM_ENABLE_WQE_TIMING=0 in kernel\n");
+				err = -EOPNOTSUPP;
+				goto free_ucmd;
+#endif
+			}
+		}
 	}
 
 	mutex_init(&qp->mutex);

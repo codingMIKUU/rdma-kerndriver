@@ -5,6 +5,25 @@
 #include <linux/mutex.h>
 #include <linux/types.h>
 #include <rdma/rdma_cm.h>
+#include <rdma/mlx5-abi.h>
+#ifndef MLX5_SRM_ENABLE_WQE_TIMING
+#define MLX5_SRM_ENABLE_WQE_TIMING 0
+#endif
+#if MLX5_SRM_ENABLE_WQE_TIMING != 0 && MLX5_SRM_ENABLE_WQE_TIMING != 1
+#error "MLX5_SRM_ENABLE_WQE_TIMING must be 0 or 1"
+#endif
+#define MLX5_SRM_TIMING_REPORT_WQES 1000000U
+#if MLX5_SRM_ENABLE_WQE_TIMING
+struct mlx5_srm_timing_map {
+    struct mlx5_srm_timing_slot *slots;
+    struct page **pages;
+    size_t npages;
+};
+struct mlx5_srm_db_timing_stats {
+    u64 db_calls, db_wqes, post_to_db_cycles;
+    u64 missing_timestamps, invalid_timestamps;
+};
+#endif
 #define SQ_DEPTH 1024
 static int debug = 0; 
 #define NUM_SRMC 8192
@@ -28,6 +47,9 @@ struct mlx5_ib_cqbuf{
     struct mlx5_ib_cqbuf* next;//not loop
 }__attribute__((aligned(64)));
 struct mlx5_ib_sqbuf {
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    struct mlx5_srm_timing_map __rcu *timing;
+#endif
     void* buf;
     struct page** pages;
     size_t sq_size;
@@ -136,7 +158,10 @@ enum srmc_create_flag{
     SRMC_CREATE_FLAG_TGT_QP = 2,
 };
 
-int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group* sched_group,unsigned long virt_addr,size_t size,int qpn,int cqn,u32 uidx);
+int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group* sched_group,unsigned long virt_addr,size_t size,int qpn,int cqn,u32 uidx, const struct mlx5_ib_create_qp *ucmd);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+void mlx5_srm_unmap_timing(struct mlx5_ib_sched_group *group, int qpn);
+#endif
 int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group* sched_group,unsigned long virt_addr,size_t size,int cqn);
 int scheduler_polling(void* sched_data);
 int mlx5_ib_create_srmc(struct mlx5_ib_sched* sched,struct mlx5_ib_qp *init_qp,struct mlx5_ib_qp *tgt_qp,union ib_gid *dgid);

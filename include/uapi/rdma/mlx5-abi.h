@@ -329,6 +329,14 @@ struct mlx5_ib_create_qp_dci_streams {
 	__u8 log_num_errored;
 };
 
+/* Software-only SRM timing sidecar; never DMAed as a hardware WQE. */
+#define MLX5_SRM_TIMING_ABI_VERSION 1
+struct mlx5_srm_timing_slot {
+	__aligned_u64 post_tsc;
+	__u32 sequence;
+	__u32 valid;
+};
+
 struct mlx5_ib_create_qp {
 	__aligned_u64 buf_addr;
 	__aligned_u64 db_addr;
@@ -345,6 +353,9 @@ struct mlx5_ib_create_qp {
 	__u32  ece_options;
 	struct  mlx5_ib_create_qp_dci_streams dci_streams;
 	__u16 reserved;
+	__aligned_u64 srm_timing_addr;
+	__u32 srm_timing_count;
+	__u32 srm_timing_version;
 };
 
 /* RX Hash function flags */
@@ -390,6 +401,7 @@ enum mlx5_ib_create_qp_resp_mask {
 	MLX5_IB_CREATE_QP_RESP_MASK_RQN  = 1UL << 2,
 	MLX5_IB_CREATE_QP_RESP_MASK_SQN  = 1UL << 3,
 	MLX5_IB_CREATE_QP_RESP_MASK_TIR_ICM_ADDR  = 1UL << 4,
+	MLX5_IB_CREATE_QP_RESP_MASK_SRM_TIMING = 1UL << 5,
 };
 
 struct mlx5_ib_create_qp_resp {

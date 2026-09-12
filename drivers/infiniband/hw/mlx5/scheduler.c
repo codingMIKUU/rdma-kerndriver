@@ -24,6 +24,11 @@
 #include <linux/delay.h>
 #include <linux/compiler.h>
 #include <linux/random.h>
+#include <linux/rcupdate.h>
+#include <linux/math64.h>
+#if MLX5_SRM_ENABLE_WQE_TIMING
+#include <asm/tsc.h>
+#endif
 
 // 文件操作
 #include <linux/fs.h>
@@ -36,7 +41,137 @@ const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 // const size_t MESSAGE_SIZE_THRESHOLD = 1e9;
 const size_t QUEUE_LIMIT = 256 * 1024;
 const size_t SCHED_SIZE_LIMIT = 8 * 1024;
-int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx)
+#if MLX5_SRM_ENABLE_WQE_TIMING
+static void srm_free_timing_map(struct mlx5_srm_timing_map *map)
+{
+    size_t i;
+    if (!map)
+        return;
+    vunmap(map->slots);
+    for (i = 0; i < map->npages; ++i) {
+        set_page_dirty_lock(map->pages[i]);
+        put_page(map->pages[i]);
+    }
+    kfree(map->pages);
+    kfree(map);
+}
+
+static struct mlx5_srm_timing_map *srm_map_timing(const struct mlx5_ib_create_qp *cmd)
+{
+    struct mlx5_srm_timing_map *map;
+    long pinned;
+    size_t bytes;
+    if (!cmd->srm_timing_version)
+        return NULL;
+    if (cmd->srm_timing_count > (SIZE_MAX - PAGE_SIZE + 1) / sizeof(*map->slots))
+        return ERR_PTR(-EOVERFLOW);
+    bytes = PAGE_ALIGN((size_t)cmd->srm_timing_count * sizeof(*map->slots));
+    if (!bytes || cmd->srm_timing_addr > ULONG_MAX - bytes)
+        return ERR_PTR(-EINVAL);
+    map = kzalloc(sizeof(*map), GFP_KERNEL);
+    if (!map)
+        return ERR_PTR(-ENOMEM);
+    map->npages = bytes >> PAGE_SHIFT;
+    map->pages = kmalloc_array(map->npages, sizeof(*map->pages), GFP_KERNEL);
+    if (!map->pages) {
+        kfree(map);
+        return ERR_PTR(-ENOMEM);
+    }
+    pinned = get_user_pages(cmd->srm_timing_addr, map->npages,
+                            FOLL_WRITE, map->pages, NULL);
+    if (pinned != map->npages) {
+        if (pinned > 0) {
+            while (pinned--)
+                put_page(map->pages[pinned]);
+        }
+        kfree(map->pages);
+        kfree(map);
+        return ERR_PTR(-EFAULT);
+    }
+    map->slots = vmap(map->pages, map->npages, VM_MAP, PAGE_KERNEL);
+    if (!map->slots) {
+        srm_free_timing_map(map);
+        return ERR_PTR(-ENOMEM);
+    }
+    return map;
+}
+
+/* Scheduler takes only an RCU read section while copying the timestamp.
+ * QP destruction can detach/free this sidecar without freeing the old SQ. */
+void mlx5_srm_unmap_timing(struct mlx5_ib_sched_group *group, int qpn)
+{
+    struct mlx5_srm_timing_map *map = NULL;
+    int i;
+    mutex_lock(&group->sq_lock);
+    for (i = 0; i < group->sqb_cnt; ++i) {
+        struct mlx5_ib_sqbuf *sqb = group->sqb_arr[i];
+        if (sqb && sqb->qpn == qpn) {
+            map = rcu_dereference_protected(sqb->timing, 1);
+            if (!map)
+                continue; /* Old SQ entries can outlive their hardware QPN. */
+            RCU_INIT_POINTER(sqb->timing, NULL);
+            break;
+        }
+    }
+    if (map) {
+        synchronize_rcu();
+        srm_free_timing_map(map);
+    }
+    mutex_unlock(&group->sq_lock);
+}
+
+/* Call only after acquiring the software-WQE ready flag, and before
+ * clearing it. Sequence equality remains valid when the u32 index wraps. */
+static bool srm_timing_read(struct mlx5_ib_sqbuf *sqb, u16 wqe_counter,
+                            u64 *start, bool *invalid)
+{
+    struct mlx5_srm_timing_map *map;
+    bool enabled = false;
+    *start = 0;
+    *invalid = false;
+    rcu_read_lock();
+    map = rcu_dereference(sqb->timing);
+    if (map) {
+        struct mlx5_srm_timing_slot *slot =
+            &map->slots[sqb->cur_post & (sqb->wqe_cnt - 1)];
+        enabled = true;
+        if (smp_load_acquire(&slot->valid)) {
+            /* Userspace may advance cur_post while searching occupied
+             * slots; compare the actual source WQE, not kernel cur_post. */
+            if ((u16)READ_ONCE(slot->sequence) == wqe_counter)
+                *start = READ_ONCE(slot->post_tsc);
+            else
+                *invalid = true;
+            WRITE_ONCE(slot->valid, 0);
+        }
+    }
+    rcu_read_unlock();
+    return enabled;
+}
+
+static void srm_timing_db(struct mlx5_srm_db_timing_stats *stats, int sched,
+                          u64 start, u64 end, bool invalid)
+{
+    stats->db_calls++;
+    if (invalid || (start && (s64)(end - start) < 0))
+        stats->invalid_timestamps++;
+    else if (!start)
+        stats->missing_timestamps++;
+    else {
+        stats->db_wqes++;
+        stats->post_to_db_cycles += end - start;
+    }
+    if (stats->db_calls < MLX5_SRM_TIMING_REPORT_WQES)
+        return;
+    pr_info("SRM_DB_TIMING algorithm=srm source=kernel sched=%d db_calls=%llu db_wqes=%llu post_to_db_cycles=%llu post_to_db_avg_cycles=%llu missing_timestamps=%llu invalid_timestamps=%llu\n",
+            sched, stats->db_calls, stats->db_wqes, stats->post_to_db_cycles,
+            stats->db_wqes ? div64_u64(stats->post_to_db_cycles, stats->db_wqes) : 0,
+            stats->missing_timestamps, stats->invalid_timestamps);
+    memset(stats, 0, sizeof(*stats));
+}
+#endif
+
+int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx, const struct mlx5_ib_create_qp *ucmd)
 {
     DEBUG_LOG("in mlx5_ib_map_ubuf\n");
     DEBUG_LOG("内核态virt_addr:%px,size:%d,qpn:%d,cqn%d\n", virt_addr, size, qpn, cqn);
@@ -62,6 +197,13 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
     }
     mutex_lock(&sched_group->sq_lock);
     uq = kzalloc(sizeof(struct mlx5_ib_sqbuf), GFP_KERNEL);
+    if (!uq) {
+        for (i = 0; i < ret; i++)
+            put_page(pages[i]);
+        kfree(pages);
+        mutex_unlock(&sched_group->sq_lock);
+        return -ENOMEM;
+    }
     uq->qpn = qpn;
     uq->uidx = uidx;
     uq->sq_size = size;
@@ -79,6 +221,24 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
         mutex_unlock(&sched_group->sq_lock);
         return -ENOMEM;
     }
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    if (ucmd->srm_timing_version) {
+        struct mlx5_srm_timing_map *map =
+            uq->wqe_cnt == ucmd->srm_timing_count ?
+                srm_map_timing(ucmd) : ERR_PTR(-EINVAL);
+        if (IS_ERR(map)) {
+            int map_err = PTR_ERR(map);
+            vunmap(uq->buf);
+            for (i = 0; i < ret; ++i)
+                put_page(pages[i]);
+            kfree(pages);
+            kfree(uq);
+            mutex_unlock(&sched_group->sq_lock);
+            return map_err;
+        }
+        RCU_INIT_POINTER(uq->timing, map);
+    }
+#endif
 
     mutex_lock(&sched_group->cq_lock);
     for (i = 0; i < sched_group->cqb_cnt; i++)
@@ -158,6 +318,9 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
     int cqn;
     int npages;
     int i;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    mlx5_srm_unmap_timing(sched_group, qpn);
+#endif
     mutex_lock(&sched_group->sq_lock);
     pr_info("mlx5_ib_unmap_ubuf清除映射资源\n");
 
@@ -570,6 +733,11 @@ const int num_kqps = 32;
 // const int polling_itv = 10;//间隔多少个srmc进行一次polling
 int scheduler_polling(void *sched_data)
 {
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    struct mlx5_srm_db_timing_stats timing_stats = {};
+    u64 timing_start = 0, timing_end = 0;
+    bool timing_enabled = false, timing_invalid = false;
+#endif
     extern struct mlx5_ib_sched_group sched_group;
     int ret;
     struct mlx5_ib_sched_id *sched_id = (struct mlx5_ib_sched_id *)sched_data;
@@ -941,6 +1109,11 @@ int scheduler_polling(void *sched_data)
 
 
 
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                timing_enabled = srm_timing_read(sqb,
+                    (be32_to_cpu(uctrl->opmod_idx_opcode) >> 8) & 0xffff,
+                    &timing_start, &timing_invalid);
+#endif
                 smp_store_release(&uctrl->imm, 0);
 
                 srmc->cul_pending_bytes += length;
@@ -1028,11 +1201,23 @@ int scheduler_polling(void *sched_data)
 
                 // ring doorbell
                 mlx5r_ring_db(qp, 1, ctrl);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                if (timing_enabled) {
+                    /* Drain the CPU's posted WC doorbell writes before TSC.
+                     * This does not claim the NIC has consumed the WQE. */
+                    wmb();
+                    timing_end = rdtsc_ordered();
+                }
+#endif
                 // print_wqe_info(ctrl, sizeof(struct mlx5_wqe_ctrl_seg) +
                 //  sizeof(struct mlx5_wqe_xrc_seg) +
                 //  sizeof(struct mlx5_wqe_raddr_seg) +
                 //   sizeof(struct mlx5_wqe_data_seg));
                 spin_unlock_irqrestore(&qp->sq.lock, flags);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                if (timing_enabled)
+                    srm_timing_db(&timing_stats, id, timing_start, timing_end, timing_invalid);
+#endif
 
                 // end_cycles = rdtsc();
                 // elapsed_cycles = end_cycles - start_cycles;
@@ -1270,6 +1455,13 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
         mutex_unlock(&sched->srmc_lock);
         DEBUG_LOG("clean thread %d srmc success\n", i);
     }
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    for (i = 0; i < sched_group->sqb_cnt; ++i) {
+        sqb = sched_group->sqb_arr[i];
+        if (sqb)
+            mlx5_srm_unmap_timing(sched_group, sqb->qpn);
+    }
+#endif
     // // cleanup scheduler
     // mutex_lock(&sched_group->sq_lock);
     // for (i = 0; i < sched_group->sqb_cnt; i++)
