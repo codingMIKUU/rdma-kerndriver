@@ -407,6 +407,93 @@ static u64 mlx5_ib_srmc_get_publish_token(struct mlx5_ib_srmc *srmc,
     return smp_load_acquire(entry);
 }
 
+#if MLX5_SRM_ENABLE_WQE_TIMING
+struct mlx5_srm_db_timing_batch {
+    u64 post_tsc_sum;
+    u32 valid;
+    u32 missing;
+    u32 invalid;
+};
+
+struct mlx5_srm_db_timing_stats {
+    u64 db_calls;
+    u64 db_wqes;
+    u64 post_to_db_cycles;
+    u64 missing;
+    u64 invalid;
+    u64 checked;
+};
+
+/* All timestamp reads precede the MMIO doorbell. CQ processing may release
+ * the SQ slots immediately afterwards, including when userspace rings DB. */
+static struct mlx5_srm_db_timing_batch mlx5_srm_timing_db_snapshot(
+    struct mlx5_ib_srmc *srmc, u64 first, u32 count)
+{
+    struct mlx5_srm_db_timing_batch batch = {0};
+    u64 now = rdtsc_ordered();
+    u32 n;
+
+    for (n = 0; n < count; n++) {
+        u64 slot = first + n;
+        size_t off = MLX5_SRM_TIMING_OFFSET(srmc->publish_depth) +
+            (slot & (srmc->publish_depth - 1)) *
+                sizeof(struct mlx5_srm_wqe_timestamp);
+        struct mlx5_srm_wqe_timestamp *entry;
+        u64 sequence;
+        u64 start;
+
+        if (!srmc->publish_pages || !srmc->publish_depth ||
+            off / PAGE_SIZE >= srmc->publish_npages) {
+            batch.missing++;
+            continue;
+        }
+        /* 16-byte alignment ensures neither field crosses a page boundary. */
+        entry = (void *)((char *)page_address(
+            srmc->publish_pages[off / PAGE_SIZE]) + off % PAGE_SIZE);
+        sequence = smp_load_acquire(&entry->sequence);
+        start = READ_ONCE(entry->post_tsc);
+        if (sequence != slot + 1 || !start) {
+            batch.missing++;
+        } else if ((s64)(now - start) < 0) {
+            batch.invalid++;
+        } else {
+            batch.valid++;
+            batch.post_tsc_sum += start;
+        }
+    }
+    return batch;
+}
+
+static void mlx5_srm_timing_db_complete(
+    struct mlx5_srm_db_timing_stats *stats,
+    const struct mlx5_srm_db_timing_batch *batch,
+    u64 done, int sched, int worker)
+{
+    u64 elapsed = done * batch->valid - batch->post_tsc_sum;
+
+    stats->db_calls++;
+    /* Unsigned arithmetic also handles wrapping timestamp sums. */
+    if ((s64)elapsed < 0) {
+        stats->invalid += batch->valid;
+    } else {
+        stats->db_wqes += batch->valid;
+        stats->post_to_db_cycles += elapsed;
+    }
+    stats->missing += batch->missing;
+    stats->invalid += batch->invalid;
+    stats->checked += batch->valid + batch->missing + batch->invalid;
+    if (stats->checked < MLX5_SRM_TIMING_REPORT_WQES)
+        return;
+    pr_info("SRM_DB_TIMING algorithm=qpswitch source=kernel sched=%d worker=%d db_calls=%llu db_wqes=%llu post_to_db_cycles=%llu post_to_db_avg_cycles=%llu missing_timestamps=%llu invalid_timestamps=%llu\n",
+            sched, worker, stats->db_calls, stats->db_wqes,
+            stats->post_to_db_cycles,
+            stats->db_wqes ? div64_u64(stats->post_to_db_cycles,
+                                      stats->db_wqes) : 0,
+            stats->missing, stats->invalid);
+    memset(stats, 0, sizeof(*stats));
+}
+#endif
+
 static struct mlx5_ib_srmc *mlx5_ib_sched_find_srmc_idx(struct mlx5_ib_sched *sched,
                                                         u32 srmc_idx)
 {
@@ -3469,6 +3556,9 @@ int scheduler_polling(void *sched_data)
     bool direct_db_stats_active = false;
     struct mlx5_srm_direct_db_snapshot direct_db_stats_previous = {0};
     unsigned long direct_db_stats_last_report = jiffies;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    struct mlx5_srm_db_timing_stats db_timing_stats = {0};
+#endif
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
     u64 db_batch_log_scans = 0;
     u64 db_batch_log_calls = 0;
@@ -3881,6 +3971,10 @@ int scheduler_polling(void *sched_data)
                 u64 wqe_check_start_cycles = 0;
                 bool publish_blocked = false;
                 struct mlx5_wqe_ctrl_seg *last_ctrl = NULL;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                struct mlx5_srm_db_timing_batch timing_batch;
+                u64 timing_db_done;
+#endif
 
                 /*
                  * db_tail and the mlx5 doorbell record form one producer
@@ -4102,8 +4196,15 @@ int scheduler_polling(void *sched_data)
                         wqe_check_end_cycles - wqe_check_start_cycles;
                 }
 
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                timing_batch = mlx5_srm_timing_db_snapshot(
+                    srmc, srmc->sched_post_idx - sent, sent);
+#endif
                 mlx5_srm_ring_shared_db(srmc->ini_cb.qp, ctrl_page,
                                         sent, last_ctrl);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                timing_db_done = rdtsc_ordered();
+#endif
                 if (srm_stats_enable) {
                     u64 db_done_cycles = rdtsc_ordered();
 
@@ -4119,6 +4220,11 @@ int scheduler_polling(void *sched_data)
                                   srmc->sched_post_idx);
                 smp_store_release(&ctrl_page->db_owner,
                                   MLX5_SRM_DB_OWNER_FREE);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                mlx5_srm_timing_db_complete(&db_timing_stats, &timing_batch,
+                                             timing_db_done, id,
+                                             worker->worker_id);
+#endif
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
                 db_batch_log_calls++;
                 db_batch_log_wqes += sent;
@@ -5764,6 +5870,10 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
         WRITE_ONCE(ctrl_page->flags,
                    READ_ONCE(ctrl_page->flags) &
                        ~MLX5_SRM_CTRL_F_DIRECT_DB_STATS);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+        WRITE_ONCE(ctrl_page->flags, READ_ONCE(ctrl_page->flags) |
+                   MLX5_SRM_CTRL_F_WQE_TIMING);
+#endif
         if (srmc->srmc_idx == worker->kqp_begin) {
             atomic64_set(&ctrl_page->issued_total, 0);
             atomic64_set(&ctrl_page->completed_total, 0);

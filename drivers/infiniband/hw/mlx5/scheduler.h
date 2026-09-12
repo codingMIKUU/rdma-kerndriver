@@ -147,7 +147,27 @@ static_assert(sizeof(struct mlx5_sq_ctrl_page) == 512);
 #define MLX5_SRM_DB_OWNER_USER   1U
 #define MLX5_SRM_DB_OWNER_KERNEL 2U
 #define MLX5_SRM_CTRL_F_DIRECT_DB_STATS (1U << 0)
+#define MLX5_SRM_CTRL_F_WQE_TIMING (1U << 1)
 #define MLX5_SRM_DIRECT_DB_MAX_BATCH 32U
+
+/* Match the provider's mlx5.h; disabled builds allocate no timestamp array
+ * and execute no timing instructions in the scheduler hot path. */
+#ifndef MLX5_SRM_ENABLE_WQE_TIMING
+#define MLX5_SRM_ENABLE_WQE_TIMING 0
+#endif
+#if MLX5_SRM_ENABLE_WQE_TIMING != 0 && MLX5_SRM_ENABLE_WQE_TIMING != 1
+#error "MLX5_SRM_ENABLE_WQE_TIMING must be 0 or 1"
+#endif
+#define MLX5_SRM_TIMING_REPORT_WQES 1000000U
+struct mlx5_srm_wqe_timestamp {
+    u64 post_tsc;
+    u64 sequence;
+};
+#define MLX5_SRM_TIMING_OFFSET(depth) \
+    ALIGN((size_t)(depth) * sizeof(u64), 16)
+#define MLX5_SRM_TIMING_MAP_BYTES(depth) \
+    (MLX5_SRM_TIMING_OFFSET(depth) + \
+     (size_t)(depth) * sizeof(struct mlx5_srm_wqe_timestamp))
 
 #define MLX5_SRM_PUBLISH_USR_BITS 16
 #define MLX5_SRM_PUBLISH_USR_MASK ((1ULL << MLX5_SRM_PUBLISH_USR_BITS) - 1)
