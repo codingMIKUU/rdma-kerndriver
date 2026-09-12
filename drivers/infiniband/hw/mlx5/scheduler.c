@@ -41,6 +41,12 @@ extern struct mlx5_ib_sched_group sched_group;
 #include "mlx5_avl_tree.h"
 #include <linux/mlx5/driver.h>
 
+static_assert(sizeof(struct mlx5_cqe64) == MLX5_SRM_DIRECT_CQE_SIZE &&
+              offsetof(struct mlx5_cqe64, srqn) == 32 &&
+              offsetof(struct mlx5_cqe64, op_own) == 63 &&
+              sizeof(struct mlx5_srm_direct_cqe_meta) == 24,
+              "Hollow direct CQE layout mismatch");
+
 /* A full KQP group performs multiple serial RDMA-CM handshakes.  Concurrent
  * Hollow QP creators must wait for the complete group before returning. */
 #define SRMC_INIT_WAIT_TIMEOUT_MS 120000
@@ -883,7 +889,9 @@ int mlx5_ib_map_srm_cq_ubuf(struct mlx5_ib_sched_group *group, int cqn,
     if (!addr || addr != (unsigned long)addr ||
         !IS_ALIGNED(addr, PAGE_SIZE) || !is_power_of_2(depth) ||
         depth > MLX5_SRM_SW_CQ_MAX_DEPTH ||
-        size != PAGE_ALIGN(sizeof(*sw) + (size_t)depth * sizeof(sw->entries[0])) ||
+        size != PAGE_ALIGN(sizeof(*sw) + (size_t)depth *
+            (MLX5_SRM_ENABLE_CQE_SIMPLIFY == 2 ?
+             MLX5_SRM_DIRECT_CQE_SIZE : sizeof(sw->entries[0]))) ||
         addr + size < addr)
         return -EINVAL;
 
@@ -975,9 +983,11 @@ int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn)
             unsigned long flags;
 
             spin_lock_irqsave(&route->dispatch_lock, flags);
+            write_seqcount_begin(&route->direct_seq);
             route->dispatch_ready = false;
             smp_store_release(&route->cqb, NULL);
             WRITE_ONCE(route->uidx, MLX5_IB_DEFAULT_UIDX);
+            write_seqcount_end(&route->direct_seq);
             spin_unlock_irqrestore(&route->dispatch_lock, flags);
         }
     }
@@ -1019,9 +1029,11 @@ int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
 
     route = &sched_group->usr_rc_routes[usr_rc_cnt];
     spin_lock_irqsave(&route->dispatch_lock, flags);
+    write_seqcount_begin(&route->direct_seq);
     route->dispatch_ready = false;
     WRITE_ONCE(route->uidx, uidx);
     smp_store_release(&route->cqb, cqb);
+    write_seqcount_end(&route->direct_seq);
     spin_unlock_irqrestore(&route->dispatch_lock, flags);
     mutex_unlock(&sched_group->cq_lock);
 
@@ -1041,9 +1053,11 @@ void mlx5_ib_unbind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
     mutex_lock(&sched_group->cq_lock);
     route = &sched_group->usr_rc_routes[usr_rc_cnt];
     spin_lock_irqsave(&route->dispatch_lock, flags);
+    write_seqcount_begin(&route->direct_seq);
     route->dispatch_ready = false;
     smp_store_release(&route->cqb, NULL);
     WRITE_ONCE(route->uidx, MLX5_IB_DEFAULT_UIDX);
+    write_seqcount_end(&route->direct_seq);
     spin_unlock_irqrestore(&route->dispatch_lock, flags);
     mutex_unlock(&sched_group->cq_lock);
 }
@@ -1062,6 +1076,7 @@ int mlx5_ib_activate_srm_cq_route(struct mlx5_ib_sched_group *group, u32 usr_rc,
     mutex_lock(&group->cq_lock);
     route = &group->usr_rc_routes[usr_rc];
     spin_lock_irqsave(&route->dispatch_lock, flags);
+    write_seqcount_begin(&route->direct_seq);
     if (!route->cqb || !route->cqb->sw_buf) {
         ret = -EINVAL;
     } else if (!route->dispatch_ready) {
@@ -1074,6 +1089,7 @@ int mlx5_ib_activate_srm_cq_route(struct mlx5_ib_sched_group *group, u32 usr_rc,
             smp_load_acquire(&large->ctrl_page->resv_idx) : 0;
         route->dispatch_ready = true;
     }
+    write_seqcount_end(&route->direct_seq);
     spin_unlock_irqrestore(&route->dispatch_lock, flags);
     mutex_unlock(&group->cq_lock);
     return ret;
@@ -1142,6 +1158,92 @@ out:
 out_route:
     spin_unlock_irqrestore(&route->dispatch_lock, flags);
     return ret;
+}
+
+void mlx5_ib_srm_direct_flush(struct mlx5_srm_direct_batch *batch)
+{
+    if (!batch->cqb)
+        return;
+    batch->cqb->sw_producer = batch->producer;
+    smp_store_release(&batch->cqb->sw_buf->producer, batch->producer);
+    spin_unlock(&batch->cqb->sw_lock);
+    batch->cqb = NULL;
+}
+
+int mlx5_ib_srm_direct_completion(struct mlx5_ib_srmc *srmc,
+    u64 post_idx, u32 status, u32 vendor, const struct mlx5_cqe64 *cqe,
+    struct mlx5_srm_direct_batch *batch)
+{
+    struct mlx5_ib_usr_rc_route *route;
+    struct mlx5_ib_cqbuf *cqb;
+    struct mlx5_cqe64 *dst;
+    struct mlx5_srm_direct_cqe_meta meta;
+    u64 token, floor;
+    u32 usr_rc, uidx, small, large;
+    unsigned int seq;
+    bool ready;
+
+    token = mlx5_ib_srmc_get_publish_token(srmc, post_idx);
+    if (mlx5_srm_publish_seq(token) !=
+        ((post_idx + 1) & MLX5_SRM_PUBLISH_SEQ_MASK))
+        return -EIO;
+    usr_rc = mlx5_srm_publish_usr_rc(token);
+    if (usr_rc >= ARRAY_SIZE(sched_group.usr_rc_routes))
+        return -EINVAL;
+    route = &sched_group.usr_rc_routes[usr_rc];
+    /* Writers cannot be preempted with an odd sequence. The existing
+     * worker quiescent-epoch reclamation pins cqb and its mapped pages
+     * through this entire poll, including a concurrent unbind/destroy. */
+    do {
+        seq = read_seqcount_begin(&route->direct_seq);
+        cqb = READ_ONCE(route->cqb);
+        uidx = READ_ONCE(route->uidx);
+        ready = READ_ONCE(route->dispatch_ready);
+        small = READ_ONCE(route->small_kqp_idx);
+        large = READ_ONCE(route->large_kqp_idx);
+        floor = srmc->srmc_idx == small ?
+            READ_ONCE(route->small_post_floor) :
+            READ_ONCE(route->large_post_floor);
+    } while (read_seqcount_retry(&route->direct_seq, seq));
+    if (!ready || !cqb || (srmc->srmc_idx != small &&
+                           srmc->srmc_idx != large) ||
+        (s64)(post_idx - floor) < 0)
+        return 0;
+    if (!smp_load_acquire(&cqb->sw_buf) || uidx == MLX5_IB_DEFAULT_UIDX)
+        return -EINVAL;
+
+    /* Coalesce adjacent destinations under one CQ lock. Always release
+     * the previous CQ before acquiring another: workers cannot ABBA. */
+    if (batch->cqb != cqb) {
+        mlx5_ib_srm_direct_flush(batch);
+        spin_lock(&cqb->sw_lock);
+        batch->cqb = cqb;
+        batch->producer = cqb->sw_producer;
+        batch->consumer = smp_load_acquire(&cqb->sw_buf->consumer);
+    }
+    if (batch->producer - batch->consumer >= cqb->sw_depth) {
+        batch->consumer = smp_load_acquire(&cqb->sw_buf->consumer);
+        if (batch->producer - batch->consumer >= cqb->sw_depth)
+            return batch->producer - batch->consumer == cqb->sw_depth ?
+                -EAGAIN : -EIO;
+    }
+    dst = (void *)cqb->sw_buf->entries +
+        (batch->producer & (cqb->sw_depth - 1)) * MLX5_SRM_DIRECT_CQE_SIZE;
+    /* Preserve the native CQE layout and publish op_own last, as in the
+     * historical CQ-copy path. Metadata replaces unused request bytes. */
+    memcpy(dst, cqe, sizeof(*dst) - 1);
+    meta.post_idx = post_idx;
+    meta.kqp_idx = srmc->srmc_idx;
+    meta.usr_rc = usr_rc;
+    meta.status = status;
+    meta.vendor_err = vendor;
+    memcpy(dst, &meta, sizeof(meta));
+    dst->srqn = cpu_to_be32(uidx);
+    smp_store_release(&dst->op_own,
+        (cqe->op_own & ~MLX5_CQE_OWNER_MASK) |
+        !!(batch->producer & cqb->sw_depth));
+    batch->producer++;
+    return 0;
 }
 
 struct mlx5_ib_sqbuf *mlx5_ib_find_sqbuf_by_qpn(struct mlx5_ib_sched_group *sched_group, int qpn)
@@ -1746,8 +1848,11 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
         completed_wqes = 0;
         phase_start = mlx5_ib_srm_cq_timing_active(stats) ?
                           ktime_get_ns() : 0;
-#if MLX5_SRM_ENABLE_CQE_SIMPLIFY
+#if MLX5_SRM_ENABLE_CQE_SIMPLIFY == 1
         cqe_num = mlx5_ib_poll_srm_progress(
+            srmc->ini_cb.cq, srmc->sig_cnt, &completed_wqes);
+#elif MLX5_SRM_ENABLE_CQE_SIMPLIFY == 2
+        cqe_num = mlx5_ib_poll_srm_direct(
             srmc->ini_cb.cq, srmc->sig_cnt, &completed_wqes);
 #else
         cqe_num = mlx5_ib_poll_srm_dispatch(
@@ -4309,6 +4414,7 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
     for (i = 0; i < ARRAY_SIZE(sched_group->usr_rc_routes); i++) {
         sched_group->usr_rc_routes[i].uidx = MLX5_IB_DEFAULT_UIDX;
         spin_lock_init(&sched_group->usr_rc_routes[i].dispatch_lock);
+        seqcount_init(&sched_group->usr_rc_routes[i].direct_seq);
     }
     memset(sched_group->xrc_bf_arr, 0, sizeof(sched_group->xrc_bf_arr));
 
@@ -4509,6 +4615,7 @@ static void mlx5_ib_unmap_all_cq_ubufs(struct mlx5_ib_sched_group *sched_group)
     for (i = 0; i < ARRAY_SIZE(sched_group->usr_rc_routes); i++) {
         sched_group->usr_rc_routes[i].uidx = MLX5_IB_DEFAULT_UIDX;
         spin_lock_init(&sched_group->usr_rc_routes[i].dispatch_lock);
+        seqcount_init(&sched_group->usr_rc_routes[i].direct_seq);
     }
 
     for (i = 0; i < sched_group->cqb_cnt; i++) {

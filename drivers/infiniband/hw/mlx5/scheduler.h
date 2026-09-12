@@ -5,6 +5,7 @@
 #include <linux/mutex.h>
 #include <linux/types.h>
 #include <linux/wait.h>
+#include <linux/seqlock.h>
 #include <rdma/rdma_cm.h>
 #include "srm_kqp_layout.h"
 
@@ -14,13 +15,14 @@ static int debug = 0;
 // 对于接收端，NUM_SRMC等于num_kqps*2才行（因为只有一个调度器，发送端两个调度器全发往它了）
 #define NUM_SQB 35000
 #define NUM_LEVEL 2
-/* 0 distributes each hardware CQE; 1 publishes completion watermarks only. */
+/* 0: software events; 1: completion watermarks; 2: direct 64-byte CQEs. */
 #ifndef MLX5_SRM_ENABLE_CQE_SIMPLIFY
 #define MLX5_SRM_ENABLE_CQE_SIMPLIFY 0
 #endif
 #if MLX5_SRM_ENABLE_CQE_SIMPLIFY != 0 && \
-    MLX5_SRM_ENABLE_CQE_SIMPLIFY != 1
-#error "MLX5_SRM_ENABLE_CQE_SIMPLIFY must be 0 or 1"
+    MLX5_SRM_ENABLE_CQE_SIMPLIFY != 1 && \
+    MLX5_SRM_ENABLE_CQE_SIMPLIFY != 2
+#error "MLX5_SRM_ENABLE_CQE_SIMPLIFY must be 0, 1 or 2"
 #endif
 /*
  * Size-aware dual-KQP mode.  Keep the original single-KQP path as the
@@ -383,6 +385,8 @@ struct mlx5_ib_usr_rc_route {
     struct mlx5_ib_cqbuf *cqb;
     u32 uidx;
     spinlock_t dispatch_lock;
+    /* Native CQ readers use a coherent route snapshot, without locking. */
+    seqcount_t direct_seq;
     bool dispatch_ready;
     u32 small_kqp_idx;
     u32 large_kqp_idx;
@@ -480,6 +484,18 @@ int mlx5_ib_activate_srm_cq_route(struct mlx5_ib_sched_group *group, u32 usr_rc,
                                 struct mlx5_ib_srmc *large);
 int mlx5_ib_poll_srm_dispatch(struct ib_cq *ibcq, int num_entries,
                              u32 *completed_wqes);
+/* Held only inside a scheduler CQ poll; CQ retirement waits for its epoch. */
+struct mlx5_srm_direct_batch {
+    struct mlx5_ib_cqbuf *cqb;
+    u64 producer;
+    u64 consumer;
+};
+int mlx5_ib_poll_srm_direct(struct ib_cq *ibcq, int num_entries,
+                            u32 *completed_wqes);
+int mlx5_ib_srm_direct_completion(struct mlx5_ib_srmc *srmc,
+    u64 post_idx, u32 status, u32 vendor, const struct mlx5_cqe64 *cqe,
+    struct mlx5_srm_direct_batch *batch);
+void mlx5_ib_srm_direct_flush(struct mlx5_srm_direct_batch *batch);
 int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
 			   u32 usr_rc_cnt, int cqn, u32 uidx);
 void mlx5_ib_unbind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,

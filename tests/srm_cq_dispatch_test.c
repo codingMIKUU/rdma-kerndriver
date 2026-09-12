@@ -2,6 +2,7 @@
 #include <endian.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +18,10 @@ typedef u32 __u32;
 typedef u8 __u8;
 #define U64_MAX UINT64_MAX
 #define U32_MAX UINT32_MAX
+#define MLX5_SRM_DIRECT_CQE_SIZE 64U
+#define MLX5_IB_DEFAULT_UIDX 0xffffff
+#define MLX5_CQE_OWNER_MASK 1
+#define MLX5_CQE_INVALID 15
 #define MLX5_SRM_PUBLISH_SEQ_MASK ((1ULL << 48) - 1)
 #define MLX5_DEVICE_STATE_INTERNAL_ERROR 1
 #define MLX5_CQE_REQ 0
@@ -36,12 +41,18 @@ typedef u8 __u8;
 #define rmb() ((void)0)
 #define spin_lock_irqsave(lock, flags) ((void)(lock), (flags) = 0)
 #define spin_unlock_irqrestore(lock, flags) ((void)(lock), (void)(flags))
-#define spin_lock(lock) ((void)(lock))
+static unsigned int lock_acquires;
+#define spin_lock(lock) ((void)(lock), lock_acquires++)
 #define spin_unlock(lock) ((void)(lock))
 #define mutex_lock(lock) ((void)(lock))
 #define mutex_unlock(lock) ((void)(lock))
 #define be32_to_cpu(x) be32toh(x)
 #define be16_to_cpu(x) be16toh(x)
+#define cpu_to_be32(x) htobe32(x)
+#define write_seqcount_begin(p) ((void)(p))
+#define write_seqcount_end(p) ((void)(p))
+#define read_seqcount_begin(p) ((void)(p), 0)
+#define read_seqcount_retry(p, seq) ((void)(p), (void)(seq), false)
 #define kfree(p) free(p)
 
 struct mlx5_srm_sw_cq;
@@ -54,7 +65,8 @@ struct mlx5_ib_cqbuf {
 struct mlx5_ib_usr_rc_route {
     struct mlx5_ib_cqbuf *cqb;
     bool dispatch_ready;
-    int dispatch_lock;
+    int dispatch_lock, direct_seq;
+    u32 uidx;
     u32 small_kqp_idx, large_kqp_idx;
     u64 small_post_floor, large_post_floor;
 };
@@ -87,10 +99,13 @@ struct mlx5_ib_dev {
 };
 struct ib_cq { struct mlx5_ib_dev *device; };
 struct mlx5_cqe64 {
+    u8 prefix[24];
+    u32 status, vendor;
+    u32 srqn;
+    u8 reserved[20];
     u32 sop_drop_qpn;
     u16 wqe_counter;
-    u8 opcode;
-    u32 status, vendor;
+    u8 signature, op_own;
 };
 struct mlx5_err_cqe { struct mlx5_cqe64 cqe; };
 struct ib_wc { u32 status, vendor_err; };
@@ -113,7 +128,7 @@ static void *next_cqe_sw(struct mlx5_ib_cq *cq)
     return cq->mcq.cons_index == cq->hw_producer ? NULL :
            &cq->hw[cq->mcq.cons_index & 7];
 }
-static u8 get_cqe_opcode(struct mlx5_cqe64 *cqe) { return cqe->opcode; }
+static u8 get_cqe_opcode(struct mlx5_cqe64 *cqe) { return cqe->op_own >> 4; }
 static struct mlx5_core_qp *radix_tree_lookup(struct mlx5_ib_qp *(*tree)[2], u32 qpn)
 {
     for (unsigned i = 0; i < 2; i++)
@@ -138,6 +153,9 @@ static u16 mlx5_srm_publish_usr_rc(u64 token) { return token; }
 
 _Static_assert(sizeof(struct mlx5_srm_sw_cqe) == 32, "event ABI");
 _Static_assert(sizeof(struct mlx5_srm_sw_cq) == 128, "ring ABI");
+_Static_assert(sizeof(struct mlx5_cqe64) == 64 &&
+               offsetof(struct mlx5_cqe64, srqn) == 32 &&
+               offsetof(struct mlx5_cqe64, op_own) == 63, "native CQE layout");
 
 static void enqueue(struct mlx5_ib_cq *cq, struct mlx5_ib_qp *qp, u64 post,
                     u32 usr_rc, u32 status, u32 vendor)
@@ -145,10 +163,81 @@ static void enqueue(struct mlx5_ib_cq *cq, struct mlx5_ib_qp *qp, u64 post,
     struct mlx5_cqe64 *hw = &cq->hw[cq->hw_producer++ & 7];
 
     *hw = (struct mlx5_cqe64){ .sop_drop_qpn = htobe32(qp->ibqp.qp_num),
-        .wqe_counter = htobe16(post), .opcode = status ? MLX5_CQE_REQ_ERR : MLX5_CQE_REQ,
+        .wqe_counter = htobe16(post), .op_own = (status ? MLX5_CQE_REQ_ERR : MLX5_CQE_REQ) << 4,
         .status = status, .vendor = vendor };
     qp->srmc_owner->tokens[post & 7] =
         (((post + 1) & MLX5_SRM_PUBLISH_SEQ_MASK) << 16) | usr_rc;
+}
+
+static void test_direct(void)
+{
+    struct mlx5_core_dev core = {0};
+    struct mlx5_ib_dev dev = { .mdev = &core };
+    struct mlx5_sq_ctrl_page ctrl = { .completion_error_idx = U64_MAX };
+    struct mlx5_ib_srmc owner = { .srmc_idx = 7, .ctrl_page = &ctrl };
+    struct mlx5_ib_qp qp = { .ibqp.qp_num = 100, .is_srmc_kernel_qp = true,
+        .srmc_owner = &owner, .sq.wqe_cnt = 8 };
+    struct mlx5_ib_cq cq = { .ibcq.device = &dev, .mcq.cqe_sz = 64 };
+    struct mlx5_ib_cqbuf user = { .sw_depth = 2, .cqn = 17 };
+    struct mlx5_srm_sw_cq *sw = calloc(1, 128 + 2 * 64);
+    struct mlx5_cqe64 *entries = (void *)sw->entries;
+    struct mlx5_srm_direct_cqe_meta meta;
+    struct mlx5_srm_direct_batch batch = {0};
+    u32 completed;
+
+    memset(&sched_group, 0, sizeof(sched_group));
+    dev.qp_table.tree[0] = &qp;
+    user.sw_buf = sw;
+    for (unsigned i = 0; i < 2; i++) entries[i].op_own = MLX5_CQE_INVALID << 4;
+    sched_group.usr_rc_routes[3].cqb = &user;
+    sched_group.usr_rc_routes[3].uidx = 123;
+    assert(!mlx5_ib_activate_srm_cq_route(&sched_group, 3, &owner, NULL));
+    enqueue(&cq, &qp, 2, 3, 0, 0);
+    enqueue(&cq, &qp, 4, 3, IB_WC_LOC_PROT_ERR, 0x77);
+    lock_acquires = 0;
+    assert(mlx5_ib_poll_srm_direct(&cq.ibcq, 8, &completed) == 2);
+    assert(lock_acquires == 1); /* One destination lock for this batch. */
+    assert(completed == 5 && ctrl.cons_idx == 5 && sw->producer == 2);
+    memcpy(&meta, &entries[0], sizeof(meta));
+    assert(meta.post_idx == 2 && meta.usr_rc == 3 && meta.kqp_idx == 7);
+    assert(be32toh(entries[0].srqn) == 123);
+    assert(be16toh(entries[0].wqe_counter) == 2 && entries[0].op_own == 0);
+    memcpy(&meta, &entries[1], sizeof(meta));
+    assert(meta.status == IB_WC_LOC_PROT_ERR && meta.vendor_err == 0x77);
+    assert(entries[1].op_own == MLX5_CQE_REQ_ERR << 4);
+    enqueue(&cq, &qp, 5, 3, 0, 0);
+    assert(!mlx5_ib_poll_srm_direct(&cq.ibcq, 8, &completed));
+    assert(!completed && cq.mcq.cons_index == 2 && sw->producer == 2);
+    sw->consumer = 1;
+    assert(mlx5_ib_poll_srm_direct(&cq.ibcq, 8, &completed) == 1);
+    assert(completed == 1 && entries[0].op_own == 1);
+    memcpy(&meta, &entries[0], sizeof(meta));
+    assert(meta.post_idx == 5);
+
+    /* Stale IDs/lanes drain without publishing into a replacement CQ. */
+    sched_group.usr_rc_routes[3].small_post_floor = 7;
+    enqueue(&cq, &qp, 6, 3, 0, 0);
+    assert(mlx5_ib_poll_srm_direct(&cq.ibcq, 8, &completed) == 1);
+    assert(sw->producer == 3 && ctrl.cons_idx == 7);
+    sched_group.usr_rc_routes[3].small_post_floor = 0;
+    sched_group.usr_rc_routes[3].dispatch_ready = false;
+    owner.tokens[7] = (8ULL << 16) | 3;
+    assert(!mlx5_ib_srm_direct_completion(&owner, 7, 0, 0, &entries[0], &batch));
+    assert(!batch.cqb);
+    sched_group.usr_rc_routes[3].dispatch_ready = true;
+
+    /* Physical and software counters wrap without using stale slot data. */
+    owner.cq_complete_idx = ctrl.cons_idx = 65535;
+    user.sw_producer = sw->producer = sw->consumer = UINT64_MAX - 1;
+    enqueue(&cq, &qp, 65536, 3, 0, 0);
+    enqueue(&cq, &qp, 65537, 3, 0, 0);
+    assert(mlx5_ib_poll_srm_direct(&cq.ibcq, 8, &completed) == 2);
+    assert(completed == 3 && sw->producer == 0);
+    assert(entries[0].op_own == 1 && entries[1].op_own == 1);
+    memcpy(&meta, &entries[0], sizeof(meta));
+    assert(meta.post_idx == 65536);
+    free(sw);
+    puts("PASS: direct CQE copy, owner publication, batching, full ring and wrap");
 }
 
 int main(void)
@@ -293,5 +382,6 @@ int main(void)
     assert(completed == 0 && ctrl[0].cons_idx == 65541);
     free(sw);
     puts("PASS: actual kernel CQ dispatch, backpressure, errors, wrap and lanes");
+    test_direct();
     return 0;
 }

@@ -459,6 +459,7 @@ enum mlx5_ib_modify_qp_mask {
 	MLX5_IB_MODIFY_QP_OOO_DP = 1 << 0,
 	/* Provider understands the negotiated Hollow completion delivery mode. */
 	MLX5_IB_MODIFY_QP_SRM_CQ_MODE = 1 << 1,
+	MLX5_IB_MODIFY_QP_SRM_CQ_DIRECT = 1 << 2,
 };
 
 struct mlx5_ib_modify_qp {
@@ -541,6 +542,7 @@ enum mlx5_ib_modify_qp_resp_mask {
 	MLX5_IB_MODIFY_QP_RESP_MASK_LARGE_FARM_DB = 1UL << 5,
 	MLX5_IB_MODIFY_QP_RESP_MASK_CQ_MODE = 1UL << 6,
 	MLX5_IB_MODIFY_QP_RESP_MASK_CQ_DISPATCH = 1UL << 7,
+	MLX5_IB_MODIFY_QP_RESP_MASK_CQ_DIRECT = 1UL << 8,
 };
 
 /* Native-endian CPU-to-CPU CQ; never aliases a hardware receive CQ.
@@ -564,6 +566,19 @@ struct mlx5_srm_sw_cq {
 	__u64 consumer;
 	__u8 consumer_pad[56];
 	struct mlx5_srm_sw_cqe entries[];
+};
+
+/* Mode 2 uses the same 128-byte header followed by native 64-byte CQEs.
+ * The first 24 bytes of a copied request CQE carry immutable CPU metadata;
+ * srqn_uidx, wqe_counter, syndrome and op_own retain their native offsets.
+ * No inline-scatter payload is supported on these scheduler-owned SQs. */
+#define MLX5_SRM_DIRECT_CQE_SIZE 64U
+struct mlx5_srm_direct_cqe_meta {
+	__u64 post_idx;
+	__u32 kqp_idx;
+	__u32 usr_rc;
+	__u32 status;
+	__u32 vendor_err;
 };
 
 struct mlx5_ib_create_wq_resp {

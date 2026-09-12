@@ -24,11 +24,17 @@ def main():
     uapi = (ROOT / "include/uapi/rdma/mlx5-abi.h").read_text()
     actual = [block(uapi, "struct mlx5_srm_sw_cqe {") + ";",
               block(uapi, "struct mlx5_srm_sw_cq {") + ";",
+              block(uapi, "struct mlx5_srm_direct_cqe_meta {") + ";",
+              block((MLX5 / "scheduler.h").read_text(),
+                    "struct mlx5_srm_direct_batch {") + ";",
               block(scheduler, "int mlx5_ib_activate_srm_cq_route("),
               block(scheduler, "int mlx5_ib_srm_dispatch_completion("),
+              block(scheduler, "void mlx5_ib_srm_direct_flush("),
+              block(scheduler, "int mlx5_ib_srm_direct_completion("),
               block(cq, "static inline u64 mlx5_ib_srmc_complete_post("),
               block(cq, "static int mlx5_poll_one_srm_dispatch("),
-              block(cq, "int mlx5_ib_poll_srm_dispatch(")]
+              block(cq, "int mlx5_ib_poll_srm_dispatch("),
+              block(cq, "int mlx5_ib_poll_srm_direct(")]
     with tempfile.TemporaryDirectory(prefix="srm-cq-dispatch-") as directory:
         out = Path(directory)
         (out / "actual_dispatch.h").write_text("\n".join(actual))

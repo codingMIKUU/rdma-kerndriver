@@ -1083,7 +1083,8 @@ int mlx5_ib_poll_srm_progress(struct ib_cq *ibcq, int num_entries,
  * In particular, a full software CQ cannot recycle its SQ or return credits. */
 static int mlx5_poll_one_srm_dispatch(struct mlx5_ib_cq *cq,
 				     struct mlx5_ib_qp **cur_qp,
-				     u32 *completed_wqes)
+				     u32 *completed_wqes,
+				     struct mlx5_srm_direct_batch *direct)
 {
 	struct mlx5_ib_dev *dev = to_mdev(cq->ibcq.device);
 	struct mlx5_ib_srmc *srmc;
@@ -1140,8 +1141,12 @@ repoll:
 	if (opcode == MLX5_CQE_REQ_ERR)
 		mlx5_handle_error_cqe(dev, (struct mlx5_err_cqe *)cqe64, &wc);
 
-	ret = mlx5_ib_srm_dispatch_completion(srmc, absolute_post,
-					      wc.status, wc.vendor_err);
+	if (direct)
+		ret = mlx5_ib_srm_direct_completion(srmc, absolute_post,
+			wc.status, wc.vendor_err, cqe64, direct);
+	else
+		ret = mlx5_ib_srm_dispatch_completion(srmc, absolute_post,
+						      wc.status, wc.vendor_err);
 	if (ret)
 		return ret;
 
@@ -1177,7 +1182,7 @@ int mlx5_ib_poll_srm_dispatch(struct ib_cq *ibcq, int num_entries,
 	while (npolled < num_entries) {
 		u32 completed_one = 0;
 
-		ret = mlx5_poll_one_srm_dispatch(cq, &cur_qp, &completed_one);
+		ret = mlx5_poll_one_srm_dispatch(cq, &cur_qp, &completed_one, NULL);
 		if (ret)
 			break;
 		completed_sum += completed_one;
@@ -1189,6 +1194,41 @@ int mlx5_ib_poll_srm_dispatch(struct ib_cq *ibcq, int num_entries,
 	*completed_wqes = completed_sum;
 	if (unlikely(ret && ret != -EAGAIN))
 		pr_warn_ratelimited("hollow RC CQ dispatch failed: error=%d\n", ret);
+	return npolled ? npolled : (ret == -EAGAIN ? 0 : ret);
+}
+
+int mlx5_ib_poll_srm_direct(struct ib_cq *ibcq, int num_entries,
+			   u32 *completed_wqes)
+{
+	struct mlx5_ib_cq *cq = to_mcq(ibcq);
+	struct mlx5_ib_dev *dev = to_mdev(ibcq->device);
+	struct mlx5_ib_qp *cur_qp = NULL;
+	struct mlx5_srm_direct_batch batch = {};
+	unsigned long flags;
+	u32 initial_cons, completed_sum = 0;
+	int npolled = 0, ret = 0;
+
+	*completed_wqes = 0;
+	if (unlikely(dev->mdev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR))
+		return -EIO;
+	spin_lock_irqsave(&cq->lock, flags);
+	initial_cons = cq->mcq.cons_index;
+	while (npolled < num_entries) {
+		u32 completed_one = 0;
+
+		ret = mlx5_poll_one_srm_dispatch(cq, &cur_qp, &completed_one, &batch);
+		if (ret)
+			break;
+		completed_sum += completed_one;
+		npolled++;
+	}
+	mlx5_ib_srm_direct_flush(&batch);
+	if (cq->mcq.cons_index != initial_cons)
+		mlx5_cq_set_ci(&cq->mcq);
+	spin_unlock_irqrestore(&cq->lock, flags);
+	*completed_wqes = completed_sum;
+	if (unlikely(ret && ret != -EAGAIN))
+		pr_warn_ratelimited("hollow RC direct CQ poll failed: error=%d\n", ret);
 	return npolled ? npolled : (ret == -EAGAIN ? 0 : ret);
 }
 

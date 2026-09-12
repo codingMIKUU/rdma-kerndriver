@@ -18,9 +18,9 @@ MLX5 = ROOT / "drivers/infiniband/hw/mlx5"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--units", nargs="+", default=["scheduler", "qp", "cq", "ah", "main"])
-    parser.add_argument("--cq-modes", nargs="+", type=int, choices=(0, 1),
-                        default=[0, 1],
-                        help="CQ simplification values to compile (default: both)")
+    parser.add_argument("--cq-modes", nargs="+", type=int, choices=(0, 1, 2),
+                        default=[0, 1, 2],
+                        help="CQ delivery modes to compile (default: all three)")
     opts = parser.parse_args()
     config = dict(line.split("=", 1) for line in
                   (ROOT / "configure.mk.kernel").read_text().splitlines()

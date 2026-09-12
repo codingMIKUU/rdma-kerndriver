@@ -1972,7 +1972,7 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 		if (err)
 			goto out_owner_unlock;
 	}
-	if (!MLX5_SRM_ENABLE_CQE_SIMPLIFY) {
+	if (MLX5_SRM_ENABLE_CQE_SIMPLIFY != 1) {
 		fail_stage = "activate-cq-route";
 		err = mlx5_ib_activate_srm_cq_route(&sched_group, qp->usr_rc_id,
 						 qp->srmc_owner, qp->large_srmc_owner);
@@ -6137,13 +6137,17 @@ int mlx5_ib_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 			return -EFAULT;
 
 		if (ucmd.comp_mask & ~(MLX5_IB_MODIFY_QP_OOO_DP |
-				       MLX5_IB_MODIFY_QP_SRM_CQ_MODE) ||
+				       MLX5_IB_MODIFY_QP_SRM_CQ_MODE |
+				       MLX5_IB_MODIFY_QP_SRM_CQ_DIRECT) ||
 		    memchr_inv(&ucmd.burst_info.reserved, 0,
 			       sizeof(ucmd.burst_info.reserved)))
 			return -EOPNOTSUPP;
 
 		if ((ucmd.comp_mask & MLX5_IB_MODIFY_QP_SRM_CQ_MODE) &&
 		    !mlx5_ib_is_hollow_rc_qp(qp))
+			return -EOPNOTSUPP;
+		if ((ucmd.comp_mask & MLX5_IB_MODIFY_QP_SRM_CQ_DIRECT) &&
+		    !(ucmd.comp_mask & MLX5_IB_MODIFY_QP_SRM_CQ_MODE))
 			return -EOPNOTSUPP;
 		if (!(ucmd.comp_mask & MLX5_IB_MODIFY_QP_SRM_CQ_MODE) &&
 		    (ucmd.srm_cq_buf_addr || ucmd.srm_cq_buf_size ||
@@ -6224,7 +6228,7 @@ int mlx5_ib_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 		err = 0;
 		if (new_state == IB_QPS_INIT || new_state == IB_QPS_RTR) {
 			hollow_fail_stage = "cq-mode";
-			if (!MLX5_SRM_ENABLE_CQE_SIMPLIFY &&
+			if (MLX5_SRM_ENABLE_CQE_SIMPLIFY != 1 &&
 			    (!(ucmd.comp_mask & MLX5_IB_MODIFY_QP_SRM_CQ_MODE) ||
 			     !udata || udata->outlen < offsetofend(typeof(resp), comp_mask))) {
 				pr_err("hollow RC CQ dispatch requires a provider with CQ mode negotiation\n");
@@ -6232,11 +6236,19 @@ int mlx5_ib_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 				goto out;
 			}
 			resp.comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_CQ_MODE;
-			if (!MLX5_SRM_ENABLE_CQE_SIMPLIFY)
+			if (MLX5_SRM_ENABLE_CQE_SIMPLIFY == 2) {
+				if (!(ucmd.comp_mask & MLX5_IB_MODIFY_QP_SRM_CQ_DIRECT)) {
+					pr_err("hollow RC direct CQEs require an updated provider\n");
+					err = -EOPNOTSUPP;
+					goto out;
+				}
+				resp.comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_CQ_DIRECT;
+			}
+			if (MLX5_SRM_ENABLE_CQE_SIMPLIFY == 0)
 				resp.comp_mask |= MLX5_IB_MODIFY_QP_RESP_MASK_CQ_DISPATCH;
 		}
 		if (new_state == IB_QPS_RTR) {
-			if (!MLX5_SRM_ENABLE_CQE_SIMPLIFY) {
+			if (MLX5_SRM_ENABLE_CQE_SIMPLIFY != 1) {
 				hollow_fail_stage = "software-cq";
 				if (!udata || udata->inlen < sizeof(ucmd) || !ibqp->send_cq) {
 					err = -EINVAL;
