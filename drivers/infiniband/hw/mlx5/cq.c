@@ -939,6 +939,7 @@ out:
 	return soft_polled + npolled;
 }
 
+#if MLX5_SRM_ENABLE_CQE_SIMPLIFY
 /*
  * Hollow RC completion-watermark poller.  The hardware CQ is private to the
  * scheduler KQPs, so successful requestor CQEs need neither an ib_wc nor a
@@ -1072,6 +1073,8 @@ int mlx5_ib_poll_srm_progress(struct ib_cq *ibcq, int num_entries,
 	*completed_wqes = completed_sum;
 	return npolled;
 }
+
+#endif /* MLX5_SRM_ENABLE_CQE_SIMPLIFY */
 
 int mlx5_ib_arm_cq(struct ib_cq *ibcq, enum ib_cq_notify_flags flags)
 {

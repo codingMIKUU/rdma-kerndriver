@@ -7,6 +7,15 @@
 #include <linux/wait.h>
 #include <rdma/rdma_cm.h>
 
+/* Must match rdma-core/providers/mlx5/mlx5.h. Keep the native CQE path
+ * when disabled; this is the pre-MVAPICH fixed-window implementation. */
+#ifndef MLX5_SRM_ENABLE_CQE_SIMPLIFY
+#define MLX5_SRM_ENABLE_CQE_SIMPLIFY 0
+#endif
+#if MLX5_SRM_ENABLE_CQE_SIMPLIFY != 0 && MLX5_SRM_ENABLE_CQE_SIMPLIFY != 1
+#error "MLX5_SRM_ENABLE_CQE_SIMPLIFY must be 0 or 1"
+#endif
+
 #define SQ_DEPTH 35000
 static int debug = 0;
 #define NUM_SRMC 1024

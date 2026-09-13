@@ -1510,6 +1510,7 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
         }
     }
 }
+#if MLX5_SRM_ENABLE_CQE_SIMPLIFY
 static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
                                      struct mlx5_qp_ctrl_pool *sq_ctrl_pool,
                                      struct mlx5_ib_srmc *srmc,
@@ -1580,6 +1581,130 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
         return -1;
     }
 }
+
+#else /* Historical CQE copy/routing and batched SQ-credit reclamation. */
+static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
+                                     struct mlx5_qp_ctrl_pool *sq_ctrl_pool,
+                                     struct mlx5_ib_srmc *srmc,
+                                     struct ib_wc *wc,
+                                     void **cqe,
+                                     struct mlx5_srm_cq_workspace *workspace,
+                                     struct mlx5_ib_srm_sched_stats *stats)
+{
+    struct mlx5_ib_sched_worker *credit_worker;
+    struct mlx5_ib_cqbuf *cqb;
+    int cqe_num;
+    u32 completed_wqes;
+    int i;
+    u64 phase_start;
+    u64 iter_start;
+    u64 total_start;
+    u64 post_poll_start;
+    struct mlx5_srm_ctrl_complete_entry complete_cache[SRM_CTRL_COMPLETE_CACHE];
+    int complete_cache_cnt = 0;
+    struct mlx5_srm_cqe_publish_lane *lane;
+
+    total_start = mlx5_ib_srm_begin_cq_timing(stats) ? ktime_get_ns() : 0;
+    mlx5_srm_refresh_poll_budget(sched, srmc);
+    credit_worker = mlx5_srm_cq_worker(sched, srmc);
+    DEBUG_LOG("in srm_poll_srmc_once,poll_budget:%d\n", srmc->sig_cnt);
+
+    if (srmc->sig_cnt)
+    {
+        DEBUG_LOG("distributing cqe\n");
+
+        // memset(&wc, 1, sizeof wc);
+        cqe_num = 0;
+        completed_wqes = 0;
+        phase_start = mlx5_ib_srm_cq_timing_active(stats) ?
+                          ktime_get_ns() : 0;
+        if ((cqe_num = mlx5_ib_poll_cq_with_cqe(
+                 srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe,
+                 &completed_wqes)))
+        {
+            mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_KERNEL_POLL,
+                                        phase_start);
+            post_poll_start = mlx5_ib_srm_cq_timing_active(stats) ?
+                                  ktime_get_ns() : 0;
+            mlx5_ib_srm_record_timed_cqes(stats, cqe_num);
+            srmc->last_cqe_jiffies = jiffies;
+            mlx5_srm_cq_workspace_reset(workspace);
+            // pr_info("sig_cnt cqe_num:%d,sig_cnt:%d\n", cqe_num, srmc->sig_cnt);
+            //  cnt2++;
+            for (i = 0; i < cqe_num; i++)
+            {
+                struct mlx5_srm_cqe_publish_entry entry;
+
+                iter_start = mlx5_ib_srm_cq_timing_active(stats) ?
+                                 ktime_get_ns() : 0;
+                mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_LOOP_BASE,
+                                            iter_start);
+                phase_start = mlx5_ib_srm_cq_timing_active(stats) ?
+                                  ktime_get_ns() : 0;
+
+                if (!mlx5_srm_resolve_cqe_ctx(sched, sq_ctrl_pool,
+                                              wc[i].wr_id, workspace,
+                                              &entry)) {
+                    mlx5_srm_complete_wrid_ctrl(
+                        sq_ctrl_pool, wc[i].wr_id, complete_cache,
+                        &complete_cache_cnt);
+                    mlx5_ib_srm_record_cq_phase(stats,
+                                                SRM_CQ_PHASE_INFO_LOOKUP,
+                                                phase_start);
+                    continue;
+                }
+
+                cqb = entry.cqb;
+                mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_INFO_LOOKUP,
+                                            phase_start);
+                lane = mlx5_srm_get_publish_lane(
+                    srmc, workspace, cqb, complete_cache,
+                    &complete_cache_cnt, stats);
+                entry.cqe64 = cqe[i];
+                lane->entries[lane->count++] = entry;
+                if (lane->count == SRM_CQE_PUBLISH_BATCH)
+                    mlx5_srm_flush_cqe_publish_lane(
+                        srmc, lane, complete_cache,
+                        &complete_cache_cnt, stats);
+            }
+            mlx5_srm_flush_cqe_publish_lane(
+                srmc, &workspace->publish_lane, complete_cache,
+                &complete_cache_cnt, stats);
+            phase_start = mlx5_ib_srm_cq_timing_active(stats) ?
+                              ktime_get_ns() : 0;
+            mlx5_srm_ctrl_complete_flush(complete_cache,
+                                         &complete_cache_cnt);
+            mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_CTRL_COMPLETE,
+                                        phase_start);
+            mlx5_ib_srm_record_cq_post_poll(stats, post_poll_start);
+            /*
+             * Publish credit only after CQ routing and per-KQP SQ recycle
+             * are complete.  One signaled CQE cumulatively completes every
+             * preceding unsignaled WQE on that physical KQP, so return the
+             * WQE span reconstructed from the hardware wqe_counter rather
+             * than the number of CQEs polled.
+             */
+            if (likely(credit_worker && credit_worker->credit_ctrl))
+                atomic64_add(completed_wqes,
+                             &credit_worker->credit_ctrl->completed_total);
+            mlx5_srm_refresh_poll_budget(sched, srmc);
+        } else {
+            mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_KERNEL_POLL,
+                                        phase_start);
+        }
+
+        mlx5_ib_srm_record_cq_once(stats, total_start);
+        mlx5_ib_srm_end_cq_timing(stats);
+        return cqe_num;
+    }
+    else
+    {
+        mlx5_ib_srm_record_cq_once(stats, total_start);
+        mlx5_ib_srm_end_cq_timing(stats);
+        return -1;
+    }
+}
+#endif /* MLX5_SRM_ENABLE_CQE_SIMPLIFY */
 
 static inline int srm_poll_srmc_once_debug(struct mlx5_ib_srmc *srmc, struct ib_wc *wc, void **cqe, struct file *filp,
                                            loff_t *pos, char *buf, uint64_t *start_cycles, uint64_t *end_cycles, int free_cqe_idx[], int *free_cqe_cnt)
