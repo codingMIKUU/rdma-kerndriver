@@ -5,6 +5,7 @@ Requires an already configured OFED tree and its recorded .*.o.cmd files.
 All objects go to a TemporaryDirectory, never to the live module build.
 """
 import argparse
+import itertools
 from pathlib import Path
 import shlex
 import subprocess
@@ -17,6 +18,8 @@ MLX5 = ROOT / "drivers/infiniband/hw/mlx5"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--units", nargs="+", default=["scheduler", "cq", "qp"])
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="compile all combinations of the two statistics switches too")
     args = parser.parse_args()
     config = dict(line.split("=", 1) for line in
                   (ROOT / "configure.mk.kernel").read_text().splitlines()
@@ -34,11 +37,19 @@ def main():
             command = [x for x in command
                        if not x.startswith(("-Wp,-MD,", "-Wp,-MMD,",
                                             "-DMLX5_SRM_ENABLE_CQE_SIMPLIFY="))]
+            command = [x for x in command if not x.startswith(
+                ("-DMLX5_SRM_ENABLE_DB_SHARE_STATS=",
+                 "-DMLX5_SRM_ENABLE_CQE_CYCLE_STATS="))]
             output = command.index("-o") + 1
-            for mode in (0, 1):
-                command[output] = str(Path(tmp) / (unit + "-cq" + str(mode) + ".o"))
-                print("Compile", unit, "CQE_SIMPLIFY=" + str(mode), flush=True)
-                subprocess.run(command + ["-DMLX5_SRM_ENABLE_CQE_SIMPLIFY=" + str(mode)],
+            combinations = (itertools.product((0, 1), repeat=3) if args.diagnostics
+                            else ((0, 0, 0), (1, 0, 0)))
+            for mode, db_stats, cq_stats in combinations:
+                variant = "cq%d-db%d-cycles%d" % (mode, db_stats, cq_stats)
+                command[output] = str(Path(tmp) / (unit + "-" + variant + ".o"))
+                print("Compile", unit, variant, flush=True)
+                subprocess.run(command + ["-DMLX5_SRM_ENABLE_CQE_SIMPLIFY=" + str(mode),
+                               "-DMLX5_SRM_ENABLE_DB_SHARE_STATS=" + str(db_stats),
+                               "-DMLX5_SRM_ENABLE_CQE_CYCLE_STATS=" + str(cq_stats)],
                                cwd=config["KSRC_OBJ"], check=True)
         print("PASS: both historical CQ modes compile; no module installed")
 

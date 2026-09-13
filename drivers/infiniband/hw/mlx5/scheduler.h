@@ -16,6 +16,21 @@
 #error "MLX5_SRM_ENABLE_CQE_SIMPLIFY must be 0 or 1"
 #endif
 
+/* Diagnostics only: disabled builds have no new hot-path instructions.
+ * Enable DB_SHARE_STATS in the matching rdma-core mlx5.h as well. */
+#ifndef MLX5_SRM_ENABLE_DB_SHARE_STATS
+#define MLX5_SRM_ENABLE_DB_SHARE_STATS 0
+#endif
+#ifndef MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+#define MLX5_SRM_ENABLE_CQE_CYCLE_STATS 0
+#endif
+#ifndef MLX5_SRM_DIAG_INTERVAL_MS
+#define MLX5_SRM_DIAG_INTERVAL_MS 1000U
+#endif
+#if MLX5_SRM_DIAG_INTERVAL_MS < 1
+#error "MLX5_SRM_DIAG_INTERVAL_MS must be positive"
+#endif
+
 #define SQ_DEPTH 35000
 static int debug = 0;
 #define NUM_SRMC 1024
@@ -91,6 +106,18 @@ struct srm_qp_entry{
     uint64_t cycles;
 }CACHELINE_ALIGNED_USER;
 
+/* ABI-identical to rdma-core/providers/mlx5/mlx5.h, including when off. */
+struct mlx5_srm_db_share {
+    __u32 seq;
+    __u32 reserved;
+    __u64 user_calls;
+    __u64 user_wqes;
+    __u64 kernel_calls;
+    __u64 kernel_wqes;
+    __u8 pad[24];
+};
+static_assert(sizeof(struct mlx5_srm_db_share) == 64);
+
 struct mlx5_sq_ctrl_page {
     __u64 resv_idx;
     __u64 ready_idx;
@@ -127,7 +154,8 @@ struct mlx5_sq_ctrl_page {
 	__u64 latest_hot_hint;
 	__u8 hot_hint_pad[56];
 	/* Power-of-two stride: a slot must never cross discontiguous pool pages. */
-	__u8 slot_pad[192];
+	struct mlx5_srm_db_share db_share;
+	__u8 slot_pad[128];
 } CACHELINE_ALIGNED_USER;
 static_assert(sizeof(struct mlx5_sq_ctrl_page) == 512);
 
@@ -135,6 +163,7 @@ static_assert(sizeof(struct mlx5_sq_ctrl_page) == 512);
 #define MLX5_SRM_DB_OWNER_USER   1U
 #define MLX5_SRM_DB_OWNER_KERNEL 2U
 #define MLX5_SRM_CTRL_F_DIRECT_DB_STATS (1U << 0)
+#define MLX5_SRM_CTRL_F_DB_SHARE_STATS (1U << 1)
 #define MLX5_SRM_DIRECT_DB_MAX_BATCH 32U
 
 #define MLX5_SRM_PUBLISH_USR_BITS 16

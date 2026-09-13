@@ -1120,12 +1120,171 @@ struct mlx5_srm_cqe_publish_lane {
     struct mlx5_srm_cqe_publish_entry entries[SRM_CQE_PUBLISH_BATCH];
 };
 
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS
+struct mlx5_srm_db_share_snapshot {
+    u64 user_calls;
+    u64 user_wqes;
+    u64 kernel_calls;
+    u64 kernel_wqes;
+};
+
+/* Never take db_owner just to sample statistics. A busy KQP is deferred to
+ * the next report; its previous snapshot is retained, so no counts are lost. */
+static bool mlx5_srm_read_db_share(struct mlx5_srm_db_share *share,
+                                 struct mlx5_srm_db_share_snapshot *out)
+{
+    u32 seq;
+    int retry;
+
+    for (retry = 0; retry < 3; retry++) {
+        seq = smp_load_acquire(&share->seq);
+        if (seq & 1)
+            continue;
+        out->user_calls = READ_ONCE(share->user_calls);
+        out->user_wqes = READ_ONCE(share->user_wqes);
+        out->kernel_calls = READ_ONCE(share->kernel_calls);
+        out->kernel_wqes = READ_ONCE(share->kernel_wqes);
+        smp_rmb();
+        if (seq == READ_ONCE(share->seq))
+            return true;
+    }
+    return false;
+}
+
+static __always_inline void mlx5_srm_record_kernel_db_share(
+    struct mlx5_sq_ctrl_page *ctrl, u32 sent)
+{
+    struct mlx5_srm_db_share *share = &ctrl->db_share;
+    u32 seq = READ_ONCE(share->seq);
+
+    /* The caller holds the same per-KQP owner as userspace writers. */
+    WRITE_ONCE(share->seq, seq + 1);
+    smp_wmb();
+    WRITE_ONCE(share->kernel_calls, READ_ONCE(share->kernel_calls) + 1);
+    WRITE_ONCE(share->kernel_wqes, READ_ONCE(share->kernel_wqes) + sent);
+    smp_store_release(&share->seq, seq + 2);
+}
+#endif
+
+#if MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+struct mlx5_srm_cqe_cycle_stats {
+    u64 calls;
+    u64 active_calls;
+    u64 cqes;
+    u64 active_cycles;
+    u64 nonpositive_cycles;
+};
+#endif
+
 struct mlx5_srm_cq_workspace {
     struct mlx5_srm_cqe_publish_lane publish_lane;
     u32 cached_kqp_idx;
     struct mlx5_ib_srmc *cached_srmc;
     struct mlx5_sq_ctrl_page *cached_ctrl_page;
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+    unsigned long diag_last_report;
+#endif
+#if MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+    struct mlx5_srm_cqe_cycle_stats cqe_cycles;
+#endif
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS
+    struct mlx5_srm_db_share_snapshot db_previous[NUM_SRMC];
+#endif
 };
+
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+static u64 mlx5_srm_diag_ratio(u64 numerator, u64 denominator, u32 scale)
+{
+    /* Quotient + remainder also avoids multiplying a large cycle sum. */
+    u64 remainder;
+    u64 quotient;
+
+    if (!denominator)
+        return 0;
+    quotient = div64_u64_rem(numerator, denominator, &remainder);
+    return quotient * scale + div64_u64(remainder * scale, denominator);
+}
+
+static void mlx5_srm_report_diag(int sched_id,
+                                struct mlx5_ib_sched_worker *worker,
+                                struct mlx5_qp_ctrl_pool *pool,
+                                struct mlx5_srm_cq_workspace *workspace)
+{
+    unsigned long now = jiffies;
+    unsigned int window_ms;
+
+    if (!pool || !workspace ||
+        time_before(now, workspace->diag_last_report +
+                    msecs_to_jiffies(MLX5_SRM_DIAG_INTERVAL_MS)))
+        return;
+    window_ms = jiffies_to_msecs(now - workspace->diag_last_report);
+
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS
+    {
+        struct mlx5_srm_db_share_snapshot total = {};
+        u64 calls, wqes;
+        u32 i, sampled = 0, deferred = 0;
+
+        for (i = worker->kqp_begin; i < worker->kqp_end; i++) {
+            struct mlx5_sq_ctrl_page *ctrl = mlx5_sq_ctrl_get_slot(pool, i);
+            struct mlx5_srm_db_share_snapshot snapshot_now;
+            struct mlx5_srm_db_share_snapshot *previous;
+
+            if (!ctrl || i >= NUM_SRMC)
+                continue;
+            if (!mlx5_srm_read_db_share(&ctrl->db_share, &snapshot_now)) {
+                deferred++;
+                continue;
+            }
+            previous = &workspace->db_previous[i];
+            /* Unsigned deltas remain correct across u64 counter wrap. */
+            total.user_calls += snapshot_now.user_calls - previous->user_calls;
+            total.user_wqes += snapshot_now.user_wqes - previous->user_wqes;
+            total.kernel_calls += snapshot_now.kernel_calls - previous->kernel_calls;
+            total.kernel_wqes += snapshot_now.kernel_wqes - previous->kernel_wqes;
+            *previous = snapshot_now;
+            sampled++;
+        }
+        calls = total.user_calls + total.kernel_calls;
+        wqes = total.user_wqes + total.kernel_wqes;
+        pr_info("SRM_DB_SHARE_STATS sched=%d worker=%u scope=kqp_deltas "
+                "window_ms=%u sampled_kqps=%u deferred_kqps=%u "
+                "user_db_calls=%llu kernel_db_calls=%llu "
+                "user_db_pct_x100=%llu kernel_db_pct_x100=%llu "
+                "user_db_wqes=%llu kernel_db_wqes=%llu "
+                "user_wqe_pct_x100=%llu kernel_wqe_pct_x100=%llu "
+                "user_batch_avg_x100=%llu kernel_batch_avg_x100=%llu\n",
+                sched_id, worker->worker_id, window_ms, sampled, deferred,
+                total.user_calls, total.kernel_calls,
+                mlx5_srm_diag_ratio(total.user_calls, calls, 10000),
+                mlx5_srm_diag_ratio(total.kernel_calls, calls, 10000),
+                total.user_wqes, total.kernel_wqes,
+                mlx5_srm_diag_ratio(total.user_wqes, wqes, 10000),
+                mlx5_srm_diag_ratio(total.kernel_wqes, wqes, 10000),
+                mlx5_srm_diag_ratio(total.user_wqes, total.user_calls, 100),
+                mlx5_srm_diag_ratio(total.kernel_wqes, total.kernel_calls, 100));
+    }
+#endif
+#if MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+    {
+        struct mlx5_srm_cqe_cycle_stats *cycles = &workspace->cqe_cycles;
+
+        pr_info("SRM_CQE_CYCLE_STATS sched=%d worker=%u simplify=%u "
+                "scope=poll_and_publish window_ms=%u poll_calls=%llu "
+                "active_poll_calls=%llu cqes=%llu active_poll_cycles=%llu "
+                "cqe_avg_cycles=%llu nonpositive_poll_calls=%llu "
+                "nonpositive_poll_cycles=%llu\n",
+                sched_id, worker->worker_id, MLX5_SRM_ENABLE_CQE_SIMPLIFY,
+                window_ms, cycles->calls, cycles->active_calls, cycles->cqes,
+                cycles->active_cycles,
+                mlx5_srm_diag_ratio(cycles->active_cycles, cycles->cqes, 1),
+                cycles->calls - cycles->active_calls, cycles->nonpositive_cycles);
+        memset(cycles, 0, sizeof(*cycles));
+    }
+#endif
+    workspace->diag_last_report = now;
+}
+#endif
 
 extern struct mlx5_ib_sched_group sched_group;
 
@@ -1205,6 +1364,9 @@ mlx5_srm_ring_shared_db(struct mlx5_ib_qp *qp,
     qp->bf.offset = READ_ONCE(ctrl_page->bf_offset);
     mlx5r_ring_db(qp, sent, last_ctrl);
     WRITE_ONCE(ctrl_page->bf_offset, qp->bf.offset);
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS
+    mlx5_srm_record_kernel_db_share(ctrl_page, sent);
+#endif
 }
 
 static __always_inline int
@@ -1510,6 +1672,11 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
         }
     }
 }
+#if MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+/* Instrument the existing whole operation; keep its body untouched in both
+ * modes. When disabled, even this wrapper and its fields are compiled out. */
+#define srm_poll_srmc_once srm_poll_srmc_once_untimed
+#endif
 #if MLX5_SRM_ENABLE_CQE_SIMPLIFY
 static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
                                      struct mlx5_qp_ctrl_pool *sq_ctrl_pool,
@@ -1705,6 +1872,35 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
     }
 }
 #endif /* MLX5_SRM_ENABLE_CQE_SIMPLIFY */
+
+#if MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+#undef srm_poll_srmc_once
+static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
+                                   struct mlx5_qp_ctrl_pool *sq_ctrl_pool,
+                                   struct mlx5_ib_srmc *srmc,
+                                   struct ib_wc *wc, void **cqe,
+                                   struct mlx5_srm_cq_workspace *workspace,
+                                   struct mlx5_ib_srm_sched_stats *stats)
+{
+    struct mlx5_srm_cqe_cycle_stats *cycles = &workspace->cqe_cycles;
+    u64 start = rdtsc_ordered();
+    int ret = srm_poll_srmc_once_untimed(sched, sq_ctrl_pool, srmc,
+                                       wc, cqe, workspace, stats);
+    u64 elapsed = rdtsc_ordered() - start;
+
+    /* Count hardware CQEs, not completed WQEs: a signaled CQE may cover a
+     * whole unsignaled window. Accounting/printing is outside the timer. */
+    cycles->calls++;
+    if (ret > 0) {
+        cycles->active_calls++;
+        cycles->cqes += ret;
+        cycles->active_cycles += elapsed;
+    } else {
+        cycles->nonpositive_cycles += elapsed;
+    }
+    return ret;
+}
+#endif
 
 static inline int srm_poll_srmc_once_debug(struct mlx5_ib_srmc *srmc, struct ib_wc *wc, void **cqe, struct file *filp,
                                            loff_t *pos, char *buf, uint64_t *start_cycles, uint64_t *end_cycles, int free_cqe_idx[], int *free_cqe_cnt)
@@ -3226,6 +3422,10 @@ int scheduler_polling(void *sched_data)
     wc = mlx5_ib_srm_kvcalloc_node(SQ_DEPTH, sizeof(*wc));
     cq_workspace = kvzalloc_node(sizeof(*cq_workspace), GFP_KERNEL,
                                  srm_numa_node);
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+    if (cq_workspace)
+        cq_workspace->diag_last_report = jiffies;
+#endif
 
     memset(gid.raw, 0, sizeof(gid.raw));
     memset(gid.raw + 10, 0xff, 2); // 高80位为0，中16位全1，低32位为ip地址，此为gid格式
@@ -4036,6 +4236,9 @@ int scheduler_polling(void *sched_data)
             // pre_srmc->cur_cqe++;
         }
         mlx5_ib_srm_report_stats(sched, worker_id, srm_stats);
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+        mlx5_srm_report_diag(id, worker, sq_ctrl_pool, cq_workspace);
+#endif
         {
             u64 route_epoch = atomic64_read(&sched_group.route_epoch);
 
@@ -5568,7 +5771,14 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
                    MLX5_SRM_DIRECT_DB_MAX_BATCH);
         WRITE_ONCE(ctrl_page->flags,
                    READ_ONCE(ctrl_page->flags) &
-                       ~MLX5_SRM_CTRL_F_DIRECT_DB_STATS);
+                       ~(MLX5_SRM_CTRL_F_DIRECT_DB_STATS |
+                         MLX5_SRM_CTRL_F_DB_SHARE_STATS));
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS
+        memset(&ctrl_page->db_share, 0, sizeof(ctrl_page->db_share));
+        smp_store_release(&ctrl_page->flags,
+                          READ_ONCE(ctrl_page->flags) |
+                          MLX5_SRM_CTRL_F_DB_SHARE_STATS);
+#endif
         if (srmc->srmc_idx == worker->kqp_begin) {
             atomic64_set(&ctrl_page->issued_total, 0);
             atomic64_set(&ctrl_page->completed_total, 0);
