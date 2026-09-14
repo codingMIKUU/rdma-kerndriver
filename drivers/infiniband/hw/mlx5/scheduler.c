@@ -396,6 +396,93 @@ static u64 mlx5_ib_srmc_get_publish_token(struct mlx5_ib_srmc *srmc,
     return smp_load_acquire(entry);
 }
 
+#if MLX5_SRM_ENABLE_WQE_TIMING
+struct mlx5_srm_db_timing_batch {
+    u64 post_tsc_sum;
+    u32 valid;
+    u32 missing;
+    u32 invalid;
+};
+
+struct mlx5_srm_db_timing_stats {
+    u64 db_calls;
+    u64 db_wqes;
+    u64 post_to_db_cycles;
+    u64 missing;
+    u64 invalid;
+    u64 checked;
+};
+
+/* All timestamp reads precede the MMIO doorbell. CQ processing may release
+ * the SQ slots immediately afterwards, including when userspace rings DB. */
+static struct mlx5_srm_db_timing_batch mlx5_srm_timing_db_snapshot(
+    struct mlx5_ib_srmc *srmc, u64 first, u32 count)
+{
+    struct mlx5_srm_db_timing_batch batch = {0};
+    u64 now = rdtsc_ordered();
+    u32 n;
+
+    for (n = 0; n < count; n++) {
+        u64 slot = first + n;
+        size_t off = MLX5_SRM_TIMING_OFFSET(srmc->publish_depth) +
+            (slot & (srmc->publish_depth - 1)) *
+                sizeof(struct mlx5_srm_wqe_timestamp);
+        struct mlx5_srm_wqe_timestamp *entry;
+        u64 sequence;
+        u64 start;
+
+        if (!srmc->publish_pages || !srmc->publish_depth ||
+            off / PAGE_SIZE >= srmc->publish_npages) {
+            batch.missing++;
+            continue;
+        }
+        /* 16-byte alignment ensures neither field crosses a page boundary. */
+        entry = (void *)((char *)page_address(
+            srmc->publish_pages[off / PAGE_SIZE]) + off % PAGE_SIZE);
+        sequence = smp_load_acquire(&entry->sequence);
+        start = READ_ONCE(entry->post_tsc);
+        if (sequence != slot + 1 || !start) {
+            batch.missing++;
+        } else if ((s64)(now - start) < 0) {
+            batch.invalid++;
+        } else {
+            batch.valid++;
+            batch.post_tsc_sum += start;
+        }
+    }
+    return batch;
+}
+
+static void mlx5_srm_timing_db_complete(
+    struct mlx5_srm_db_timing_stats *stats,
+    const struct mlx5_srm_db_timing_batch *batch,
+    u64 done, int sched, int worker)
+{
+    u64 elapsed = done * batch->valid - batch->post_tsc_sum;
+
+    stats->db_calls++;
+    /* Unsigned arithmetic also handles wrapping timestamp sums. */
+    if ((s64)elapsed < 0) {
+        stats->invalid += batch->valid;
+    } else {
+        stats->db_wqes += batch->valid;
+        stats->post_to_db_cycles += elapsed;
+    }
+    stats->missing += batch->missing;
+    stats->invalid += batch->invalid;
+    stats->checked += batch->valid + batch->missing + batch->invalid;
+    if (stats->checked < MLX5_SRM_TIMING_REPORT_WQES)
+        return;
+    pr_info("SRM_DB_TIMING algorithm=qpswitch source=kernel sched=%d worker=%d db_calls=%llu db_wqes=%llu post_to_db_cycles=%llu post_to_db_avg_cycles=%llu missing_timestamps=%llu invalid_timestamps=%llu\n",
+            sched, worker, stats->db_calls, stats->db_wqes,
+            stats->post_to_db_cycles,
+            stats->db_wqes ? div64_u64(stats->post_to_db_cycles,
+                                      stats->db_wqes) : 0,
+            stats->missing, stats->invalid);
+    memset(stats, 0, sizeof(*stats));
+}
+#endif
+
 static struct mlx5_ib_srmc *mlx5_ib_sched_find_srmc_idx(struct mlx5_ib_sched *sched,
                                                         u32 srmc_idx)
 {
@@ -1167,16 +1254,57 @@ static __always_inline void mlx5_srm_record_kernel_db_share(
 #endif
 
 #if MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+#define SRM_CQE_CYCLE_HIST_BINS 496
 struct mlx5_srm_cqe_cycle_stats {
     u64 calls;
     u64 active_calls;
     u64 cqes;
     u64 active_cycles;
     u64 nonpositive_cycles;
+    /* CQE-weighted distribution of each poll's elapsed / returned CQEs.
+     * NOT individually timestamped CQEs. Eight sub-buckets per power of 2. */
+    u64 batch_avg_hist[SRM_CQE_CYCLE_HIST_BINS];
 };
+
+static inline void mlx5_srm_cqe_hist_add(struct mlx5_srm_cqe_cycle_stats *s,
+                                        u64 elapsed, u32 cqes)
+{
+    u64 remainder;
+    u64 value = div64_u64_rem(elapsed, cqes, &remainder);
+    unsigned int shift, bin;
+
+    /* Round up so even a fractional per-CQE mean stays below the bound. */
+    value += !!remainder;
+    shift = value < 8 ? 0 : fls64(value) - 4;
+    bin = value < 8 ? value : shift * 8 + (value >> shift);
+
+    s->batch_avg_hist[bin] += cqes;
+}
+
+static u64 mlx5_srm_cqe_p99_upper(const struct mlx5_srm_cqe_cycle_stats *s)
+{
+    u64 rank = s->cqes - div64_u64(s->cqes, 100);
+    u64 cumulative = 0;
+    unsigned int i;
+
+    if (!rank)
+        return 0;
+    for (i = 0; i < SRM_CQE_CYCLE_HIST_BINS; i++) {
+        cumulative += s->batch_avg_hist[i];
+        if (cumulative >= rank) {
+            if (i < 8)
+                return i;
+            return (((u64)(i % 8) + 9) << (i / 8 - 1)) - 1;
+        }
+    }
+    return U64_MAX;
+}
 #endif
 
 struct mlx5_srm_cq_workspace {
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    struct mlx5_srm_db_timing_stats db_timing;
+#endif
     struct mlx5_srm_cqe_publish_lane publish_lane;
     u32 cached_kqp_idx;
     struct mlx5_ib_srmc *cached_srmc;
@@ -1272,12 +1400,14 @@ static void mlx5_srm_report_diag(int sched_id,
         pr_info("SRM_CQE_CYCLE_STATS sched=%d worker=%u simplify=%u "
                 "scope=poll_and_publish window_ms=%u poll_calls=%llu "
                 "active_poll_calls=%llu cqes=%llu active_poll_cycles=%llu "
-                "cqe_avg_cycles=%llu nonpositive_poll_calls=%llu "
+                "cqe_avg_cycles=%llu cqe_batch_avg_p99_cycles_upper=%llu "
+                "p99_weight=cqes nonpositive_poll_calls=%llu "
                 "nonpositive_poll_cycles=%llu\n",
                 sched_id, worker->worker_id, MLX5_SRM_ENABLE_CQE_SIMPLIFY,
                 window_ms, cycles->calls, cycles->active_calls, cycles->cqes,
                 cycles->active_cycles,
                 mlx5_srm_diag_ratio(cycles->active_cycles, cycles->cqes, 1),
+                mlx5_srm_cqe_p99_upper(cycles),
                 cycles->calls - cycles->active_calls, cycles->nonpositive_cycles);
         memset(cycles, 0, sizeof(*cycles));
     }
@@ -1895,6 +2025,7 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
         cycles->active_calls++;
         cycles->cqes += ret;
         cycles->active_cycles += elapsed;
+        mlx5_srm_cqe_hist_add(cycles, elapsed, ret);
     } else {
         cycles->nonpositive_cycles += elapsed;
     }
@@ -2133,7 +2264,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 32;
+const int num_kqps = 256;
 
 static inline int mlx5_srm_effective_kqps(void)
 {
@@ -3921,6 +4052,11 @@ int scheduler_polling(void *sched_data)
                 int batch = credit;
                 int sent = 0;
                 u32 claimed = 0;
+                u64 scan_start;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                struct mlx5_srm_db_timing_batch timing_batch;
+                u64 db_done_tsc;
+#endif
 #if MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
                 size_t sent_bytes = 0;
 #endif
@@ -3951,6 +4087,7 @@ int scheduler_polling(void *sched_data)
 
                 srmc->sched_post_idx =
                     smp_load_acquire(&ctrl_page->db_tail);
+                scan_start = srmc->sched_post_idx;
                 srmc->ini_cb.qp->sq.cur_post =
                     (u32)srmc->sched_post_idx;
                 srmc->ini_cb.qp->sq.head =
@@ -3966,14 +4103,6 @@ int scheduler_polling(void *sched_data)
                                       MLX5_SRM_DB_OWNER_FREE);
                     continue;
                 }
-
-                claimed = mlx5_srm_claim_credit(worker, batch);
-                if (!claimed) {
-                    smp_store_release(&ctrl_page->db_owner,
-                                      MLX5_SRM_DB_OWNER_FREE);
-                    continue;
-                }
-                batch = claimed;
 
                 if (srm_stats_enable)
                     wqe_check_start_cycles = rdtsc_ordered();
@@ -4133,16 +4262,41 @@ int scheduler_polling(void *sched_data)
                         srmc->publish_gap_jiffies = 0;
                         srmc->publish_gap_slot = U64_MAX;
                     }
-                    atomic64_sub(claimed,
-                                 &worker->credit_ctrl->issued_total);
                     smp_store_release(&ctrl_page->db_owner,
                                       MLX5_SRM_DB_OWNER_FREE);
                     continue;
                 }
 
-                if (sent < claimed)
-                    atomic64_sub(claimed - sent,
-                                 &worker->credit_ctrl->issued_total);
+                /*
+                 * Scanning only discovers work; it must not reserve the
+                 * whole available window in issued_total.  Claim after the
+                 * contiguous ready prefix is known, and account only WQEs
+                 * that this DB will actually make outstanding.
+                 *
+                 * Other KQPs can consume worker credit while this KQP is
+                 * scanned.  A partial grant remains valid for the already
+                 * checked prefix, so truncate the local cursors and DB to
+                 * precisely that prefix.  No issued credit is returned on
+                 * the common path because nothing was over-claimed.
+                 */
+                claimed = mlx5_srm_claim_credit(worker, sent);
+                if (!claimed) {
+                    srmc->sched_post_idx = scan_start;
+                    srmc->ini_cb.qp->sq.cur_post = (u32)scan_start;
+                    smp_store_release(&ctrl_page->db_owner,
+                                      MLX5_SRM_DB_OWNER_FREE);
+                    continue;
+                }
+                if (unlikely(claimed < sent)) {
+                    sent = claimed;
+                    srmc->sched_post_idx = scan_start + sent;
+                    srmc->ini_cb.qp->sq.cur_post =
+                        (u32)srmc->sched_post_idx;
+                    idx = (srmc->sched_post_idx - 1) &
+                          (srmc->ini_cb.qp->sq.wqe_cnt - 1);
+                    last_ctrl = mlx5_frag_buf_get_wqe(
+                        &srmc->ini_cb.qp->sq.fbc, idx);
+                }
 
                 srmc->publish_gap_jiffies = 0;
                 srmc->publish_gap_slot = U64_MAX;
@@ -4160,8 +4314,15 @@ int scheduler_polling(void *sched_data)
                         wqe_check_end_cycles - wqe_check_start_cycles;
                 }
 
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                timing_batch = mlx5_srm_timing_db_snapshot(
+                    srmc, srmc->sched_post_idx - sent, sent);
+#endif
                 mlx5_srm_ring_shared_db(srmc->ini_cb.qp, ctrl_page,
                                         sent, last_ctrl);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                db_done_tsc = rdtsc_ordered();
+#endif
                 if (srm_stats_enable) {
                     u64 db_done_cycles = rdtsc_ordered();
 
@@ -4177,6 +4338,10 @@ int scheduler_polling(void *sched_data)
                                   srmc->sched_post_idx);
                 smp_store_release(&ctrl_page->db_owner,
                                   MLX5_SRM_DB_OWNER_FREE);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                mlx5_srm_timing_db_complete(&cq_workspace->db_timing,
+                    &timing_batch, db_done_tsc, id, worker_id);
+#endif
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
                 db_batch_log_calls++;
                 db_batch_log_wqes += sent;
@@ -5769,6 +5934,14 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
         WRITE_ONCE(ctrl_page->bf_offset, cb->qp->bf.offset);
         WRITE_ONCE(ctrl_page->direct_db_batch,
                    MLX5_SRM_DIRECT_DB_MAX_BATCH);
+        /* Immutable capability: independent of runtime diagnostic flags. */
+#if MLX5_SRM_ENABLE_WQE_TIMING
+        WRITE_ONCE(ctrl_page->flags, READ_ONCE(ctrl_page->flags) |
+                   MLX5_SRM_CTRL_F_WQE_TIMING);
+#else
+        WRITE_ONCE(ctrl_page->flags, READ_ONCE(ctrl_page->flags) &
+                   ~MLX5_SRM_CTRL_F_WQE_TIMING);
+#endif
         WRITE_ONCE(ctrl_page->flags,
                    READ_ONCE(ctrl_page->flags) &
                        ~(MLX5_SRM_CTRL_F_DIRECT_DB_STATS |

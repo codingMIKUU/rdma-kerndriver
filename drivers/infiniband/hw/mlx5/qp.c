@@ -1514,7 +1514,11 @@ static int mlx5_ib_alloc_srmc_publish(struct mlx5_ib_srmc *srmc, u32 depth)
 		goto out;
 	}
 
+#if MLX5_SRM_ENABLE_WQE_TIMING
+	npages = DIV_ROUND_UP(MLX5_SRM_TIMING_MAP_BYTES(depth), PAGE_SIZE);
+#else
 	npages = DIV_ROUND_UP((u64)depth * sizeof(u64), PAGE_SIZE);
+#endif
 	pages = kcalloc(npages, sizeof(*pages), GFP_KERNEL);
 	if (!pages) {
 		err = -ENOMEM;
