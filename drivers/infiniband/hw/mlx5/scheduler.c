@@ -397,6 +397,24 @@ static u64 mlx5_ib_srmc_get_publish_token(struct mlx5_ib_srmc *srmc,
 }
 
 #if MLX5_SRM_ENABLE_WQE_TIMING
+void mlx5_srm_timing_publish_kernel_cqe(struct mlx5_ib_srmc *srmc,
+                                        u64 absolute_post, u64 start_tsc)
+{
+    size_t off;
+    struct mlx5_srm_wqe_timestamp *entry;
+
+    if (!srmc || !srmc->publish_pages || !srmc->publish_depth)
+        return;
+    off = MLX5_SRM_TIMING_OFFSET(srmc->publish_depth) +
+        (absolute_post & (srmc->publish_depth - 1)) * sizeof(*entry);
+    if (off / PAGE_SIZE >= srmc->publish_npages)
+        return;
+    entry = (void *)((char *)page_address(
+        srmc->publish_pages[off / PAGE_SIZE]) + off % PAGE_SIZE);
+    WRITE_ONCE(entry->kernel_cqe_tsc, start_tsc);
+    smp_store_release(&entry->kernel_cqe_sequence, absolute_post + 1);
+}
+
 struct mlx5_srm_db_timing_batch {
     u64 post_tsc_sum;
     u32 valid;
@@ -1199,6 +1217,9 @@ struct mlx5_srm_cqe_publish_entry {
     u64 wqe_counter;
     u32 uidx;
     struct mlx5_cqe64 *cqe64;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    struct mlx5_ib_srmc *srmc;
+#endif
 };
 
 struct mlx5_srm_cqe_publish_lane {
@@ -1607,6 +1628,9 @@ static inline bool mlx5_srm_resolve_cqe_ctx(
     entry->wqe_counter = post_idx;
     entry->uidx = uidx;
     entry->cqe64 = NULL;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    entry->srmc = send_srmc;
+#endif
 
     return true;
 }
@@ -1897,6 +1921,9 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
     u64 iter_start;
     u64 total_start;
     u64 post_poll_start;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    u64 cqe_poll_tsc = 0;
+#endif
     struct mlx5_srm_ctrl_complete_entry complete_cache[SRM_CTRL_COMPLETE_CACHE];
     int complete_cache_cnt = 0;
     struct mlx5_srm_cqe_publish_lane *lane;
@@ -1919,6 +1946,9 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
                  srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe,
                  &completed_wqes)))
         {
+#if MLX5_SRM_ENABLE_WQE_TIMING
+            cqe_poll_tsc = rdtsc_ordered();
+#endif
             mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_KERNEL_POLL,
                                         phase_start);
             post_poll_start = mlx5_ib_srm_cq_timing_active(stats) ?
@@ -1950,6 +1980,10 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
                                                 phase_start);
                     continue;
                 }
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                mlx5_srm_timing_publish_kernel_cqe(
+                    entry.srmc, entry.wqe_counter, cqe_poll_tsc);
+#endif
 
                 cqb = entry.cqb;
                 mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_INFO_LOOKUP,
@@ -2264,7 +2298,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 256;
+const int num_kqps = 32;
 
 static inline int mlx5_srm_effective_kqps(void)
 {

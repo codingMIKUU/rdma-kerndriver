@@ -19,7 +19,7 @@
 /* Diagnostics only: disabled builds have no new hot-path instructions.
  * Enable DB_SHARE_STATS in the matching rdma-core mlx5.h as well. */
 #ifndef MLX5_SRM_ENABLE_DB_SHARE_STATS
-#define MLX5_SRM_ENABLE_DB_SHARE_STATS 1
+#define MLX5_SRM_ENABLE_DB_SHARE_STATS 0
 #endif
 #ifndef MLX5_SRM_ENABLE_CQE_CYCLE_STATS
 #define MLX5_SRM_ENABLE_CQE_CYCLE_STATS 0
@@ -88,7 +88,7 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
  */
 #define MLX5_SRM_ENABLE_READY_FASTPATH 0
 
-static u64 LIMIT_BATCHING = 10000;
+static u64 LIMIT_BATCHING = 10000000;
 #define DEBUG_LOG \
     if (debug)    \
     printk
@@ -179,12 +179,19 @@ static_assert(sizeof(struct mlx5_sq_ctrl_page) == 512);
 struct mlx5_srm_wqe_timestamp {
     u64 post_tsc;
     u64 sequence;
+    u64 kernel_cqe_tsc;
+    u64 kernel_cqe_sequence;
 };
 #define MLX5_SRM_TIMING_OFFSET(depth) \
     (((size_t)(depth) * sizeof(u64) + 15U) & ~(size_t)15U)
 #define MLX5_SRM_TIMING_MAP_BYTES(depth) \
     (MLX5_SRM_TIMING_OFFSET(depth) + \
      (size_t)(depth) * sizeof(struct mlx5_srm_wqe_timestamp))
+#if MLX5_SRM_ENABLE_WQE_TIMING
+struct mlx5_ib_srmc;
+void mlx5_srm_timing_publish_kernel_cqe(struct mlx5_ib_srmc *srmc,
+                                        u64 absolute_post, u64 start_tsc);
+#endif
 #define MLX5_SRM_DIRECT_DB_MAX_BATCH 32U
 
 #define MLX5_SRM_PUBLISH_USR_BITS 16

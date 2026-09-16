@@ -38,6 +38,9 @@
 #include "srq.h"
 #include "qp.h"
 #include "scheduler.h"
+#if MLX5_SRM_ENABLE_WQE_TIMING
+#include <asm/tsc.h>
+#endif
 
 extern struct mlx5_ib_sched_group sched_group;
 
@@ -962,6 +965,9 @@ static int mlx5_poll_one_srm_progress(struct mlx5_ib_cq *cq,
 	u32 qpn;
 	u16 wqe_ctr;
 	u8 opcode;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+	u64 cqe_poll_tsc;
+#endif
 
 repoll:
 	cqe = next_cqe_sw(cq);
@@ -970,6 +976,9 @@ repoll:
 	cqe64 = (cq->mcq.cqe_sz == 64) ? cqe : cqe + 64;
 	++cq->mcq.cons_index;
 	rmb();
+#if MLX5_SRM_ENABLE_WQE_TIMING
+	cqe_poll_tsc = rdtsc_ordered();
+#endif
 
 	opcode = get_cqe_opcode(cqe64);
 	if (unlikely(opcode == MLX5_CQE_RESIZE_CQ)) {
@@ -1025,7 +1034,12 @@ repoll:
 		return -EOPNOTSUPP;
 	}
 
-	/* Error information, if any, is visible before the completion cursor. */
+	/* Error information and timing, if enabled, are visible before the
+	 * completion cursor. */
+#if MLX5_SRM_ENABLE_WQE_TIMING
+	mlx5_srm_timing_publish_kernel_cqe(srmc, absolute_post,
+					    cqe_poll_tsc);
+#endif
 	smp_store_release(&srmc->ctrl_page->cons_idx, absolute_post + 1);
 	return 0;
 }
