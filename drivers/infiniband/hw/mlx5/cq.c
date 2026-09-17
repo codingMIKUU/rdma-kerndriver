@@ -125,6 +125,25 @@ static inline u64 mlx5_ib_srmc_complete_post(struct mlx5_ib_qp *qp,
 	 */
 	expected = READ_ONCE(srmc->cq_complete_idx);
 	forward = wqe_ctr - (u16)expected;
+#if MLX5_SRM_ENABLE_REROUTE
+	if (mlx5_srm_rr_maintenance_post(srmc, wqe_ctr, &completed)) {
+		/* The copied-away interval is NOP padding, not application WRs. */
+		if (completed_wqes) *completed_wqes = 1;
+		WRITE_ONCE(srmc->cq_complete_idx, mlx5_srm_rr_seq(completed + 1));
+		wq->tail = (u32)(completed + 1);
+		return completed;
+	}
+	/* V1 is all-signaled, one BB/WR. NOPs left by migration are excluded
+	 * from expected before reuse. A gap/duplicate is corruption, not a
+	 * cumulative completion; never grant credit for an unverified CQE. */
+	if (unlikely(forward)) {
+		pr_err_ratelimited("SRM reroute invalid CQE: qpn=%u expected=%llu counter=%u\n",
+			qp->ibqp.qp_num, expected, wqe_ctr);
+		if (completed_wqes) *completed_wqes = 0;
+		mlx5_srm_rr_fail(srmc);
+		return U64_MAX;
+	}
+#endif
 	if (unlikely(forward >= wq->wqe_cnt)) {
 		/*
 		 * A stale/duplicate 16-bit CQE counter must not be mistaken for
@@ -138,10 +157,14 @@ static inline u64 mlx5_ib_srmc_complete_post(struct mlx5_ib_qp *qp,
 		forward = 0;
 	}
 	completed = expected + forward;
+#if MLX5_SRM_ENABLE_REROUTE
+	completed = mlx5_srm_rr_seq(completed);
+#endif
 	if (completed_wqes)
 		*completed_wqes = (u32)forward + 1;
 
-	WRITE_ONCE(srmc->cq_complete_idx, completed + 1);
+	WRITE_ONCE(srmc->cq_complete_idx,
+		MLX5_SRM_ENABLE_REROUTE ? mlx5_srm_rr_seq(completed + 1) : completed + 1);
 	wq->tail = (u32)(completed + 1);
 
 	return completed;
@@ -565,6 +588,8 @@ repoll:
 			 */
 			absolute_post = mlx5_ib_srmc_complete_post(*cur_qp, wq,
 								 wqe_ctr, NULL);
+			if (MLX5_SRM_ENABLE_REROUTE && absolute_post == U64_MAX)
+				return -EIO;
 			kqp_idx = (*cur_qp)->srmc_owner->srmc_idx;
 			wc->wr_id = mlx5_srm_make_wrid(kqp_idx, absolute_post);
 			wc->status = IB_WC_SUCCESS;
@@ -611,6 +636,8 @@ repoll:
 
 				absolute_post = mlx5_ib_srmc_complete_post(
 					*cur_qp, wq, wqe_ctr, NULL);
+				if (MLX5_SRM_ENABLE_REROUTE && absolute_post == U64_MAX)
+					return -EIO;
 				kqp_idx = (*cur_qp)->srmc_owner->srmc_idx;
 				wc->wr_id = mlx5_srm_make_wrid(kqp_idx,
 							       absolute_post);
@@ -732,6 +759,8 @@ repoll:
 			absolute_post = mlx5_ib_srmc_complete_post(*cur_qp, wq,
 								 wqe_ctr,
 								 completed_wqes);
+			if (MLX5_SRM_ENABLE_REROUTE && absolute_post == U64_MAX)
+				return -EIO;
 			kqp_idx = (*cur_qp)->srmc_owner->srmc_idx;
 			wc->wr_id = mlx5_srm_make_wrid(kqp_idx, absolute_post);
 			wc->status = IB_WC_SUCCESS;
@@ -780,6 +809,8 @@ repoll:
 				absolute_post = mlx5_ib_srmc_complete_post(
 					*cur_qp, wq, wqe_ctr,
 					completed_wqes);
+				if (MLX5_SRM_ENABLE_REROUTE && absolute_post == U64_MAX)
+					return -EIO;
 				kqp_idx = (*cur_qp)->srmc_owner->srmc_idx;
 				wc->wr_id = mlx5_srm_make_wrid(kqp_idx,
 							       absolute_post);
@@ -952,6 +983,13 @@ struct mlx5_srm_cq_progress_batch {
 static inline void
 mlx5_srm_flush_cq_progress(struct mlx5_srm_cq_progress_batch *batch)
 {
+#if MLX5_SRM_ENABLE_REROUTE
+	/* Publish logical prefixes, not the physical cursor across skipped slots. */
+	mlx5_srm_rr_flush_native(&sched_group.scheds[0]);
+	batch->head = NULL;
+	batch->cqes = 0;
+	return;
+#endif
 	struct mlx5_ib_srmc *srmc = batch->head;
 
 	while (srmc) {
@@ -1060,6 +1098,8 @@ repoll:
 	case MLX5_CQE_REQ:
 		absolute_post = mlx5_ib_srmc_complete_post(
 			*cur_qp, wq, wqe_ctr, completed_wqes);
+		if (MLX5_SRM_ENABLE_REROUTE && absolute_post == U64_MAX)
+			return -EIO;
 		break;
 	case MLX5_CQE_REQ_ERR:
 #if MLX5_SRM_CQE_PUBLISH_BATCH > 1
@@ -1070,6 +1110,8 @@ repoll:
 		mlx5_handle_error_cqe(dev, err_cqe, &error_wc);
 		absolute_post = mlx5_ib_srmc_complete_post(
 			*cur_qp, wq, wqe_ctr, completed_wqes);
+		if (MLX5_SRM_ENABLE_REROUTE && absolute_post == U64_MAX)
+			return -EIO;
 		WRITE_ONCE(srmc->ctrl_page->completion_error_idx,
 			   absolute_post + 1);
 		WRITE_ONCE(srmc->ctrl_page->completion_error_status,
@@ -1084,6 +1126,24 @@ repoll:
 		return -EOPNOTSUPP;
 	}
 
+#if MLX5_SRM_ENABLE_REROUTE
+	/* Migration maps a physical completion back to its logical origin.
+	 * This publishes only completed prefixes, not the skipped source range. */
+	mlx5_srm_rr_complete(&srmc, &absolute_post, error_wc.status,
+			      error_wc.vendor_err,
+#if MLX5_SRM_ENABLE_WQE_TIMING
+			      cqe_poll_tsc
+#else
+			      0
+#endif
+			      );
+#if MLX5_SRM_CQE_PUBLISH_BATCH > 1
+	if (opcode == MLX5_CQE_REQ_ERR ||
+	    ++batch->cqes == MLX5_SRM_CQE_PUBLISH_BATCH)
+		mlx5_srm_flush_cq_progress(batch);
+#endif
+	return opcode == MLX5_CQE_REQ_ERR ? 1 : 0;
+#endif
 	/* Error information and timing, if enabled, are visible before the
 	 * completion cursor. */
 #if MLX5_SRM_ENABLE_WQE_TIMING

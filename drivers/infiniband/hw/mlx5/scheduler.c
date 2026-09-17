@@ -1217,6 +1217,9 @@ struct mlx5_srm_cqe_publish_entry {
     u64 wqe_counter;
     u32 uidx;
     struct mlx5_cqe64 *cqe64;
+#if MLX5_SRM_ENABLE_REROUTE
+    u32 origin_qpn;
+#endif
 #if MLX5_SRM_ENABLE_WQE_TIMING
     struct mlx5_ib_srmc *srmc;
 #endif
@@ -1628,6 +1631,9 @@ static inline bool mlx5_srm_resolve_cqe_ctx(
     entry->wqe_counter = post_idx;
     entry->uidx = uidx;
     entry->cqe64 = NULL;
+#if MLX5_SRM_ENABLE_REROUTE
+    entry->origin_qpn = send_srmc->ini_cb.qp->ibqp.qp_num;
+#endif
 #if MLX5_SRM_ENABLE_WQE_TIMING
     entry->srmc = send_srmc;
 #endif
@@ -1961,6 +1967,23 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
             for (i = 0; i < cqe_num; i++)
             {
                 struct mlx5_srm_cqe_publish_entry entry;
+#if MLX5_SRM_ENABLE_REROUTE
+                struct mlx5_ib_srmc *origin = mlx5_ib_sched_find_srmc_idx(
+                    sched, mlx5_srm_wrid_kqp(wc[i].wr_id));
+                u64 origin_post;
+                if (!origin || !origin->rr) continue;
+                origin_post = mlx5_srm_extend_post48(origin->cq_complete_idx,
+                    mlx5_srm_wrid_post(wc[i].wr_id));
+                if (mlx5_srm_rr_complete(&origin, &origin_post, wc[i].status,
+                    wc[i].vendor_err,
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                    cqe_poll_tsc
+#else
+                    0
+#endif
+                    ) == 2) continue; /* SQ-retirement NOP, no user CQE. */
+                wc[i].wr_id = mlx5_srm_make_wrid(origin->srmc_idx, origin_post);
+#endif
 
                 iter_start = mlx5_ib_srm_cq_timing_active(stats) ?
                                  ktime_get_ns() : 0;
@@ -1972,9 +1995,11 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
                 if (!mlx5_srm_resolve_cqe_ctx(sched, sq_ctrl_pool,
                                               wc[i].wr_id, workspace,
                                               &entry)) {
+#if !MLX5_SRM_ENABLE_REROUTE
                     mlx5_srm_complete_wrid_ctrl(
                         sq_ctrl_pool, wc[i].wr_id, complete_cache,
                         &complete_cache_cnt);
+#endif
                     mlx5_ib_srm_record_cq_phase(stats,
                                                 SRM_CQ_PHASE_INFO_LOOKUP,
                                                 phase_start);
@@ -2005,6 +2030,9 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
                               ktime_get_ns() : 0;
             mlx5_srm_ctrl_complete_flush(complete_cache,
                                          &complete_cache_cnt);
+#if MLX5_SRM_ENABLE_REROUTE
+            mlx5_srm_rr_flush_native(sched);
+#endif
             mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_CTRL_COMPLETE,
                                         phase_start);
             mlx5_ib_srm_record_cq_post_poll(stats, post_poll_start);
@@ -2300,9 +2328,15 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
 
 const int num_kqps = 32;
 
+#include "reroute.inc"
+
 static inline int mlx5_srm_effective_kqps(void)
 {
+#if MLX5_SRM_ENABLE_REROUTE
+    return num_kqps * MLX5_SRM_REROUTE_PATHS;
+#else
     return num_kqps * MLX5_SRM_KERNEL_QP_LEVELS;
+#endif
 }
 
 static inline u32 mlx5_srm_kqp_owner(const struct mlx5_ib_sched *sched,
@@ -2490,6 +2524,12 @@ static inline void mlx5_srm_flush_cqe_publish_lane(
 
         memcpy(ucqe, cqe64, sizeof(*ucqe64) - 1);
         ucqe64->srqn = htonl(lane->entries[i].uidx);
+#if MLX5_SRM_ENABLE_REROUTE
+        ucqe64->sop_drop_qpn = cpu_to_be32(
+            (be32_to_cpu(ucqe64->sop_drop_qpn) & 0xff000000) |
+            lane->entries[i].origin_qpn);
+        ucqe64->wqe_counter = cpu_to_be16(lane->entries[i].wqe_counter);
+#endif
         smp_store_release(&ucqe64->op_own,
                           (cqe64->op_own & (~0xf)) | op_own);
 
@@ -2506,10 +2546,12 @@ static inline void mlx5_srm_flush_cqe_publish_lane(
 
     phase_start = mlx5_ib_srm_cq_timing_active(stats) ?
                       ktime_get_ns() : 0;
+#if !MLX5_SRM_ENABLE_REROUTE
     for (i = 0; i < lane->count; i++)
         mlx5_srm_ctrl_complete_defer(
             complete_cache, complete_cache_cnt,
             lane->entries[i].ctrl_page, lane->entries[i].wqe_counter);
+#endif
     mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_CTRL_COMPLETE,
                                 phase_start);
 
@@ -3566,6 +3608,11 @@ int scheduler_polling(void *sched_data)
     kqp_begin = worker->kqp_begin;
     kqp_end = worker->kqp_end;
     kqp_count = kqp_end - kqp_begin;
+#if MLX5_SRM_ENABLE_REROUTE
+    /* Ring entries are virtual active slots, never the spare pool. */
+    kqp_count = num_kqps * 2;
+    kqp_end = kqp_count;
+#endif
     worker_limit = worker->limit_batch;
 
     poll_ring_next = mlx5_ib_srm_kvcalloc_node(
@@ -3740,6 +3787,9 @@ int scheduler_polling(void *sched_data)
     bool direct_db_stats_active = false;
     struct mlx5_srm_direct_db_snapshot direct_db_stats_previous = {0};
     unsigned long direct_db_stats_last_report = jiffies;
+#if MLX5_SRM_ENABLE_REROUTE
+    unsigned long rr_last_reap = jiffies;
+#endif
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
     u64 db_batch_log_scans = 0;
     u64 db_batch_log_calls = 0;
@@ -3821,6 +3871,12 @@ int scheduler_polling(void *sched_data)
         mlx5_srm_direct_db_stats_tick(
             id, worker, sq_ctrl_pool, &direct_db_stats_active,
             &direct_db_stats_previous, &direct_db_stats_last_report);
+#if MLX5_SRM_ENABLE_REROUTE
+        if (time_after_eq(jiffies, rr_last_reap + msecs_to_jiffies(10))) {
+            rr_last_reap = jiffies;
+            mlx5_srm_rr_reap_users(sched, false);
+        }
+#endif
 
         for (poll_step = 0; poll_step < kqp_count; poll_step++) {
             bool current_from_hot = false;
@@ -3833,7 +3889,7 @@ int scheduler_polling(void *sched_data)
              * head after selection naturally moves the processed KQP to the
              * tail.  With no changes this is exactly round-robin.
              */
-            if (likely(hot_ctrl)) {
+            if (likely(hot_ctrl) && !MLX5_SRM_ENABLE_REROUTE) {
                 u64 hot_hint = smp_load_acquire(
                     &hot_ctrl->latest_hot_hint);
 
@@ -3854,6 +3910,10 @@ int scheduler_polling(void *sched_data)
             }
             i = poll_ring_head;
             poll_ring_head = poll_ring_next[i];
+#if MLX5_SRM_ENABLE_REROUTE
+            i = rr_schedule(sched, i % (num_kqps * 2));
+            if (i == U32_MAX) continue;
+#endif
 
 
             {
@@ -4121,6 +4181,13 @@ int scheduler_polling(void *sched_data)
 
                 srmc->sched_post_idx =
                     smp_load_acquire(&ctrl_page->db_tail);
+#if MLX5_SRM_ENABLE_REROUTE
+                if (!mlx5_srm_rr_can_db(srmc, srmc->sched_post_idx)) {
+                    smp_store_release(&ctrl_page->db_owner,
+                                      MLX5_SRM_DB_OWNER_FREE);
+                    continue;
+                }
+#endif
                 scan_start = srmc->sched_post_idx;
                 srmc->ini_cb.qp->sq.cur_post =
                     (u32)srmc->sched_post_idx;
@@ -4185,6 +4252,10 @@ int scheduler_polling(void *sched_data)
 
                     idx = srmc->sched_post_idx &
                           (srmc->ini_cb.qp->sq.wqe_cnt - 1);
+#if MLX5_SRM_ENABLE_REROUTE
+                    if (!mlx5_srm_rr_can_db(srmc, srmc->sched_post_idx))
+                        break;
+#endif
                     ctrl = mlx5_frag_buf_get_wqe(&srmc->ini_cb.qp->sq.fbc,
                                                   idx);
                     publish_token =
@@ -4354,6 +4425,16 @@ int scheduler_polling(void *sched_data)
 #endif
                 mlx5_srm_ring_shared_db(srmc->ini_cb.qp, ctrl_page,
                                         sent, last_ctrl);
+#if MLX5_SRM_ENABLE_REROUTE
+                {
+                    u32 n;
+                    u64 bytes = READ_ONCE(ctrl_page->route.posted_bytes);
+                    for (n = 0; n < sent; n++)
+                        bytes += rr_bytes(srmc, scan_start + n);
+                    smp_store_release(&ctrl_page->route.posted_bytes, bytes);
+                    srmc->sched_post_idx = mlx5_srm_rr_seq(srmc->sched_post_idx);
+                }
+#endif
 #if MLX5_SRM_ENABLE_WQE_TIMING
                 db_done_tsc = rdtsc_ordered();
 #endif
@@ -4512,6 +4593,17 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
     u32 total_kqps = mlx5_srm_effective_kqps();
     char thread_info[64];
 
+#if MLX5_SRM_ENABLE_REROUTE
+    if (srm_sched_cpu_num != 1 || MLX5_SRM_ENABLE_LARGE_KERNEL_QP ||
+        MLX5_SRM_ENABLE_READY_FASTPATH || NUM_SCHED != 1) {
+        pr_err("SRM reroute requires one worker, one scheduler, no size split/ready fastpath\n");
+        return -EOPNOTSUPP;
+    }
+    if (total_kqps > NUM_SRMC) return -EINVAL;
+    pr_info("SRM reroute groups=%d active=%d spare=%d physical=%u ABI=%x\n",
+        num_kqps, num_kqps * 2, num_kqps * 2, total_kqps,
+        MLX5_SRM_REROUTE_ABI | MLX5_SRM_ENABLE_CQE_SIMPLIFY << 16);
+#endif
     if (srm_numa_node < 0 || srm_numa_node >= MAX_NUMNODES ||
         !node_online(srm_numa_node)) {
         pr_err("hollow RC NUMA node %d is not online\n", srm_numa_node);
@@ -4590,6 +4682,10 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
         struct mlx5_ib_sched *sched = &sched_group->scheds[i];
 
         sched->id = i;
+#if MLX5_SRM_ENABLE_REROUTE
+        ret = rr_sched_init(sched);
+        if (ret) goto err;
+#endif
         memset(sched->srmc_tb, 0, sizeof(sched->srmc_tb));
         memset(sched->srmc_by_idx, 0, sizeof(sched->srmc_by_idx));
         sched->srmc_cnt = 0;
@@ -4670,8 +4766,12 @@ err:
     for (j = 0; j < num; j++) {
         struct mlx5_ib_sched *sched = &sched_group->scheds[j];
 
-        if (!sched->workers)
+        if (!sched->workers) {
+#if MLX5_SRM_ENABLE_REROUTE
+            rr_sched_free(sched);
+#endif
             continue;
+        }
         wake_up_all(&sched->init_wait);
         for (worker_id = 0; worker_id < sched->worker_count; worker_id++) {
             struct mlx5_ib_sched_worker *worker =
@@ -4685,6 +4785,9 @@ err:
         kfree(sched->workers);
         sched->workers = NULL;
         sched->worker_count = 0;
+#if MLX5_SRM_ENABLE_REROUTE
+        rr_sched_free(sched);
+#endif
     }
     kfree(sched_group->scheds);
     sched_group->scheds = NULL;
@@ -4701,6 +4804,12 @@ void mlx5_ib_sched_stop(struct mlx5_ib_sched_group *sched_group)
     if (!sched_group || !sched_group->scheds ||
         sched_group->num_sched <= 0)
         return;
+
+#if MLX5_SRM_ENABLE_REROUTE
+    mutex_lock(&sched_group->owner_lock);
+    WRITE_ONCE(sched_group->owner_stopping, true);
+    mutex_unlock(&sched_group->owner_lock);
+#endif
 
     for (i = 0; i < sched_group->num_sched; i++) {
         sched = &sched_group->scheds[i];
@@ -4719,6 +4828,17 @@ void mlx5_ib_sched_stop(struct mlx5_ib_sched_group *sched_group)
             kthread_stop(worker->task);
             worker->task = NULL;
         }
+#if MLX5_SRM_ENABLE_REROUTE
+        /* CQ/transaction references are quiescent before mappings are freed.
+         * User contexts must also be closed before unloading, as for verbs. */
+        if (sched->rr_groups) {
+            int g;
+            for (g = 0; g < num_kqps; g++)
+                rr_fail_group(&sched->rr_groups[g], "scheduler-stop");
+            mlx5_srm_rr_flush_native(sched);
+            mlx5_srm_rr_reap_users(sched, true);
+        }
+#endif
     }
 }
 
@@ -4857,6 +4977,9 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
                 continue;
 
             mlx5_ib_destroy_srmc_ini(srmc);
+#if MLX5_SRM_ENABLE_REROUTE
+            rr_path_free(srmc);
+#endif
             mlx5_ib_free_srmc_publish(srmc);
             if (srmc->wqe_infos) {
                 for (k = 0; k < SQ_DEPTH; k++) {
@@ -4872,6 +4995,9 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
             kfree(srmc);
         }
         memset(sched->srmc_by_idx, 0, sizeof(sched->srmc_by_idx));
+#if MLX5_SRM_ENABLE_REROUTE
+        rr_sched_free(sched);
+#endif
         sched->srmc_cnt = 0;
         sched->ready_srmc_cnt = 0;
     }
@@ -5213,6 +5339,15 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
 
 	    if (!has_srmc)
 	    {
+#if MLX5_SRM_ENABLE_REROUTE
+            /* This baseline has one node-level initiator pool. Never
+             * overwrite live group pointers with another peer's pool. */
+            if (sched->srmc_cnt) {
+                pr_err("SRM reroute v1 supports one remote GID per sender pool\n");
+                mutex_unlock(&sched->srmc_lock);
+                return -EOPNOTSUPP;
+            }
+#endif
 	        if (sched->srmc_tb[j] != NULL)
 	        {
 	            pr_err("srmc queue is full\n");
@@ -5253,6 +5388,15 @@ int is_xrc_exists(struct mlx5_ib_sched *sched, struct ib_pd *pd, union ib_gid *d
             ret = create_srmc_qp_cm(srmc, pd, dgid, MESSAGE_SIZE_SMALL,
                                     sched->id, depth);
             pr_info("create_srmc_qp_cm ret:%d\n", ret);
+#if MLX5_SRM_ENABLE_REROUTE
+            if (ret > 0 && srmc->ini_cb.qp) {
+                int rr_ret = rr_path_init(sched, srmc);
+                if (rr_ret) {
+                    mlx5_ib_destroy_srmc_ini(srmc);
+                    ret = rr_ret;
+                }
+            }
+#endif
             mutex_lock(&sched->srmc_lock);
             if (ret <= 0 || !srmc->ini_cb.qp) {
                 ret = ret ?: -EINVAL;

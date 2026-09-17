@@ -3,6 +3,7 @@
 #include <linux/module.h>
 #include <linux/net.h>
 #include <linux/in.h>
+#include <linux/inet.h>
 #include <linux/socket.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>

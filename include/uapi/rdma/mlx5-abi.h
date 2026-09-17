@@ -464,6 +464,40 @@ struct mlx5_ib_modify_qp {
 	__u32			   ece_options;
 };
 
+struct mlx5_ib_srm_path_resp {
+	__u32	response_length;
+	__u32	dctn;
+	__u32   ece_options;
+	__u32   reserved;
+	__u32	comp_mask;
+	__u64	sq_state_mmap_offset;
+	__u32	sq_state_mmap_len;
+	__u32	sq_state_slot_idx;
+	__u64	sq_mmap_offset;
+	__u32	sq_mmap_len;
+	__u32	reserved1;
+	__u64	publish_mmap_offset;
+	__u32	publish_mmap_len;
+	__u32	publish_depth;
+	__u32	kernel_qpn;
+	__u32	kernel_sq_wqe_cnt;
+	__u32	kernel_sq_wqe_shift;
+	__u32	kernel_sq_max_post;
+	__u32	kernel_sq_max_gs;
+	__u32	kernel_sq_qp_state_max_gs;
+	__u32	kernel_max_inline_data;
+	__u64	farm_uar_mmap_offset;
+	__u32	farm_uar_mmap_len;
+	__u32	farm_uar_reg_offset;
+	__u64	farm_db_mmap_offset;
+	__u32	farm_db_mmap_len;
+	__u32	farm_db_offset;
+	__u32	farm_bf_buf_size;
+	__u32	farm_credit_slot_idx;
+	__u32	farm_direct_db_batch;
+	__u32	farm_reserved;
+};
+
 struct mlx5_ib_modify_qp_resp {
 	__u32	response_length;
 	__u32	dctn;
@@ -512,6 +546,11 @@ struct mlx5_ib_modify_qp_resp {
 	__u32	large_kernel_sq_qp_state_max_gs;
 	__u32	large_kernel_max_inline_data;
 	__u32	large_reserved3;
+	__u32 reroute_abi;
+	__u32 reroute_paths;
+	__u32 reroute_route_slot;
+	__u32 reroute_completion_offset;
+	struct mlx5_ib_srm_path_resp reroute[4];
 };
 
 enum mlx5_ib_modify_qp_resp_mask {

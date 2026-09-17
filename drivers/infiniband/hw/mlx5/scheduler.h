@@ -6,6 +6,7 @@
 #include <linux/types.h>
 #include <linux/wait.h>
 #include <rdma/rdma_cm.h>
+#include <uapi/rdma/mlx5-srm-reroute.h>
 
 /* Must match rdma-core/providers/mlx5/mlx5.h. Keep the native CQE path
  * when disabled; this is the pre-MVAPICH fixed-window implementation. */
@@ -167,9 +168,10 @@ struct mlx5_sq_ctrl_page {
 	__u8 hot_hint_pad[56];
 	/* Power-of-two stride: a slot must never cross discontiguous pool pages. */
 	struct mlx5_srm_db_share db_share;
-	__u8 slot_pad[128];
+	struct mlx5_srm_route_ctrl route;
 } CACHELINE_ALIGNED_USER;
 static_assert(sizeof(struct mlx5_sq_ctrl_page) == 512);
+static_assert(offsetof(struct mlx5_sq_ctrl_page, route) == 384);
 
 #define MLX5_SRM_DB_OWNER_FREE   0U
 #define MLX5_SRM_DB_OWNER_USER   1U
@@ -255,7 +257,11 @@ static inline u64 mlx5_srm_wrid_post(u64 wrid)
  */
 static inline s64 mlx5_srm_seq_delta(u64 lhs, u64 rhs)
 {
+#if MLX5_SRM_ENABLE_REROUTE
+    return mlx5_srm_rr_delta(lhs, rhs);
+#else
     return (s64)(lhs - rhs);
+#endif
 }
 
 static inline bool mlx5_srm_seq_after(u64 lhs, u64 rhs)
@@ -271,10 +277,8 @@ static inline u64 mlx5_srm_extend_post48(u64 reference, u64 post48)
                  (reference & MLX5_SRM_WRID_POST_MASK)) &
                 MLX5_SRM_WRID_POST_MASK;
 
-    if (delta >= half)
-        return reference - (period - delta);
-
-    return reference + delta;
+    reference = delta >= half ? reference - (period - delta) : reference + delta;
+    return MLX5_SRM_ENABLE_REROUTE ? mlx5_srm_rr_seq(reference) : reference;
 }
 
 struct mlx5_ib_cqbuf
@@ -367,6 +371,9 @@ struct mlx5_wqe_info
 };
 struct mlx5_ib_srmc
 {
+#if MLX5_SRM_ENABLE_REROUTE
+    struct mlx5_srm_rr_path *rr;
+#endif
     struct srm_cb ini_cb;
     struct srm_cb tgt_cb;
     union ib_gid dgid;
@@ -410,6 +417,10 @@ struct mlx5_ib_sched_worker
 } CACHELINE_ALIGNED;
 struct mlx5_ib_sched
 {
+#if MLX5_SRM_ENABLE_REROUTE
+    struct mlx5_srm_rr_group *rr_groups;
+    struct mlx5_ib_srmc *rr_publish_head;
+#endif
     struct mlx5_ib_sched_worker *workers;
     u32 worker_count;
     struct mutex srmc_lock;
@@ -534,4 +545,13 @@ int polling_cqe(void *data);
 int mlx5_ib_register_external_table(void *table, size_t size, struct page **pages, void *level_table, size_t level_size, struct page **level_pages,
                                            void *xrc_table, size_t xrc_size, struct page **xrc_pages, int xrc_qp_num_per_srm);
 int srm_map_bf(struct mlx5_ib_sched_group *sched_group,struct mlx5_ib_create_qp *ucmd,struct mlx5_ib_dev *dev);
+#if MLX5_SRM_ENABLE_REROUTE
+void mlx5_srm_rr_fail(struct mlx5_ib_srmc *s);
+void mlx5_srm_rr_reap_users(struct mlx5_ib_sched *sched, bool stopped);
+bool mlx5_srm_rr_maintenance_post(struct mlx5_ib_srmc *s, u16 counter, u64 *post);
+int mlx5_srm_rr_complete(struct mlx5_ib_srmc **srmc, u64 *post,
+                         u32 status, u32 vendor, u64 tsc);
+bool mlx5_srm_rr_can_db(struct mlx5_ib_srmc *srmc, u64 post);
+void mlx5_srm_rr_flush_native(struct mlx5_ib_sched *sched);
+#endif
 #endif /* _MLX5_IB_SCHEDULER_H */
