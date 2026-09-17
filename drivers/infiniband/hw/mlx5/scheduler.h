@@ -16,6 +16,18 @@
 #error "MLX5_SRM_ENABLE_CQE_SIMPLIFY must be 0 or 1"
 #endif
 
+/* Kernel-only watermark coalescing; no rdma-core ABI/config change needed.
+ * 1 preserves immediate per-CQE publication. Larger values flush at this
+ * many CQEs, CQ empty, or poll return; they never wait for a full batch.
+ * This does not change the scheduler's poll budget or credit-return cadence.
+ */
+#ifndef MLX5_SRM_CQE_PUBLISH_BATCH
+#define MLX5_SRM_CQE_PUBLISH_BATCH 1
+#endif
+#if MLX5_SRM_CQE_PUBLISH_BATCH < 1 || MLX5_SRM_CQE_PUBLISH_BATCH > 0xffffffffU
+#error "MLX5_SRM_CQE_PUBLISH_BATCH must fit a positive u32"
+#endif
+
 /* Diagnostics only: disabled builds have no new hot-path instructions.
  * Enable DB_SHARE_STATS in the matching rdma-core mlx5.h as well. */
 #ifndef MLX5_SRM_ENABLE_DB_SHARE_STATS
@@ -88,7 +100,7 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
  */
 #define MLX5_SRM_ENABLE_READY_FASTPATH 0
 
-static u64 LIMIT_BATCHING = 10000000;
+static u64 LIMIT_BATCHING = 1000000;
 #define DEBUG_LOG \
     if (debug)    \
     printk
@@ -375,6 +387,12 @@ struct mlx5_ib_srmc
     unsigned long last_stall_warn_jiffies;
     unsigned long publish_gap_jiffies;
     u64 publish_gap_slot;
+#if MLX5_SRM_ENABLE_CQE_SIMPLIFY && MLX5_SRM_CQE_PUBLISH_BATCH > 1
+    /* Private to this KQP's send-CQ poller under cq->lock. The SRMC is
+     * zero-allocated; every poll exit drains and clears these links. */
+    struct mlx5_ib_srmc *cq_publish_next;
+    bool cq_publish_pending;
+#endif
 } CACHELINE_ALIGNED;
 struct mlx5_ib_sched;
 struct mlx5_ib_sched_worker

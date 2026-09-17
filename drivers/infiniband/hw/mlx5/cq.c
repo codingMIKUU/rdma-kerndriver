@@ -943,6 +943,49 @@ out:
 }
 
 #if MLX5_SRM_ENABLE_CQE_SIMPLIFY
+#if MLX5_SRM_CQE_PUBLISH_BATCH > 1
+struct mlx5_srm_cq_progress_batch {
+	struct mlx5_ib_srmc *head;
+	u32 cqes;
+};
+
+static inline void
+mlx5_srm_flush_cq_progress(struct mlx5_srm_cq_progress_batch *batch)
+{
+	struct mlx5_ib_srmc *srmc = batch->head;
+
+	while (srmc) {
+		struct mlx5_ib_srmc *next = srmc->cq_publish_next;
+
+		srmc->cq_publish_next = NULL;
+		srmc->cq_publish_pending = false;
+		/* The private cursor was advanced for every CQE, including across
+		 * counter wrap. Never use a numeric max of the absolute indices.
+		 * Publish all preceding error/timestamp stores with this cursor. */
+		smp_store_release(&srmc->ctrl_page->cons_idx,
+				  READ_ONCE(srmc->cq_complete_idx));
+		srmc = next;
+	}
+	batch->head = NULL;
+	batch->cqes = 0;
+}
+
+static inline void
+mlx5_srm_queue_cq_progress(struct mlx5_srm_cq_progress_batch *batch,
+			  struct mlx5_ib_srmc *srmc)
+{
+	/* Directly mark the already-resolved KQP: no search or per-poll scan
+	 * of all KQPs. Interleaved completions for it share one list entry. */
+	if (!srmc->cq_publish_pending) {
+		srmc->cq_publish_pending = true;
+		srmc->cq_publish_next = batch->head;
+		batch->head = srmc;
+	}
+	if (++batch->cqes == MLX5_SRM_CQE_PUBLISH_BATCH)
+		mlx5_srm_flush_cq_progress(batch);
+}
+#endif
+
 /*
  * Hollow RC completion-watermark poller.  The hardware CQ is private to the
  * scheduler KQPs, so successful requestor CQEs need neither an ib_wc nor a
@@ -951,6 +994,9 @@ out:
  */
 static int mlx5_poll_one_srm_progress(struct mlx5_ib_cq *cq,
 				      struct mlx5_ib_qp **cur_qp,
+#if MLX5_SRM_CQE_PUBLISH_BATCH > 1
+				      struct mlx5_srm_cq_progress_batch *batch,
+#endif
 				      u32 *completed_wqes)
 {
 	struct mlx5_ib_dev *dev = to_mdev(cq->ibcq.device);
@@ -1016,6 +1062,10 @@ repoll:
 			*cur_qp, wq, wqe_ctr, completed_wqes);
 		break;
 	case MLX5_CQE_REQ_ERR:
+#if MLX5_SRM_CQE_PUBLISH_BATCH > 1
+		/* Publish prior successes before touching error information. */
+		mlx5_srm_flush_cq_progress(batch);
+#endif
 		err_cqe = (struct mlx5_err_cqe *)cqe64;
 		mlx5_handle_error_cqe(dev, err_cqe, &error_wc);
 		absolute_post = mlx5_ib_srmc_complete_post(
@@ -1040,7 +1090,18 @@ repoll:
 	mlx5_srm_timing_publish_kernel_cqe(srmc, absolute_post,
 					    cqe_poll_tsc);
 #endif
+#if MLX5_SRM_CQE_PUBLISH_BATCH > 1
+	if (unlikely(opcode == MLX5_CQE_REQ_ERR)) {
+		/* Do not coalesce errors away or keep polling flush-error CQEs
+		 * over this error record before giving userspace a chance to run.
+		 * Positive return means this CQE completed, but stop this poll. */
+		smp_store_release(&srmc->ctrl_page->cons_idx, absolute_post + 1);
+		return 1;
+	}
+	mlx5_srm_queue_cq_progress(batch, srmc);
+#else
 	smp_store_release(&srmc->ctrl_page->cons_idx, absolute_post + 1);
+#endif
 	return 0;
 }
 
@@ -1054,6 +1115,9 @@ int mlx5_ib_poll_srm_progress(struct ib_cq *ibcq, int num_entries,
 	unsigned long flags;
 	u32 completed_sum = 0;
 	int npolled;
+#if MLX5_SRM_CQE_PUBLISH_BATCH > 1
+	struct mlx5_srm_cq_progress_batch batch = {};
+#endif
 
 	if (unlikely(mdev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR))
 		return -EIO;
@@ -1064,22 +1128,39 @@ int mlx5_ib_poll_srm_progress(struct ib_cq *ibcq, int num_entries,
 		int ret;
 
 		ret = mlx5_poll_one_srm_progress(cq, &cur_qp,
+#if MLX5_SRM_CQE_PUBLISH_BATCH > 1
+						 &batch,
+#endif
 						 &completed_one);
 		if (ret == -EAGAIN)
 			break;
-		if (unlikely(ret)) {
+		if (unlikely(ret < 0)) {
 			/* mlx5_poll_one_srm_progress() consumed the bad CQE before
 			 * discovering the error; publish the new CQ consumer index. */
 			pr_warn_ratelimited(
 				"hollow RC CQ progress parse failed: error=%d\n",
 				ret);
+#if MLX5_SRM_CQE_PUBLISH_BATCH > 1
+			mlx5_srm_flush_cq_progress(&batch);
+#endif
 			mlx5_cq_set_ci(&cq->mcq);
 			spin_unlock_irqrestore(&cq->lock, flags);
 			*completed_wqes = completed_sum;
 			return npolled ? npolled : ret;
 		}
 		completed_sum += completed_one;
+#if MLX5_SRM_CQE_PUBLISH_BATCH > 1
+		if (unlikely(ret > 0)) {
+			++npolled;
+			break;
+		}
+#endif
 	}
+#if MLX5_SRM_CQE_PUBLISH_BATCH > 1
+	/* Includes short/empty-CQ polls and budget exhaustion. Nothing can
+	 * remain queued when releasing cq->lock or returning global credits. */
+	mlx5_srm_flush_cq_progress(&batch);
+#endif
 	if (npolled)
 		mlx5_cq_set_ci(&cq->mcq);
 	spin_unlock_irqrestore(&cq->lock, flags);
