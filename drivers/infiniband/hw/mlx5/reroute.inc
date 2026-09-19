@@ -5,14 +5,18 @@
 #if MLX5_SRM_ENABLE_REROUTE
 static bool srm_reroute_enable=true;
 module_param(srm_reroute_enable, bool, 0644);
-static unsigned int srm_reroute_interval_ms = 1;
-module_param(srm_reroute_interval_ms, uint, 0644);
+static unsigned int srm_reroute_interval_us = 1000;
+module_param(srm_reroute_interval_us, uint, 0644);
+MODULE_PARM_DESC(srm_reroute_interval_us,
+                 "Multi-KQP reroute detector interval in microseconds");
 static unsigned int srm_reroute_ratio_gap = 1;
 module_param(srm_reroute_ratio_gap, uint, 0644);
 static unsigned int srm_reroute_bad_windows = 3;
 module_param(srm_reroute_bad_windows, uint, 0644);
-static unsigned int srm_reroute_cooldown_ms = 1;
-module_param(srm_reroute_cooldown_ms, uint, 0644);
+static unsigned int srm_reroute_cooldown_us = 1000;
+module_param(srm_reroute_cooldown_us, uint, 0644);
+MODULE_PARM_DESC(srm_reroute_cooldown_us,
+                 "Minimum microseconds between multi-KQP reroutes");
 /* Editable default, in bytes: total payload of ALL frozen, un-DB'd WQEs.
  * >= threshold copies to the new SQ; < threshold drains the old SQ. */
 static unsigned long srm_reroute_copy_threshold_bytes = 1000UL * 1024;
@@ -57,7 +61,8 @@ struct mlx5_srm_rr_group {
     u64 db_stop, freeze_end, cursor, bytes, dst_begin, dst_end, copied;
     u64 timing_start_cycles, timing_prewrite_cycles;
     u64 last_posted[2], last_completed[2];
-    unsigned long next_check, next_detect_log, last_switch, last_warn, started;
+    u64 next_check_ns, last_switch_ns;
+    unsigned long next_detect_log, last_warn, started;
     u32 bad[2], source_slot, outstanding;
     enum rr_phase phase;
     u32 id;
@@ -109,11 +114,12 @@ static void rr_warn(struct mlx5_srm_rr_group *g, const char *event)
 static void rr_detect_log(struct mlx5_srm_rr_group *g,
                           struct mlx5_srm_route_ctrl *route,
                           const u64 posted[2], const u64 completed[2],
-                          const u64 ratio[2])
+                          const u64 ratio[2], u64 now_ns)
 {
     struct mlx5_ib_qp *qp0, *qp1;
     u32 path0, path1;
     bool cooldown;
+    u64 cooldown_ns;
     int selected_group = READ_ONCE(srm_reroute_detect_log_group);
 
     if (likely(!READ_ONCE(srm_reroute_detect_log_enable)) ||
@@ -130,8 +136,10 @@ static void rr_detect_log(struct mlx5_srm_rr_group *g,
         return;
     qp0 = g->paths[path0] ? g->paths[path0]->ini_cb.qp : NULL;
     qp1 = g->paths[path1] ? g->paths[path1]->ini_cb.qp : NULL;
-    cooldown = time_before(jiffies, g->last_switch +
-        msecs_to_jiffies(READ_ONCE(srm_reroute_cooldown_ms)));
+    cooldown_ns = (u64)READ_ONCE(srm_reroute_cooldown_us) *
+                  NSEC_PER_USEC;
+    cooldown = g->last_switch_ns &&
+               now_ns - g->last_switch_ns < cooldown_ns;
     pr_info("SRM_REROUTE_DETECT group=%u scope=last_detect_window "
             "active_kqp=%u,%u qpn=%u,%u posted_bytes=%llu,%llu "
             "completed_bytes=%llu,%llu ratio_permille=%llu,%llu "
@@ -576,17 +584,18 @@ static void rr_step(struct mlx5_srm_rr_group *g)
         s->rr->logical_cons = g->freeze_end;
         smp_store_release(&s->ctrl_page->cons_idx, g->freeze_end);
         WRITE_ONCE(s->ctrl_page->route.state, MLX5_SRM_ROUTE_SPARE);
-        g->last_switch = jiffies;
+        g->last_switch_ns = ktime_get_ns();
         g->bad[0] = g->bad[1] = 0;
         rr_log(g, "recycled");
         g->phase = RR_IDLE; g->src = g->dst = NULL;
     }
 }
 
-static void rr_detect(struct mlx5_srm_rr_group *g)
+static void rr_detect(struct mlx5_srm_rr_group *g, u64 now_ns)
 {
     struct mlx5_srm_route_ctrl *route;
     u64 posted[2], completed[2], ratio[2];
+    u64 cooldown_ns;
     unsigned int p, poor;
     int forced;
     for (p = 0; p < MLX5_SRM_REROUTE_PATHS; p++)
@@ -600,9 +609,9 @@ static void rr_detect(struct mlx5_srm_rr_group *g)
             cmpxchg(&srm_reroute_test_source, forced, -1);
             return;
         }
-    if (time_before(jiffies, g->next_check)) return;
-    g->next_check = jiffies +
-        msecs_to_jiffies(max(1U, READ_ONCE(srm_reroute_interval_ms)));
+    if (now_ns < g->next_check_ns) return;
+    g->next_check_ns = now_ns +
+        (u64)max(1U, READ_ONCE(srm_reroute_interval_us)) * NSEC_PER_USEC;
     for (p = 0; p < 2; p++) {
         struct mlx5_srm_route_ctrl *c = &g->paths[route->active[p]]->ctrl_page->route;
         u64 a = smp_load_acquire(&c->posted_bytes);
@@ -613,10 +622,12 @@ static void rr_detect(struct mlx5_srm_rr_group *g)
         ratio[p] = !posted[p] || completed[p] >= posted[p] ? 1000 :
             div64_u64(completed[p] * 1000, posted[p]);
     }
-    rr_detect_log(g, route, posted, completed, ratio);
+    rr_detect_log(g, route, posted, completed, ratio, now_ns);
+    cooldown_ns = (u64)READ_ONCE(srm_reroute_cooldown_us) *
+                  NSEC_PER_USEC;
     if (!READ_ONCE(srm_reroute_enable) || !posted[0] || !posted[1] ||
-        time_before(jiffies, g->last_switch +
-                    msecs_to_jiffies(READ_ONCE(srm_reroute_cooldown_ms)))) {
+        (g->last_switch_ns &&
+         now_ns - g->last_switch_ns < cooldown_ns)) {
         g->bad[0] = g->bad[1] = 0; return;
     }
     poor = ratio[0] < ratio[1] ? 0 : 1;
@@ -630,14 +641,15 @@ static void rr_detect(struct mlx5_srm_rr_group *g)
 
 /* Two virtual active slots per group. Drain-only source substitutes for its
  * gated target; the source cannot disappear merely because routing changed. */
-static u32 rr_schedule(struct mlx5_ib_sched *sched, u32 virtual_slot)
+static u32 rr_schedule(struct mlx5_ib_sched *sched, u32 virtual_slot,
+                       u64 now_ns)
 {
     struct mlx5_srm_rr_group *g = &sched->rr_groups[virtual_slot / 2];
     u32 slot = virtual_slot % 2;
     struct mlx5_srm_route_ctrl *route;
     if (!g->paths[0]) return U32_MAX;
     rr_step(g);
-    rr_detect(g);
+    rr_detect(g, now_ns);
     if (g->phase == RR_OLD_DRAIN && slot == g->source_slot)
         return g->src->srmc_idx;
     route = &g->paths[0]->ctrl_page->route;

@@ -3904,6 +3904,7 @@ int scheduler_polling(void *sched_data)
     unsigned long direct_db_stats_last_report = jiffies;
 #if MLX5_SRM_ENABLE_REROUTE
     unsigned long rr_last_reap = jiffies;
+    u64 rr_now_ns = 0;
 #endif
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
     u64 db_batch_log_scans = 0;
@@ -3987,6 +3988,9 @@ int scheduler_polling(void *sched_data)
             id, worker, sq_ctrl_pool, &direct_db_stats_active,
             &direct_db_stats_previous, &direct_db_stats_last_report);
 #if MLX5_SRM_ENABLE_REROUTE
+        /* One high-resolution read per complete scheduler sweep, rather than
+         * one per virtual KQP. All groups in this sweep use the same sample. */
+        rr_now_ns = ktime_get_ns();
         if (time_after_eq(jiffies, rr_last_reap + msecs_to_jiffies(10))) {
             rr_last_reap = jiffies;
             mlx5_srm_rr_reap_users(sched, false);
@@ -4031,7 +4035,7 @@ int scheduler_polling(void *sched_data)
                 struct mlx5_srm_rr_group *g =
                     &sched->rr_groups[virtual_slot / 2];
 
-                i = rr_schedule(sched, virtual_slot);
+                i = rr_schedule(sched, virtual_slot, rr_now_ns);
 #if MLX5_SRM_ENABLE_PRIVATE_CQ
                 /* Once routing points to the target, the old SQ may still
                  * have hardware work. Its own CQ must remain on the poll
