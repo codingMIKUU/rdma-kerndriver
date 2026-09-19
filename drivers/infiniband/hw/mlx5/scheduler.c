@@ -2221,13 +2221,19 @@ static int mlx5_srm_query_xrc_udp_sport(struct mlx5_ib_qp *qp,
 }
 
 static int mlx5_srm_modify_xrc_udp_sport_sync(struct mlx5_ib_srmc *srmc,
-                                               u16 udp_sport)
+                                               u16 udp_sport,
+                                               u64 *hardware_cycles)
 {
     u32 in[MLX5_ST_SZ_DW(srm_rts2rts_qp_in)] = {};
     u32 out[MLX5_ST_SZ_DW(rts2rts_qp_out)] = {};
     struct mlx5_ib_qp *qp;
     struct mlx5_ib_qp_base *base;
     struct mlx5_ib_dev *dev;
+    u64 hardware_start;
+    int ret;
+
+    if (hardware_cycles)
+        *hardware_cycles = 0;
 
     if (!srmc || !srmc->ini_cb.qp)
         return -EINVAL;
@@ -2252,7 +2258,13 @@ static int mlx5_srm_modify_xrc_udp_sport_sync(struct mlx5_ib_srmc *srmc,
     MLX5_SET(srm_rts2rts_qp_in, in,
              qpc.primary_address_path.udp_sport, udp_sport);
 
-    return mlx5_cmd_exec(dev->mdev, in, sizeof(in), out, sizeof(out));
+    /* Everything outside mlx5_cmd_exec() is accounted as software work.
+     * This interval is the synchronous firmware/hardware command latency. */
+    hardware_start = rdtsc_ordered();
+    ret = mlx5_cmd_exec(dev->mdev, in, sizeof(in), out, sizeof(out));
+    if (hardware_cycles)
+        *hardware_cycles = rdtsc_ordered() - hardware_start;
+    return ret;
 }
 
 static u16 mlx5_srm_next_udp_sport(struct mlx5_ib_srmc *srmc,
@@ -2335,6 +2347,9 @@ static int mlx5_srm_udp_reroute_sync(
 {
     unsigned long deadline;
     u64 start_cycles;
+    u64 hardware_cycles = 0;
+    u64 software_cycles;
+    u64 total_cycles;
     u64 drain_target;
     u64 poll_calls = 0;
     u64 polled_cqes = 0;
@@ -2342,6 +2357,7 @@ static int mlx5_srm_udp_reroute_sync(
     u16 new_sport;
     int ret;
 
+    start_cycles = rdtsc_ordered();
     if (!srmc || !srmc->ctrl_page || sched->udp_reroute_owner)
         return -EBUSY;
     ret = mlx5_srm_udp_freeze_db(srmc, &drain_target);
@@ -2352,7 +2368,6 @@ static int mlx5_srm_udp_reroute_sync(
     srmc->udp_drain_target = drain_target;
     WRITE_ONCE(srmc->udp_reroute_state,
                MLX5_SRM_UDP_REROUTE_DRAINING);
-    start_cycles = rdtsc_ordered();
     deadline = jiffies + msecs_to_jiffies(max_t(
         unsigned int, 1, READ_ONCE(srm_udp_reroute_drain_timeout_ms)));
     old_sport = srmc->udp_sport;
@@ -2386,7 +2401,8 @@ static int mlx5_srm_udp_reroute_sync(
     new_sport = mlx5_srm_next_udp_sport(srmc, old_sport);
     WRITE_ONCE(srmc->udp_reroute_state,
                MLX5_SRM_UDP_REROUTE_MODIFYING);
-    ret = mlx5_srm_modify_xrc_udp_sport_sync(srmc, new_sport);
+    ret = mlx5_srm_modify_xrc_udp_sport_sync(srmc, new_sport,
+                                              &hardware_cycles);
     if (ret)
         goto out_open;
 
@@ -2398,11 +2414,13 @@ static int mlx5_srm_udp_reroute_sync(
     mlx5_srm_udp_open_db(srmc);
     WRITE_ONCE(srmc->udp_reroute_state, MLX5_SRM_UDP_REROUTE_IDLE);
     sched->udp_reroute_owner = NULL;
-    pr_info("SRM UDP reroute event=complete kqp=%d qpn=%u sport=%u->%u target=%llu completed=%llu poll_calls=%llu cqes=%llu cycles=%llu\n",
+    total_cycles = rdtsc_ordered() - start_cycles;
+    software_cycles = total_cycles - hardware_cycles;
+    pr_info("SRM UDP reroute event=complete kqp=%d qpn=%u sport=%u->%u target=%llu completed=%llu poll_calls=%llu cqes=%llu software_cycles=%llu hardware_cycles=%llu total_cycles=%llu\n",
             srmc->srmc_idx, srmc->ini_cb.qp->ibqp.qp_num,
             old_sport, new_sport, drain_target,
             READ_ONCE(srmc->cq_complete_idx), poll_calls, polled_cqes,
-            rdtsc_ordered() - start_cycles);
+            software_cycles, hardware_cycles, total_cycles);
     return 0;
 
 out_open:
@@ -2411,10 +2429,12 @@ out_open:
     mlx5_srm_udp_open_db(srmc);
     WRITE_ONCE(srmc->udp_reroute_state, MLX5_SRM_UDP_REROUTE_IDLE);
     sched->udp_reroute_owner = NULL;
-    pr_warn("SRM UDP reroute event=failed kqp=%d qpn=%u sport=%u target=%llu completed=%llu error=%d poll_calls=%llu cycles=%llu\n",
+    total_cycles = rdtsc_ordered() - start_cycles;
+    software_cycles = total_cycles - hardware_cycles;
+    pr_warn("SRM UDP reroute event=failed kqp=%d qpn=%u sport=%u target=%llu completed=%llu error=%d poll_calls=%llu software_cycles=%llu hardware_cycles=%llu total_cycles=%llu\n",
             srmc->srmc_idx, srmc->ini_cb.qp->ibqp.qp_num, old_sport,
             drain_target, READ_ONCE(srmc->cq_complete_idx), ret,
-            poll_calls, rdtsc_ordered() - start_cycles);
+            poll_calls, software_cycles, hardware_cycles, total_cycles);
     return ret;
 }
 

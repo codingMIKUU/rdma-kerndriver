@@ -78,3 +78,14 @@ Successful switching produces, in order, `event=detect`, `event=freeze`, and
 `event=complete`. `event=failed` includes timeout or firmware command errors.
 Per-window output is emitted only when `srm_udp_reroute_log_enable=1`.
 
+The completion event reports three exact timing fields:
+
+```text
+software_cycles + hardware_cycles = total_cycles
+```
+
+`hardware_cycles` brackets only the synchronous `mlx5_cmd_exec()` firmware
+command. `total_cycles` starts when the successful reroute attempt enters the
+freeze path and ends after the DB gate is reopened. `software_cycles` is the
+remaining time, including owner/gate handling, old-path CQ drain, command
+preparation and post-command publication.
