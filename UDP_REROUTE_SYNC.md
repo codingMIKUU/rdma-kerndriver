@@ -45,11 +45,11 @@ All parameters are under `/sys/module/mlx5_ib/parameters/`:
 ```text
 srm_udp_reroute_enable                default 1
 srm_udp_reroute_log_enable            default 0
-srm_udp_reroute_interval_ms           default 10
+srm_udp_reroute_interval_us           default 10000
 srm_udp_reroute_ratio_gap             default 200 (scale 0..1000)
 srm_udp_reroute_consecutive_windows   default 3
 srm_udp_reroute_min_wqes              default 64
-srm_udp_reroute_cooldown_ms            default 1000
+srm_udp_reroute_cooldown_us            default 1000000
 srm_udp_reroute_drain_timeout_ms       default 5000
 ```
 
@@ -64,6 +64,9 @@ echo 150 | sudo tee /sys/module/mlx5_ib/parameters/srm_udp_reroute_ratio_gap
 `ratio_gap` is the main trigger threshold. A KQP must trail the best active
 KQP in its size level by this many completion-ratio points for the configured
 number of strictly consecutive windows.
+
+The detector interval and cooldown use `ktime_get_ns()` internally; their
+microsecond values are therefore not rounded to a scheduler tick/jiffy.
 
 ## Verification
 

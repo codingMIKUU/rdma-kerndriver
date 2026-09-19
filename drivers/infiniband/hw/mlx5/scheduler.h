@@ -454,7 +454,7 @@ struct mlx5_ib_srmc
     u64 udp_window_posted;
     u64 udp_window_completed;
     u64 udp_drain_target;
-    unsigned long udp_last_switch;
+    u64 udp_last_switch_ns;
     u32 udp_ratio_x1000;
     u32 udp_generation;
     u16 udp_sport;

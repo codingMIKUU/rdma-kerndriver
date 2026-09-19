@@ -81,11 +81,11 @@ module_param_named(srm_udp_reroute_log_enable,
 MODULE_PARM_DESC(srm_udp_reroute_log_enable,
                  "Log each UDP reroute detector window (events always log)");
 
-static unsigned int srm_udp_reroute_interval_ms = 10;
-module_param_named(srm_udp_reroute_interval_ms,
-                   srm_udp_reroute_interval_ms, uint, 0644);
-MODULE_PARM_DESC(srm_udp_reroute_interval_ms,
-                 "UDP reroute detector interval in milliseconds");
+static unsigned int srm_udp_reroute_interval_us = 10000;
+module_param_named(srm_udp_reroute_interval_us,
+                   srm_udp_reroute_interval_us, uint, 0644);
+MODULE_PARM_DESC(srm_udp_reroute_interval_us,
+                 "UDP reroute detector interval in microseconds");
 
 static unsigned int srm_udp_reroute_ratio_gap = 200;
 module_param_named(srm_udp_reroute_ratio_gap,
@@ -105,11 +105,11 @@ module_param_named(srm_udp_reroute_min_wqes,
 MODULE_PARM_DESC(srm_udp_reroute_min_wqes,
                  "Minimum posted WQEs per detector window");
 
-static unsigned int srm_udp_reroute_cooldown_ms = 1000;
-module_param_named(srm_udp_reroute_cooldown_ms,
-                   srm_udp_reroute_cooldown_ms, uint, 0644);
-MODULE_PARM_DESC(srm_udp_reroute_cooldown_ms,
-                 "Minimum time between reroutes of the same KQP");
+static unsigned int srm_udp_reroute_cooldown_us = 1000000;
+module_param_named(srm_udp_reroute_cooldown_us,
+                   srm_udp_reroute_cooldown_us, uint, 0644);
+MODULE_PARM_DESC(srm_udp_reroute_cooldown_us,
+                 "Minimum microseconds between reroutes of the same KQP");
 
 static unsigned int srm_udp_reroute_drain_timeout_ms = 5000;
 module_param_named(srm_udp_reroute_drain_timeout_ms,
@@ -2303,8 +2303,9 @@ static int mlx5_srm_udp_init_kqp(struct mlx5_ib_srmc *srmc)
 
     srmc->udp_prev_posted = smp_load_acquire(&ctrl->db_tail);
     srmc->udp_prev_completed = READ_ONCE(srmc->cq_complete_idx);
-    srmc->udp_last_switch = jiffies -
-        msecs_to_jiffies(READ_ONCE(srm_udp_reroute_cooldown_ms));
+    /* Zero means that this KQP has not switched yet, so the first detector
+     * decision is not delayed by the cooldown. */
+    srmc->udp_last_switch_ns = 0;
     WRITE_ONCE(srmc->udp_reroute_state, MLX5_SRM_UDP_REROUTE_IDLE);
     WRITE_ONCE(ctrl->route.abi, MLX5_SRM_UDP_REROUTE_ABI);
     WRITE_ONCE(ctrl->route.state, MLX5_SRM_ROUTE_ACTIVE);
@@ -2407,7 +2408,7 @@ static int mlx5_srm_udp_reroute_sync(
         goto out_open;
 
     srmc->udp_sport = new_sport;
-    srmc->udp_last_switch = jiffies;
+    srmc->udp_last_switch_ns = ktime_get_ns();
     srmc->udp_bad_windows = 0;
     srmc->udp_prev_posted = smp_load_acquire(&srmc->ctrl_page->db_tail);
     srmc->udp_prev_completed = READ_ONCE(srmc->cq_complete_idx);
@@ -2424,7 +2425,7 @@ static int mlx5_srm_udp_reroute_sync(
     return 0;
 
 out_open:
-    srmc->udp_last_switch = jiffies;
+    srmc->udp_last_switch_ns = ktime_get_ns();
     srmc->udp_bad_windows = 0;
     mlx5_srm_udp_open_db(srmc);
     WRITE_ONCE(srmc->udp_reroute_state, MLX5_SRM_UDP_REROUTE_IDLE);
@@ -2452,6 +2453,9 @@ static void mlx5_srm_udp_detect_and_reroute(
                          READ_ONCE(srm_udp_reroute_consecutive_windows));
     u32 minimum = max_t(unsigned int, 1,
                         READ_ONCE(srm_udp_reroute_min_wqes));
+    u64 now_ns = ktime_get_ns();
+    u64 cooldown_ns = (u64)READ_ONCE(srm_udp_reroute_cooldown_us) *
+                      NSEC_PER_USEC;
     u32 level;
     u32 i;
 
@@ -2521,9 +2525,8 @@ static void mlx5_srm_udp_detect_and_reroute(
             }
             gap = best_ratio > s->udp_ratio_x1000 ?
                   best_ratio - s->udp_ratio_x1000 : 0;
-            cooldown = time_before(jiffies, s->udp_last_switch +
-                msecs_to_jiffies(READ_ONCE(
-                    srm_udp_reroute_cooldown_ms)));
+            cooldown = s->udp_last_switch_ns &&
+                       now_ns - s->udp_last_switch_ns < cooldown_ns;
             if (gap < min_t(unsigned int, 1000,
                             READ_ONCE(srm_udp_reroute_ratio_gap)) ||
                 cooldown) {
@@ -4329,7 +4332,7 @@ int scheduler_polling(void *sched_data)
     unsigned long rr_last_reap = jiffies;
 #endif
 #if MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
-    unsigned long udp_last_check = jiffies;
+    u64 udp_last_check_ns = ktime_get_ns();
 #endif
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
     u64 db_batch_log_scans = 0;
@@ -5122,13 +5125,16 @@ int scheduler_polling(void *sched_data)
         mlx5_srm_report_diag(id, worker, sq_ctrl_pool, cq_workspace);
 #endif
 #if MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
-        if (worker_id == 0 && READ_ONCE(srm_udp_reroute_enable) &&
-            time_after_eq(jiffies, udp_last_check +
-                msecs_to_jiffies(max_t(unsigned int, 1,
-                    READ_ONCE(srm_udp_reroute_interval_ms))))) {
-            udp_last_check = jiffies;
-            mlx5_srm_udp_detect_and_reroute(
-                sched, sq_ctrl_pool, wc, cqe, cq_workspace, srm_stats);
+        if (worker_id == 0 && READ_ONCE(srm_udp_reroute_enable)) {
+            u64 now_ns = ktime_get_ns();
+            u64 interval_ns = (u64)max_t(unsigned int, 1,
+                READ_ONCE(srm_udp_reroute_interval_us)) * NSEC_PER_USEC;
+
+            if (now_ns - udp_last_check_ns >= interval_ns) {
+                udp_last_check_ns = now_ns;
+                mlx5_srm_udp_detect_and_reroute(
+                    sched, sq_ctrl_pool, wc, cqe, cq_workspace, srm_stats);
+            }
         }
 #endif
         {
@@ -5237,14 +5243,14 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
         pr_err("SRM UDP in-place reroute currently requires one worker and one scheduler\n");
         return -EOPNOTSUPP;
     }
-    pr_info("SRM reroute mode=udp-in-place-sync kqps=%u size_levels=%u enabled=%u interval_ms=%u ratio_gap=%u consecutive=%u min_wqes=%u cooldown_ms=%u drain_timeout_ms=%u ABI=%x\n",
+    pr_info("SRM reroute mode=udp-in-place-sync kqps=%u size_levels=%u enabled=%u interval_us=%u ratio_gap=%u consecutive=%u min_wqes=%u cooldown_us=%u drain_timeout_ms=%u ABI=%x\n",
             total_kqps, MLX5_SRM_KERNEL_QP_LEVELS,
             READ_ONCE(srm_udp_reroute_enable),
-            READ_ONCE(srm_udp_reroute_interval_ms),
+            READ_ONCE(srm_udp_reroute_interval_us),
             READ_ONCE(srm_udp_reroute_ratio_gap),
             READ_ONCE(srm_udp_reroute_consecutive_windows),
             READ_ONCE(srm_udp_reroute_min_wqes),
-            READ_ONCE(srm_udp_reroute_cooldown_ms),
+            READ_ONCE(srm_udp_reroute_cooldown_us),
             READ_ONCE(srm_udp_reroute_drain_timeout_ms),
             MLX5_SRM_UDP_REROUTE_ABI);
 #endif
