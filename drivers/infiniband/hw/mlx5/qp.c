@@ -173,6 +173,17 @@ struct mlx5_ib_sqd {
 extern struct mlx5_ib_sched_group sched_group;
 extern const int num_kqps;
 
+static inline u32 mlx5_srm_primary_kqp_count(void)
+{
+#if MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
+    /* With size split, the second active set is the large pool and is mapped
+     * separately below. Without it, both active sets carry normal traffic. */
+    return MLX5_SRM_ENABLE_LARGE_KERNEL_QP ? num_kqps : num_kqps * 2;
+#else
+    return num_kqps;
+#endif
+}
+
 extern struct mlx5_ib_server server;
 
 static bool mlx5_ib_is_hollow_rc_qp(struct mlx5_ib_qp *qp)
@@ -1360,7 +1371,7 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 			if (memcmp(srmc->dgid.raw, dgid->raw,
 				   sizeof(srmc->dgid.raw)) != 0)
 				continue;
-			if (srmc->srmc_idx >= num_kqps)
+            if (srmc->srmc_idx >= mlx5_srm_primary_kqp_count())
 				continue;
 			if (srmc->owner_worker != owner_worker)
 				continue;
@@ -1393,7 +1404,7 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 			if (memcmp(srmc->dgid.raw, dgid->raw,
 				   sizeof(srmc->dgid.raw)) != 0)
 				continue;
-			if (srmc->srmc_idx >= num_kqps)
+            if (srmc->srmc_idx >= mlx5_srm_primary_kqp_count())
 				continue;
 			if (srmc->owner_worker != owner_worker)
 				continue;

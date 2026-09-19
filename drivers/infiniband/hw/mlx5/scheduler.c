@@ -561,7 +561,11 @@ static struct mlx5_ib_srmc *mlx5_ib_sched_find_srmc_idx(struct mlx5_ib_sched *sc
     return READ_ONCE(sched->srmc_by_idx[srmc_idx]);
 }
 
+static inline int mlx5_srm_active_kqps(void);
 static inline int mlx5_srm_effective_kqps(void);
+#if MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
+static inline bool mlx5_srm_udp_is_spare_kqp(u32 kqp_idx);
+#endif
 
 static inline struct mlx5_sq_ctrl_page *mlx5_sq_ctrl_get_slot(
     struct mlx5_qp_ctrl_pool *pool, u32 slot_idx)
@@ -2291,11 +2295,13 @@ static u16 mlx5_srm_next_udp_sport(struct mlx5_ib_srmc *srmc,
 static int mlx5_srm_udp_init_kqp(struct mlx5_ib_srmc *srmc)
 {
     struct mlx5_sq_ctrl_page *ctrl;
+    bool spare;
     int ret;
 
     if (!srmc || !srmc->ctrl_page)
         return -EINVAL;
     ctrl = srmc->ctrl_page;
+    spare = mlx5_srm_udp_is_spare_kqp(srmc->srmc_idx);
     ret = mlx5_srm_query_xrc_udp_sport(srmc->ini_cb.qp,
                                         &srmc->udp_sport);
     if (ret)
@@ -2308,11 +2314,12 @@ static int mlx5_srm_udp_init_kqp(struct mlx5_ib_srmc *srmc)
     srmc->udp_last_switch_ns = 0;
     WRITE_ONCE(srmc->udp_reroute_state, MLX5_SRM_UDP_REROUTE_IDLE);
     WRITE_ONCE(ctrl->route.abi, MLX5_SRM_UDP_REROUTE_ABI);
-    WRITE_ONCE(ctrl->route.state, MLX5_SRM_ROUTE_ACTIVE);
-    smp_store_release(&ctrl->route.user_db, 1);
-    pr_info("SRM UDP reroute ready kqp=%d qpn=%u sport=%u mode=in-place-sync\n",
+    WRITE_ONCE(ctrl->route.state, spare ? MLX5_SRM_ROUTE_SPARE :
+                                         MLX5_SRM_ROUTE_ACTIVE);
+    smp_store_release(&ctrl->route.user_db, spare ? 0 : 1);
+    pr_info("SRM UDP reroute ready kqp=%d qpn=%u sport=%u role=%s mode=in-place-sync\n",
             srmc->srmc_idx, srmc->ini_cb.qp->ibqp.qp_num,
-            srmc->udp_sport);
+            srmc->udp_sport, spare ? "spare" : "active");
     return 0;
 }
 
@@ -2447,7 +2454,7 @@ static void mlx5_srm_udp_detect_and_reroute(
 {
     struct mlx5_ib_srmc *candidate = NULL;
     u32 candidate_gap = 0;
-    u32 total = mlx5_srm_effective_kqps();
+    u32 total = mlx5_srm_active_kqps();
     u32 per_level = total / MLX5_SRM_KERNEL_QP_LEVELS;
     u32 required = max_t(unsigned int, 1,
                          READ_ONCE(srm_udp_reroute_consecutive_windows));
@@ -2799,14 +2806,39 @@ const int num_kqps = 32;
 
 #include "reroute.inc"
 
-static inline int mlx5_srm_effective_kqps(void)
+static inline int mlx5_srm_active_kqps(void)
 {
 #if MLX5_SRM_ENABLE_REROUTE
-    return num_kqps * MLX5_SRM_REROUTE_PATHS;
+    return num_kqps * 2;
+#elif MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
+    /* Two traffic-bearing KQPs per logical group, independent of whether
+     * those slots are used as small/large levels or two equivalent paths. */
+    return num_kqps * 2;
 #else
     return num_kqps * MLX5_SRM_KERNEL_QP_LEVELS;
 #endif
 }
+
+static inline int mlx5_srm_effective_kqps(void)
+{
+#if MLX5_SRM_ENABLE_REROUTE
+    return num_kqps * MLX5_SRM_REROUTE_PATHS;
+#elif MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
+    /* Match the multi-KQP experiment's physical resource topology while
+     * keeping UDP reroute in-place: one active small/large set plus an
+     * equally sized, deliberately unscheduled spare set. */
+    return num_kqps * MLX5_SRM_REROUTE_PATHS;
+#else
+    return mlx5_srm_active_kqps();
+#endif
+}
+
+#if MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
+static inline bool mlx5_srm_udp_is_spare_kqp(u32 kqp_idx)
+{
+    return kqp_idx >= mlx5_srm_active_kqps();
+}
+#endif
 
 static inline u32 mlx5_srm_kqp_owner(const struct mlx5_ib_sched *sched,
                                       u32 kqp_idx)
@@ -3099,7 +3131,7 @@ static void mlx5_ib_srm_report_stats(
     if (!stats->kqp)
         return;
 
-    for (i = 0; i < min(mlx5_srm_effective_kqps(), stats->kqp_cnt); i++) {
+    for (i = 0; i < min(mlx5_srm_active_kqps(), stats->kqp_cnt); i++) {
         struct mlx5_ib_srm_kqp_stats *k = &stats->kqp[i];
 
         scans += k->scans;
@@ -3459,7 +3491,7 @@ static __always_inline struct mlx5_ib_srmc *find_target_srmc(struct mlx5_ib_sche
             }
 
             // 随机选择一个SRMC（负载均衡）
-            uint32_t rd = prandom_u32_max(mlx5_srm_effective_kqps());
+            uint32_t rd = prandom_u32_max(mlx5_srm_active_kqps());
             j = (j + rd) % NUM_SRMC;
             srmc = sched->srmc_tb[j];
             if (mlx5_ib_srmc_is_invalid(srmc, "find_target_srmc random", j)) {
@@ -4362,7 +4394,7 @@ int scheduler_polling(void *sched_data)
                                  kthread_should_stop());
         goto out;
     }
-    srm_stats->kqp_cnt = mlx5_srm_effective_kqps();
+    srm_stats->kqp_cnt = mlx5_srm_active_kqps();
     srm_stats->kqp = mlx5_ib_srm_kvcalloc_node(
         srm_stats->kqp_cnt, sizeof(*srm_stats->kqp));
     if (!srm_stats->kqp) {
@@ -5215,6 +5247,7 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
     int ret;
     u32 worker_id;
     u32 total_kqps = mlx5_srm_effective_kqps();
+    u32 active_kqps = mlx5_srm_active_kqps();
     char thread_info[64];
 
 #if MLX5_SRM_ENABLE_PRIVATE_CQ
@@ -5243,7 +5276,8 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
         pr_err("SRM UDP in-place reroute currently requires one worker and one scheduler\n");
         return -EOPNOTSUPP;
     }
-    pr_info("SRM reroute mode=udp-in-place-sync kqps=%u size_levels=%u enabled=%u interval_us=%u ratio_gap=%u consecutive=%u min_wqes=%u cooldown_us=%u drain_timeout_ms=%u ABI=%x\n",
+    pr_info("SRM reroute mode=udp-in-place-sync groups=%d active=%u spare=%u physical=%u size_levels=%u spare_policy=resource-only enabled=%u interval_us=%u ratio_gap=%u consecutive=%u min_wqes=%u cooldown_us=%u drain_timeout_ms=%u ABI=%x\n",
+            num_kqps, active_kqps, total_kqps - active_kqps,
             total_kqps, MLX5_SRM_KERNEL_QP_LEVELS,
             READ_ONCE(srm_udp_reroute_enable),
             READ_ONCE(srm_udp_reroute_interval_us),
@@ -5260,9 +5294,9 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
         return -EINVAL;
     }
 
-    if (!srm_sched_cpu_num || srm_sched_cpu_num > total_kqps) {
-        pr_err("invalid srm_sched_cpu_num=%u for %u KQPs\n",
-               srm_sched_cpu_num, total_kqps);
+    if (!srm_sched_cpu_num || srm_sched_cpu_num > active_kqps) {
+        pr_err("invalid srm_sched_cpu_num=%u for %u active KQPs\n",
+               srm_sched_cpu_num, active_kqps);
         return -EINVAL;
     }
     if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP && srm_sched_cpu_num > 1) {
@@ -5364,9 +5398,9 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
             worker->sched = sched;
             worker->worker_id = worker_id;
             worker->cpu_id = srm_sched_cpu_base + worker_id;
-            worker->kqp_begin = div_u64((u64)total_kqps * worker_id,
+            worker->kqp_begin = div_u64((u64)active_kqps * worker_id,
                                         sched->worker_count);
-            worker->kqp_end = div_u64((u64)total_kqps * (worker_id + 1),
+            worker->kqp_end = div_u64((u64)active_kqps * (worker_id + 1),
                                       sched->worker_count);
             worker->limit_batch = div_u64(LIMIT_BATCHING,
                                            sched->worker_count);
@@ -6828,13 +6862,18 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
                        ~(MLX5_SRM_CTRL_F_DIRECT_DB_STATS |
                          MLX5_SRM_CTRL_F_DB_SHARE_STATS));
 #if MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
+        {
+            bool spare = mlx5_srm_udp_is_spare_kqp(srmc->srmc_idx);
+
         WRITE_ONCE(ctrl_page->route.abi, MLX5_SRM_UDP_REROUTE_ABI);
-        WRITE_ONCE(ctrl_page->route.state, MLX5_SRM_ROUTE_ACTIVE);
-        smp_store_release(&ctrl_page->route.user_db, 1);
+        WRITE_ONCE(ctrl_page->route.state, spare ? MLX5_SRM_ROUTE_SPARE :
+                                                  MLX5_SRM_ROUTE_ACTIVE);
+        smp_store_release(&ctrl_page->route.user_db, spare ? 0 : 1);
         WRITE_ONCE(ctrl_page->flags,
                    (READ_ONCE(ctrl_page->flags) &
                     ~MLX5_SRM_CTRL_F_REROUTE) |
                    MLX5_SRM_CTRL_F_UDP_INPLACE_REROUTE);
+        }
 #else
         WRITE_ONCE(ctrl_page->flags,
                    READ_ONCE(ctrl_page->flags) &
