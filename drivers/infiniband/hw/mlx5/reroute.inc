@@ -55,13 +55,38 @@ struct mlx5_srm_rr_group {
     unsigned long *dependent;
     u64 *dep_end;
     u64 db_stop, freeze_end, cursor, bytes, dst_begin, dst_end, copied;
+    u64 timing_start_cycles, timing_prewrite_cycles;
     u64 last_posted[2], last_completed[2];
     unsigned long next_check, next_detect_log, last_switch, last_warn, started;
     u32 bad[2], source_slot, outstanding;
     enum rr_phase phase;
     u32 id;
-    bool copy, copying_done;
+    bool copy, copying_done, timing_reported;
 };
+
+static void rr_report_kernel_db_eligible(struct mlx5_srm_rr_group *g)
+{
+    u64 now;
+    u64 switch_to_prewrite;
+    u64 prewrite_to_kernel_db;
+    u64 total;
+
+    if (g->timing_reported || !g->timing_start_cycles ||
+        !g->timing_prewrite_cycles)
+        return;
+
+    now = rdtsc_ordered();
+    switch_to_prewrite = g->timing_prewrite_cycles -
+                         g->timing_start_cycles;
+    prewrite_to_kernel_db = now - g->timing_prewrite_cycles;
+    total = switch_to_prewrite + prewrite_to_kernel_db;
+    g->timing_reported = true;
+    pr_info("SRM_REROUTE_TIMING group=%u src=%d dst=%d mode=%s switch_to_user_prewrite_cycles=%llu user_prewrite_to_kernel_db_cycles=%llu total_cycles=%llu\n",
+            g->id, g->src ? g->src->srmc_idx : -1,
+            g->dst ? g->dst->srmc_idx : -1,
+            g->copy ? "copy" : "drain", switch_to_prewrite,
+            prewrite_to_kernel_db, total);
+}
 
 static void rr_log(struct mlx5_srm_rr_group *g, const char *event)
 {
@@ -309,6 +334,9 @@ static bool rr_begin(struct mlx5_srm_rr_group *g, unsigned int active)
         }
     }
     if (!dst || !rr_lock(src)) return false;
+    g->timing_start_cycles = rdtsc_ordered();
+    g->timing_prewrite_cycles = 0;
+    g->timing_reported = false;
     smp_store_release(&src->ctrl_page->route.user_db, 0);
     /* fetch_or is the linearization point for the producer CAS. */
     reserved = atomic64_fetch_or(MLX5_SRM_REROUTE_FROZEN,
@@ -437,6 +465,10 @@ static void rr_step(struct mlx5_srm_rr_group *g)
         g->last_posted[g->source_slot] = READ_ONCE(d->ctrl_page->route.posted_bytes);
         g->last_completed[g->source_slot] = d->rr->completed_bytes;
         smp_store_release(&route->generation, READ_ONCE(route->generation) + 1);
+        /* The generation release publishes the new active path to userspace.
+         * From this point producers may reserve and prefill the target SQ,
+         * while route.user_db remains closed. */
+        g->timing_prewrite_cycles = rdtsc_ordered();
         g->cursor = g->db_stop;
         g->phase = g->copy ? RR_COPY0 : RR_OLD_DRAIN;
         WRITE_ONCE(s->ctrl_page->route.state,
@@ -492,6 +524,9 @@ static void rr_step(struct mlx5_srm_rr_group *g)
         g->copying_done = true;
         g->phase = RR_COPY_DRAIN;
         rr_log(g, "copy-complete");
+        /* The scheduler may now DB an eligible copied/prefilled prefix;
+         * per-user old-path dependencies remain enforced by rr_can_db(). */
+        rr_report_kernel_db_eligible(g);
         return;
     }
     if (g->phase == RR_COPY_DRAIN || g->phase == RR_OLD_DRAIN) {
@@ -507,6 +542,10 @@ static void rr_step(struct mlx5_srm_rr_group *g)
         g->phase = RR_RECYCLE;
         g->cursor = g->db_stop;
         rr_log(g, "new-db-open");
+        /* Drain mode has no copied prefix. The target becomes DB-eligible
+         * only after the complete old source interval has drained. */
+        if (!g->copy)
+            rr_report_kernel_db_eligible(g);
         return;
     }
     if (g->phase == RR_RECYCLE) {
