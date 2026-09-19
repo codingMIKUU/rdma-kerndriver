@@ -32,6 +32,9 @@
 #if MLX5_SRM_ENABLE_PRIVATE_CQ && !MLX5_SRM_ENABLE_CQE_SIMPLIFY
 #error "private CQ requires CQE_SIMPLIFY=1"
 #endif
+#if MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE && !MLX5_SRM_ENABLE_PRIVATE_CQ
+#error "UDP in-place reroute requires one private CQ per physical KQP"
+#endif
 #if MLX5_SRM_PRIVATE_CQ_POLL_BUDGET < 1 || MLX5_SRM_PRIVATE_CQ_POLL_BUDGET > 65536
 #error "private CQ poll budget must be in [1, 65536]"
 #endif
@@ -408,6 +411,15 @@ struct mlx5_wqe_info
     u8 valid;
     u8 flags;
 };
+
+#if MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
+enum mlx5_srm_udp_reroute_state {
+    MLX5_SRM_UDP_REROUTE_IDLE = 0,
+    MLX5_SRM_UDP_REROUTE_DRAINING,
+    MLX5_SRM_UDP_REROUTE_MODIFYING,
+};
+#endif
+
 struct mlx5_ib_srmc
 {
 #if MLX5_SRM_ENABLE_REROUTE
@@ -433,6 +445,22 @@ struct mlx5_ib_srmc
     unsigned long last_stall_warn_jiffies;
     unsigned long publish_gap_jiffies;
     u64 publish_gap_slot;
+#if MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
+    /* Detector snapshots are scheduler-thread private.  db_tail includes
+     * both userspace and kernel doorbells, while cq_complete_idx is the
+     * cumulative hardware completion cursor for this private CQ. */
+    u64 udp_prev_posted;
+    u64 udp_prev_completed;
+    u64 udp_window_posted;
+    u64 udp_window_completed;
+    u64 udp_drain_target;
+    unsigned long udp_last_switch;
+    u32 udp_ratio_x1000;
+    u32 udp_generation;
+    u16 udp_sport;
+    u8 udp_bad_windows;
+    u8 udp_reroute_state;
+#endif
 #if MLX5_SRM_ENABLE_CQE_SIMPLIFY && MLX5_SRM_CQE_PUBLISH_BATCH > 1
     /* Private to this KQP's send-CQ poller under cq->lock. The SRMC is
      * zero-allocated; every poll exit drains and clears these links. */
@@ -478,6 +506,11 @@ struct mlx5_ib_sched
     int init_error;
     wait_queue_head_t init_wait;
     int id;
+#if MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
+    /* Synchronous switching deliberately serializes firmware modification
+     * and keeps at most one KQP DB gate closed per scheduler. */
+    struct mlx5_ib_srmc *udp_reroute_owner;
+#endif
 };
 
 struct mlx5_ib_usr_rc_route {

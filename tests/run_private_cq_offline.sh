@@ -19,6 +19,7 @@ for reroute in 0 1; do
             -DMLX5_SRM_PRIVATE_CQ_POLL_BUDGET="$budget" \
             -DMLX5_SRM_ENABLE_PRIVATE_CQ=1 \
             -DMLX5_SRM_ENABLE_REROUTE="$reroute" \
+            -DMLX5_SRM_ENABLE_UDP_INPLACE_REROUTE=0 \
             -DMLX5_SRM_ENABLE_WQE_TIMING="$timing" \
             -o "$test_dir/poll" -
         "$test_dir/poll"

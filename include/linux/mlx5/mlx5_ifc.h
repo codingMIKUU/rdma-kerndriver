@@ -1688,7 +1688,9 @@ struct mlx5_ifc_cmd_hca_cap_bits {
 	u8         reserved_at_147[0x2];
 	u8         roce_accl[0x1];
 	u8         log_max_ra_req_qp[0x6];
-	u8         reserved_at_150[0xa];
+	u8         reserved_at_150[0x1];
+	u8         rts2rts_qp_udp_sport[0x1];
+	u8         reserved_at_152[0x8];
 	u8         log_max_ra_res_qp[0x6];
 
 	u8         end_pad[0x1];
@@ -5436,6 +5438,39 @@ struct mlx5_ifc_rts2rts_qp_in_bits {
 	struct mlx5_ifc_qpc_bits qpc;
 
 	u8         reserved_at_800[0x80];
+};
+
+/* Newer firmware places the UDP source-port modify mask above bit 31.  Keep
+ * this command separate from the generic RTS2RTS layout so existing callers
+ * retain their original command size and mask interpretation. */
+struct mlx5_ifc_srm_rts2rts_qp_in_bits {
+	u8         opcode[0x10];
+	u8         uid[0x10];
+
+	u8         reserved_at_20[0x10];
+	u8         op_mod[0x10];
+
+	u8         qpc_ext[0x1];
+	u8         reserved_at_41[0x7];
+	u8         qpn[0x18];
+
+	u8         reserved_at_60[0x20];
+
+	u8         opt_param_mask[0x20];
+
+	u8         reserved_at_a0[0x20];
+
+	struct mlx5_ifc_qpc_bits qpc;
+
+	u8         reserved_at_800[0x40];
+
+	u8         opt_param_mask_95_32[0x40];
+
+	u8         qpc_data_ext[0x600];
+};
+
+enum mlx5_srm_qpc_opt_mask_32 {
+	MLX5_SRM_QPC_OPT_MASK_32_UDP_SPORT = 1 << 2,
 };
 
 struct mlx5_ifc_rtr2rts_qp_out_bits {

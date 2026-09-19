@@ -11,6 +11,7 @@ for simplify in 0 1; do
         fi
         "${CC:-cc}" -std=gnu11 -O1 -g -fsanitize=address,undefined \
             -DMLX5_SRM_ENABLE_REROUTE=1 \
+            -DMLX5_SRM_ENABLE_UDP_INPLACE_REROUTE=0 \
             -DMLX5_SRM_ENABLE_CQE_SIMPLIFY="$simplify" \
             -DMLX5_SRM_CQE_PUBLISH_BATCH="$publish_batch" \
             -DMLX5_SRM_ENABLE_PRIVATE_CQ="$private" \

@@ -9,12 +9,29 @@
 #if MLX5_SRM_ENABLE_REROUTE != 0 && MLX5_SRM_ENABLE_REROUTE != 1
 #error "MLX5_SRM_ENABLE_REROUTE must be 0 or 1"
 #endif
+
+/* Alternative experiment: keep one physical KQP and change only its RoCE
+ * UDP source port after synchronously draining the old path.  This is kept
+ * mutually exclusive with descriptor-copy reroute so the disabled mode adds
+ * no route selection or completion-remapping work to either hot path. */
+#ifndef MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
+#define MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE 1
+#endif
+#if MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE != 0 && \
+    MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE != 1
+#error "MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE must be 0 or 1"
+#endif
+#if MLX5_SRM_ENABLE_REROUTE && MLX5_SRM_ENABLE_UDP_INPLACE_REROUTE
+#error "multi-KQP reroute and UDP in-place reroute are mutually exclusive"
+#endif
 #define MLX5_SRM_REROUTE_ABI 0x52520101U
+#define MLX5_SRM_UDP_REROUTE_ABI 0x55445001U
 #define MLX5_SRM_REROUTE_PATHS 4U
 #define MLX5_SRM_REROUTE_USERS 65536U
 #define MLX5_SRM_REROUTE_FROZEN (1ULL << 63)
 #define MLX5_SRM_REROUTE_MASK (MLX5_SRM_REROUTE_FROZEN - 1)
 #define MLX5_SRM_CTRL_F_REROUTE (1U << 3)
+#define MLX5_SRM_CTRL_F_UDP_INPLACE_REROUTE (1U << 4)
 #define MLX5_SRM_REROUTE_BUDGET 64U
 #ifndef MLX5_SRM_REROUTE_TEST_HOOKS
 #define MLX5_SRM_REROUTE_TEST_HOOKS 0
