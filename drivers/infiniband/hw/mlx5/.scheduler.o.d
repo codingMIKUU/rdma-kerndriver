@@ -530,6 +530,7 @@ scheduler.o: \
  /home/lingbo11/zxm/rdma-kerndriver/include/linux/mlx5/fs.h \
  /home/lingbo11/zxm/rdma-kerndriver/include/linux/mlx5/qp.h \
  /home/lingbo11/zxm/rdma-kerndriver/include/linux/mlx5/transobj.h \
+ /home/lingbo11/zxm/rdma-kerndriver/include/uapi/rdma/mlx5-srm-reroute.h \
  /home/lingbo11/zxm/rdma-kerndriver/include/rdma/uverbs_ioctl.h \
  /home/lingbo11/zxm/rdma-kerndriver/include/rdma/uverbs_types.h \
  /home/lingbo11/zxm/rdma-kerndriver/include/uapi/rdma/rdma_user_ioctl.h \
@@ -561,4 +562,5 @@ scheduler.o: \
  include/linux/inet.h \
  /home/lingbo11/zxm/rdma-kerndriver/include/rdma/ib_cm.h \
  include/linux/cpu.h include/linux/node.h include/linux/cpuhotplug.h \
- /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/mlx5_avl_tree.h
+ /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/mlx5_avl_tree.h \
+ /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/reroute.inc

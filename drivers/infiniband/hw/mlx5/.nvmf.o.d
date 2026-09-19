@@ -532,6 +532,7 @@ nvmf.o: \
  /home/lingbo11/zxm/rdma-kerndriver/include/uapi/rdma/mlx5-abi.h \
  /home/lingbo11/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_ioctl_verbs.h \
  /home/lingbo11/zxm/rdma-kerndriver/include/uapi/rdma/mlx5_user_ioctl_verbs.h \
+ /home/lingbo11/zxm/rdma-kerndriver/include/uapi/rdma/mlx5-srm-reroute.h \
  /home/lingbo11/zxm/rdma-kerndriver/include/rdma/uverbs_ioctl.h \
  /home/lingbo11/zxm/rdma-kerndriver/include/rdma/uverbs_types.h \
  /home/lingbo11/zxm/rdma-kerndriver/include/uapi/rdma/rdma_user_ioctl.h \

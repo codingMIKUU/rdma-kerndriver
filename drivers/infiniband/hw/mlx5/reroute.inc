@@ -89,14 +89,14 @@ static void rr_report_kernel_db_eligible(struct mlx5_srm_rr_group *g)
     total = switch_to_prewrite + prewrite_to_kernel_db;
     transition_wqes = mlx5_srm_rr_seq(g->freeze_end - g->db_stop);
     transition_avg_wqe_cycles = transition_wqes ?
-        div64_u64(prewrite_to_kernel_db, transition_wqes) : 0;
+        div64_u64(total, transition_wqes) : 0;
     g->timing_reported = true;
-    pr_info("SRM_REROUTE_TIMING group=%u src=%d dst=%d mode=%s switch_to_user_prewrite_cycles=%llu user_prewrite_to_kernel_db_cycles=%llu total_cycles=%llu transition_wqes=%llu transition_wait_cycles=%llu transition_wait_avg_wqe_cycles=%llu\n",
+    pr_info("SRM_REROUTE_TIMING group=%u src=%d dst=%d mode=%s switch_to_user_prewrite_cycles=%llu user_prewrite_to_kernel_db_cycles=%llu total_cycles=%llu transition_wqes=%llu transition_wait_scope=reroute_total transition_wait_cycles=%llu transition_wait_avg_wqe_cycles=%llu\n",
             g->id, g->src ? g->src->srmc_idx : -1,
             g->dst ? g->dst->srmc_idx : -1,
             g->copy ? "copy" : "drain", switch_to_prewrite,
             prewrite_to_kernel_db, total, transition_wqes,
-            prewrite_to_kernel_db, transition_avg_wqe_cycles);
+            total, transition_avg_wqe_cycles);
 }
 
 static void rr_log(struct mlx5_srm_rr_group *g, const char *event)
