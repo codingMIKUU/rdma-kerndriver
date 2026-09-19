@@ -5,12 +5,18 @@ test_dir=$(mktemp -d -t srm-reroute-test.XXXXXXXX)
 trap 'rm -f -- "$test_dir/state"; rmdir -- "$test_dir"' EXIT
 for simplify in 0 1; do
     for publish_batch in 1 64; do
+      for private in 0 1; do
+        if [[ "$private" == 1 && "$simplify" == 0 ]]; then
+            continue
+        fi
         "${CC:-cc}" -std=gnu11 -O1 -g -fsanitize=address,undefined \
             -DMLX5_SRM_ENABLE_REROUTE=1 \
             -DMLX5_SRM_ENABLE_CQE_SIMPLIFY="$simplify" \
             -DMLX5_SRM_CQE_PUBLISH_BATCH="$publish_batch" \
+            -DMLX5_SRM_ENABLE_PRIVATE_CQ="$private" \
             "$test_root/tests/reroute_state_test.c" -o "$test_dir/state"
         "$test_dir/state"
+      done
     done
 done
 if [[ -f "$test_root/../rdma-core/kernel-headers/rdma/mlx5-srm-reroute.h" ]]; then

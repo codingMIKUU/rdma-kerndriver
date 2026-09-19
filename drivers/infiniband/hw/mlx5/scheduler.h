@@ -3,6 +3,7 @@
 #define _MLX5_IB_SCHEDULER_H
 
 #include <linux/mutex.h>
+#include <linux/bitmap.h>
 #include <linux/types.h>
 #include <linux/wait.h>
 #include <rdma/rdma_cm.h>
@@ -15,6 +16,33 @@
 #endif
 #if MLX5_SRM_ENABLE_CQE_SIMPLIFY != 0 && MLX5_SRM_ENABLE_CQE_SIMPLIFY != 1
 #error "MLX5_SRM_ENABLE_CQE_SIMPLIFY must be 0 or 1"
+#endif
+
+/* Kernel-only experiment: one send CQ per physical KQP. No userspace ABI
+ * change. Keep off to preserve the existing shared-CQ/reroute experiment. */
+#ifndef MLX5_SRM_ENABLE_PRIVATE_CQ
+#define MLX5_SRM_ENABLE_PRIVATE_CQ 1
+#endif
+#ifndef MLX5_SRM_PRIVATE_CQ_POLL_BUDGET
+#define MLX5_SRM_PRIVATE_CQ_POLL_BUDGET 256
+#endif
+#if MLX5_SRM_ENABLE_PRIVATE_CQ != 0 && MLX5_SRM_ENABLE_PRIVATE_CQ != 1
+#error "MLX5_SRM_ENABLE_PRIVATE_CQ must be 0 or 1"
+#endif
+#if MLX5_SRM_ENABLE_PRIVATE_CQ && !MLX5_SRM_ENABLE_CQE_SIMPLIFY
+#error "private CQ requires CQE_SIMPLIFY=1"
+#endif
+#if MLX5_SRM_PRIVATE_CQ_POLL_BUDGET < 1 || MLX5_SRM_PRIVATE_CQ_POLL_BUDGET > 65536
+#error "private CQ poll budget must be in [1, 65536]"
+#endif
+
+/* General's explicitly tagged latency QP: one priority CQ poll before each
+ * normal round-robin poll. Kernel-only switch; default keeps the baseline. */
+#ifndef MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY
+#define MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY 1
+#endif
+#if MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY && !MLX5_SRM_ENABLE_PRIVATE_CQ
+#error "latency CQ priority requires private CQs"
 #endif
 
 /* Kernel-only watermark coalescing; no rdma-core ABI/config change needed.
@@ -50,7 +78,7 @@ static int debug = 0;
 // 对于接收端，NUM_SRMC等于num_kqps*2才行（因为只有一个调度器，发送端两个调度器全发往它了）
 #define NUM_SQB 35000
 #define NUM_LEVEL 2
-#define MLX5_SRM_ENABLE_LARGE_KERNEL_QP 0
+#define MLX5_SRM_ENABLE_LARGE_KERNEL_QP 1
 #define MLX5_SRM_KERNEL_QP_LEVELS \
     (MLX5_SRM_ENABLE_LARGE_KERNEL_QP ? NUM_LEVEL : 1)
 
@@ -64,6 +92,17 @@ static int debug = 0;
 #define CQ_NUM_POWER 0 // 示例：CQ_NUM=2^4=16
 #define CQ_NUM (1 << CQ_NUM_POWER)
 #define CQ_MOD(srmc_idx) ((srmc_idx) & (CQ_NUM - 1)) // 位运算替代取模
+
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+#define MLX5_SRM_CQ_SLOTS NUM_SRMC
+#define MLX5_SRM_CQ_INDEX(srmc_idx) (srmc_idx)
+#if SRMC_POLLING_CNT <= NUM_SRMC
+#error "CQ polling ring must hold every private CQ plus an empty slot"
+#endif
+#else
+#define MLX5_SRM_CQ_SLOTS CQ_NUM
+#define MLX5_SRM_CQ_INDEX(srmc_idx) CQ_MOD(srmc_idx)
+#endif
 
 // 3. 提前计算索引宏（减少循环内重复计算）
 #define LEVEL_TABLE_IDX(level, id) ((level) + (NUM_LEVEL) * (id))       // level_table索引
@@ -84,14 +123,14 @@ static const size_t SCHED_SIZE_LIMIT = MLX5_SRM_SCHED_SIZE_LIMIT;
 #define MLX5_SRM_ENABLE_SCHED_SIZE_LIMIT 0
 #define MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE (MLX5_SRM_ENABLE_SCHED_SIZE_LIMIT)
 
-#define MLX5_SRM_LARGE_DB_LIMIT 1000
+#define MLX5_SRM_LARGE_DB_LIMIT 100
 static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
-#define MLX5_SRM_ENABLE_LARGE_DB_LIMIT 0
+#define MLX5_SRM_ENABLE_LARGE_DB_LIMIT 1
 #define MLX5_SRM_LARGE_DB_LIMIT_ACTIVE \
     (MLX5_SRM_ENABLE_LARGE_KERNEL_QP && \
      MLX5_SRM_ENABLE_LARGE_DB_LIMIT && (MLX5_SRM_LARGE_DB_LIMIT > 0))
 
-#define MLX5_SRM_ENABLE_DB_BATCH_LOG 1
+#define MLX5_SRM_ENABLE_DB_BATCH_LOG 0
 #define MLX5_SRM_DB_BATCH_LOG_INTERVAL (1ULL << 16)
 
 /*
@@ -406,7 +445,7 @@ struct mlx5_ib_sched_worker
 {
     struct mlx5_ib_sched *sched;
     struct task_struct *task;
-    struct ib_cq *shared_cq[CQ_NUM];
+    struct ib_cq *shared_cq[MLX5_SRM_CQ_SLOTS];
     u32 worker_id;
     u32 cpu_id;
     u32 kqp_begin;
@@ -414,6 +453,14 @@ struct mlx5_ib_sched_worker
     u64 limit_batch;
     struct mlx5_sq_ctrl_page *credit_ctrl;
     u64 quiescent_epoch;
+#if MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY
+    /* References/bitmap updated only under owner_lock at QP attach/detach.
+     * The poll cursor is private to this worker. */
+    u32 latency_cq_refs[MLX5_SRM_CQ_SLOTS];
+    DECLARE_BITMAP(latency_cqs, MLX5_SRM_CQ_SLOTS);
+    u32 latency_cq_count;
+    u32 latency_cq_cursor;
+#endif
 } CACHELINE_ALIGNED;
 struct mlx5_ib_sched
 {
@@ -547,6 +594,11 @@ int mlx5_ib_register_external_table(void *table, size_t size, struct page **page
 int srm_map_bf(struct mlx5_ib_sched_group *sched_group,struct mlx5_ib_create_qp *ucmd,struct mlx5_ib_dev *dev);
 #if MLX5_SRM_ENABLE_REROUTE
 void mlx5_srm_rr_fail(struct mlx5_ib_srmc *s);
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+bool mlx5_srm_rr_idle(const struct mlx5_ib_srmc *s);
+void mlx5_srm_rr_complete_idle_batch(struct mlx5_ib_srmc *s,
+                                     u64 first, u32 count);
+#endif
 void mlx5_srm_rr_reap_users(struct mlx5_ib_sched *sched, bool stopped);
 bool mlx5_srm_rr_maintenance_post(struct mlx5_ib_srmc *s, u16 counter, u64 *post);
 int mlx5_srm_rr_complete(struct mlx5_ib_srmc **srmc, u64 *post,

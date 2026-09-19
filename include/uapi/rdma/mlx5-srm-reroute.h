@@ -32,7 +32,9 @@ enum mlx5_srm_route_state {
 };
 /* Occupies the two reserved cachelines of the existing 512-byte ctrl slot.
  * active[]/generation are used only on group path zero.
- * posted_bytes is protected by db_owner; completed_bytes by the CQ poller. */
+ * posted_bytes is protected by db_owner. Completion accounting/cursors are
+ * kernel-private; the old completed_bytes/physical_cons slots are retained
+ * for ABI layout only and are NOT live completion or diagnostic counters. */
 struct mlx5_srm_route_ctrl {
     __u64 generation;
     __u32 active[2];
@@ -43,8 +45,8 @@ struct mlx5_srm_route_ctrl {
     /* Keep every-post route/gate reads away from CQ/DB counter writes. */
     __u8 route_pad[32];
     __u64 posted_bytes;
-    __u64 completed_bytes;
-    __u64 physical_cons;
+    __u64 completed_bytes; /* reserved, do not read */
+    __u64 physical_cons;   /* reserved, do not read */
     __u8 pad[40];
 };
 /* One persistent record per logical user QP, not per recycled SQ slot.

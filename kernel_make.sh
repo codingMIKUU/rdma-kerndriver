@@ -1,5 +1,5 @@
 echo "make start"
-sudo make -j32 CFLAGS="-w ${CFLAGS}" && \
+sudo make -j32 WITH_MAKE_PARAMS=KBUILD_NOCMDDEP=0 KCFLAGS="-w ${KCFLAGS}" && \
 echo "install start" && \
 sudo make install && \
 # echo "bridge modules rmmod start" && \

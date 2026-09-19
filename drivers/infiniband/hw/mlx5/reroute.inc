@@ -3,20 +3,29 @@
  * No syscalls, blocking waits, allocations or locks spanning scheduler turns.
  */
 #if MLX5_SRM_ENABLE_REROUTE
-static bool srm_reroute_enable;
+static bool srm_reroute_enable=true;
 module_param(srm_reroute_enable, bool, 0644);
-static unsigned int srm_reroute_interval_ms = 10;
+static unsigned int srm_reroute_interval_ms = 1;
 module_param(srm_reroute_interval_ms, uint, 0644);
-static unsigned int srm_reroute_ratio_gap = 200;
+static unsigned int srm_reroute_ratio_gap = 1;
 module_param(srm_reroute_ratio_gap, uint, 0644);
 static unsigned int srm_reroute_bad_windows = 3;
 module_param(srm_reroute_bad_windows, uint, 0644);
-static unsigned int srm_reroute_cooldown_ms = 1000;
+static unsigned int srm_reroute_cooldown_ms = 1;
 module_param(srm_reroute_cooldown_ms, uint, 0644);
-static unsigned long srm_reroute_copy_threshold_bytes = 10240;
+/* Editable default, in bytes: total payload of ALL frozen, un-DB'd WQEs.
+ * >= threshold copies to the new SQ; < threshold drains the old SQ. */
+static unsigned long srm_reroute_copy_threshold_bytes = 1000UL * 1024;
 module_param(srm_reroute_copy_threshold_bytes, ulong, 0644);
 static unsigned int srm_reroute_warn_ms = 1000;
 module_param(srm_reroute_warn_ms, uint, 0644);
+/* Diagnose one logical group at a time without logging every 10 ms check. */
+static bool srm_reroute_detect_log_enable=1;
+module_param(srm_reroute_detect_log_enable, bool, 0644);
+static unsigned int srm_reroute_detect_log_interval_ms = 5000;
+module_param(srm_reroute_detect_log_interval_ms, uint, 0644);
+static int srm_reroute_detect_log_group;
+module_param(srm_reroute_detect_log_group, int, 0644);
 /* Explicit one-shot test hook: physical source index, -1 disables it. */
 static int srm_reroute_test_source = -1;
 module_param(srm_reroute_test_source, int, 0644);
@@ -33,6 +42,8 @@ struct mlx5_srm_rr_path {
     unsigned long *done;
     struct mlx5_srm_rr_group *group;
     u64 logical_cons;
+    /* Single CQ/scheduler worker: no user DB writer shares this counter. */
+    u64 completed_bytes;
     struct mlx5_ib_srmc *publish_next;
     bool publish_pending;
     bool maintenance;
@@ -45,7 +56,7 @@ struct mlx5_srm_rr_group {
     u64 *dep_end;
     u64 db_stop, freeze_end, cursor, bytes, dst_begin, dst_end, copied;
     u64 last_posted[2], last_completed[2];
-    unsigned long next_check, last_switch, last_warn, started;
+    unsigned long next_check, next_detect_log, last_switch, last_warn, started;
     u32 bad[2], source_slot, outstanding;
     enum rr_phase phase;
     u32 id;
@@ -70,6 +81,48 @@ static void rr_warn(struct mlx5_srm_rr_group *g, const char *event)
     }
 }
 
+static void rr_detect_log(struct mlx5_srm_rr_group *g,
+                          struct mlx5_srm_route_ctrl *route,
+                          const u64 posted[2], const u64 completed[2],
+                          const u64 ratio[2])
+{
+    struct mlx5_ib_qp *qp0, *qp1;
+    u32 path0, path1;
+    bool cooldown;
+    int selected_group = READ_ONCE(srm_reroute_detect_log_group);
+
+    if (likely(!READ_ONCE(srm_reroute_detect_log_enable)) ||
+        selected_group < 0 || (u32)selected_group != g->id ||
+        time_before(jiffies, g->next_detect_log))
+        return;
+
+    g->next_detect_log = jiffies + msecs_to_jiffies(max(1000U,
+        READ_ONCE(srm_reroute_detect_log_interval_ms)));
+    path0 = READ_ONCE(route->active[0]);
+    path1 = READ_ONCE(route->active[1]);
+    if (path0 >= MLX5_SRM_REROUTE_PATHS ||
+        path1 >= MLX5_SRM_REROUTE_PATHS)
+        return;
+    qp0 = g->paths[path0] ? g->paths[path0]->ini_cb.qp : NULL;
+    qp1 = g->paths[path1] ? g->paths[path1]->ini_cb.qp : NULL;
+    cooldown = time_before(jiffies, g->last_switch +
+        msecs_to_jiffies(READ_ONCE(srm_reroute_cooldown_ms)));
+    pr_info("SRM_REROUTE_DETECT group=%u scope=last_detect_window "
+            "active_kqp=%u,%u qpn=%u,%u posted_bytes=%llu,%llu "
+            "completed_bytes=%llu,%llu ratio_permille=%llu,%llu "
+            "gap=%llu gap_threshold=%u bad_before=%u,%u "
+            "bad_required=%u cooldown=%u enabled=%u\n",
+            g->id, g->paths[path0] ? g->paths[path0]->srmc_idx : U32_MAX,
+            g->paths[path1] ? g->paths[path1]->srmc_idx : U32_MAX,
+            qp0 ? qp0->ibqp.qp_num : 0, qp1 ? qp1->ibqp.qp_num : 0,
+            posted[0], posted[1], completed[0], completed[1],
+            ratio[0], ratio[1],
+            ratio[0] > ratio[1] ? ratio[0] - ratio[1] : ratio[1] - ratio[0],
+            READ_ONCE(srm_reroute_ratio_gap), g->bad[0], g->bad[1],
+            max(1U, READ_ONCE(srm_reroute_bad_windows)), cooldown,
+            READ_ONCE(srm_reroute_enable));
+}
+
 static void *rr_wqe(struct mlx5_ib_srmc *s, u64 post)
 {
     return mlx5_frag_buf_get_wqe(&s->ini_cb.qp->sq.fbc,
@@ -90,13 +143,40 @@ static void rr_token(struct mlx5_ib_srmc *s, u64 post, u16 user)
     smp_store_release(p, (((post + 1) & MLX5_SRM_PUBLISH_SEQ_MASK) << 16) | user);
 }
 
-static u64 rr_bytes(struct mlx5_ib_srmc *s, u64 post)
+static u64 rr_descriptor_bytes(const void *wqe)
 {
     /* V1 preflight accepts one non-inline SGE, XRC READ/WRITE (four DS). */
-    struct mlx5_wqe_data_seg *d = rr_wqe(s, post) + 48;
+    const struct mlx5_wqe_data_seg *d = wqe + 48;
     return be32_to_cpu(READ_ONCE(d->byte_count));
 }
 
+static u64 rr_bytes(struct mlx5_ib_srmc *s, u64 post)
+{
+    return rr_descriptor_bytes(rr_wqe(s, post));
+}
+
+/* The scan owns db_owner but does not reserve worker credit. If another
+ * producer consumes credit, account only the prefix actually granted. Read
+ * the shorter of that prefix and the discarded suffix, BEFORE ringing DB.
+ * Full grants (the common case) do not touch descriptors again. */
+static u64 rr_db_prefix_bytes(struct mlx5_ib_srmc *s, u64 start,
+                              u32 scanned, u32 granted, u64 scanned_bytes)
+{
+    u32 n;
+    u64 bytes = 0;
+
+    if (!granted) return 0;
+    if (granted == scanned) return scanned_bytes;
+    if (granted <= scanned - granted) {
+        for (n = 0; n < granted; n++) bytes += rr_bytes(s, start + n);
+        return bytes;
+    }
+    for (n = granted; n < scanned; n++)
+        scanned_bytes -= rr_bytes(s, start + n);
+    return scanned_bytes;
+}
+
+#if MLX5_SRM_ENABLE_CQE_SIMPLIFY
 static struct mlx5_srm_migration_completion *
 rr_record(struct mlx5_ib_srmc *s, u16 user)
 {
@@ -106,6 +186,7 @@ rr_record(struct mlx5_ib_srmc *s, u16 user)
         user * sizeof(struct mlx5_srm_migration_completion);
     return page_address(pool->pages[off / PAGE_SIZE]) + off % PAGE_SIZE;
 }
+#endif
 
 static int rr_sched_init(struct mlx5_ib_sched *sched)
 {
@@ -354,7 +435,7 @@ static void rr_step(struct mlx5_srm_rr_group *g)
         smp_store_release(&route->active[g->source_slot],
                           d->srmc_idx % MLX5_SRM_REROUTE_PATHS);
         g->last_posted[g->source_slot] = READ_ONCE(d->ctrl_page->route.posted_bytes);
-        g->last_completed[g->source_slot] = READ_ONCE(d->ctrl_page->route.completed_bytes);
+        g->last_completed[g->source_slot] = d->rr->completed_bytes;
         smp_store_release(&route->generation, READ_ONCE(route->generation) + 1);
         g->cursor = g->db_stop;
         g->phase = g->copy ? RR_COPY0 : RR_OLD_DRAIN;
@@ -455,7 +536,6 @@ static void rr_step(struct mlx5_srm_rr_group *g)
         WRITE_ONCE(s->ctrl_page->db_tail, g->freeze_end);
         s->rr->logical_cons = g->freeze_end;
         smp_store_release(&s->ctrl_page->cons_idx, g->freeze_end);
-        WRITE_ONCE(s->ctrl_page->route.physical_cons, g->freeze_end);
         WRITE_ONCE(s->ctrl_page->route.state, MLX5_SRM_ROUTE_SPARE);
         g->last_switch = jiffies;
         g->bad[0] = g->bad[1] = 0;
@@ -487,13 +567,14 @@ static void rr_detect(struct mlx5_srm_rr_group *g)
     for (p = 0; p < 2; p++) {
         struct mlx5_srm_route_ctrl *c = &g->paths[route->active[p]]->ctrl_page->route;
         u64 a = smp_load_acquire(&c->posted_bytes);
-        u64 b = READ_ONCE(c->completed_bytes);
+        u64 b = g->paths[route->active[p]]->rr->completed_bytes;
         posted[p] = a - g->last_posted[p];
         completed[p] = b - g->last_completed[p];
         g->last_posted[p] = a; g->last_completed[p] = b;
         ratio[p] = !posted[p] || completed[p] >= posted[p] ? 1000 :
             div64_u64(completed[p] * 1000, posted[p]);
     }
+    rr_detect_log(g, route, posted, completed, ratio);
     if (!READ_ONCE(srm_reroute_enable) || !posted[0] || !posted[1] ||
         time_before(jiffies, g->last_switch +
                     msecs_to_jiffies(READ_ONCE(srm_reroute_cooldown_ms)))) {
@@ -548,7 +629,7 @@ bool mlx5_srm_rr_can_db(struct mlx5_ib_srmc *s, u64 post)
 
 static void rr_publish_cons(struct mlx5_ib_srmc *s)
 {
-#if MLX5_SRM_ENABLE_CQE_SIMPLIFY && MLX5_SRM_CQE_PUBLISH_BATCH <= 1
+#if MLX5_SRM_ENABLE_CQE_SIMPLIFY && MLX5_SRM_CQE_PUBLISH_BATCH <= 1 && !MLX5_SRM_ENABLE_PRIVATE_CQ
     smp_store_release(&s->ctrl_page->cons_idx, s->rr->logical_cons);
 #else
     struct mlx5_ib_sched *sched = &sched_group.scheds[0];
@@ -559,6 +640,33 @@ static void rr_publish_cons(struct mlx5_ib_srmc *s)
     }
 #endif
 }
+
+/* An exclusive CQ knows its KQP. In RR_IDLE all requests complete on their
+ * original SQ, so one physical cursor also gives the logical cursor. The
+ * caller checked every CQE counter; only payload accounting remains here.
+ * Migration and maintenance use rr_complete() one CQE at a time instead. */
+#if MLX5_SRM_ENABLE_PRIVATE_CQ && MLX5_SRM_ENABLE_CQE_SIMPLIFY
+bool mlx5_srm_rr_idle(const struct mlx5_ib_srmc *s)
+{
+    return s->rr && READ_ONCE(s->rr->group->phase) == RR_IDLE;
+}
+
+void mlx5_srm_rr_complete_idle_batch(struct mlx5_ib_srmc *s,
+                                     u64 first, u32 count)
+{
+    u32 i;
+
+    if (READ_ONCE(srm_reroute_enable)) {
+        u64 bytes = 0;
+
+        for (i = 0; i < count; i++)
+            bytes += rr_bytes(s, mlx5_srm_rr_seq(first + i));
+        s->rr->completed_bytes += bytes;
+    }
+    s->rr->logical_cons = mlx5_srm_rr_seq(first + count);
+    rr_publish_cons(s);
+}
+#endif
 
 void mlx5_srm_rr_flush_native(struct mlx5_ib_sched *sched)
 {
@@ -578,19 +686,33 @@ int mlx5_srm_rr_complete(struct mlx5_ib_srmc **physical, u64 *post,
 {
     struct mlx5_ib_srmc *d = *physical, *s = d;
     struct mlx5_srm_rr_group *g = d->rr->group;
-    struct rr_meta *m = &d->rr->meta[*post & (d->ini_cb.qp->sq.wqe_cnt - 1)];
-    bool migrated = m->origin != NULL;
+    struct rr_meta *m;
+    bool migrated;
     u64 origin = *post;
-    u16 user;
+
+    /* RR_IDLE is reached only after all imported completions, source holes
+     * and SQ-retirement NOPs have drained. ACTIVE alone is NOT sufficient:
+     * the destination can be ACTIVE while imported requests remain in flight.
+     * Keep errors on the slow path, even when automatic detection is off. */
+    if (likely(!status && g->phase == RR_IDLE)) {
+        d->rr->completed_bytes += rr_bytes(d, *post);
+        d->rr->logical_cons = mlx5_srm_rr_seq(*post + 1);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+        mlx5_srm_timing_publish_kernel_cqe(d, *post, tsc);
+#endif
+        rr_publish_cons(d);
+        return 0;
+    }
+
     if (d->rr->maintenance &&
         mlx5_srm_rr_seq(*post + 1) == d->rr->maintenance_end) {
         d->rr->maintenance = false;
-        WRITE_ONCE(d->ctrl_page->route.physical_cons, d->cq_complete_idx);
         if (status) mlx5_srm_rr_fail(d);
         return 2;
     }
-    d->ctrl_page->route.completed_bytes += rr_bytes(d, *post);
-    WRITE_ONCE(d->ctrl_page->route.physical_cons, d->cq_complete_idx);
+    d->rr->completed_bytes += rr_bytes(d, *post);
+    m = &d->rr->meta[*post & (d->ini_cb.qp->sq.wqe_cnt - 1)];
+    migrated = m->origin != NULL;
     if (migrated) {
         s = m->origin; origin = m->post;
         m->origin = NULL;
@@ -607,7 +729,6 @@ int mlx5_srm_rr_complete(struct mlx5_ib_srmc **physical, u64 *post,
                     (s->ini_cb.qp->sq.wqe_cnt - 1), s->rr->done);
         s->rr->logical_cons = mlx5_srm_rr_seq(s->rr->logical_cons + 1);
     }
-    user = mlx5_srm_publish_usr_rc(mlx5_ib_srmc_get_publish_token(s, origin));
 #if MLX5_SRM_ENABLE_WQE_TIMING
     mlx5_srm_timing_publish_kernel_cqe(s, origin, tsc);
 #endif
@@ -618,6 +739,8 @@ int mlx5_srm_rr_complete(struct mlx5_ib_srmc **physical, u64 *post,
     }
 #if MLX5_SRM_ENABLE_CQE_SIMPLIFY
     if (migrated || status) {
+        u16 user = mlx5_srm_publish_usr_rc(
+            mlx5_ib_srmc_get_publish_token(s, origin));
         struct mlx5_srm_migration_completion *r = rr_record(s, user);
         WRITE_ONCE(r->origin_slot, s->srmc_idx);
         WRITE_ONCE(r->status, status); WRITE_ONCE(r->vendor, vendor);

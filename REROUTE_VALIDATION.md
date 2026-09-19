@@ -1,5 +1,71 @@
 # 本地验证记录
 
+## 2026-09-17：CQ/DB 常态路径优化 1–4
+
+本轮在原目录的 `srm-reroute-size-aware` 修改，没有新建 worktree 或切换分支。
+保留已有未提交的实验参数和构建产物。本轮没有 sudo、安装、模块重载、双机测试、
+提交或推送；以下旧章节是初版实现时的历史记录，不代表当前工作区配置。
+
+实际修改：`reroute.inc`、`scheduler.c`、离线测试、本文及设计文档。两个驱动的
+`mlx5-srm-reroute.h` 仅同步字段用途注释，没有改变布局、能力或 ABI 值；rdma-core
+执行代码没有修改，本轮不需要重新编译用户库（前提是双方原有宏已匹配）。
+
+验证命令：
+
+```bash
+cd /home/lingbo11/zxm/rdma-kerndriver
+bash tests/run_reroute_offline.sh
+git diff --check -- drivers/infiniband/hw/mlx5/reroute.inc \
+  drivers/infiniband/hw/mlx5/scheduler.c include/uapi/rdma/mlx5-srm-reroute.h \
+  tests/reroute_state_test.c REROUTE_SIZE_AWARE.md REROUTE_VALIDATION.md
+```
+
+四种 ASan/UBSan 组合通过。新增检查普通完成不访问迁移表/位图/token、错误不走
+快速路径、原路径/完整序号映射、完成私有计数不统计回收 NOP、共享保留字段不写、
+不同 payload 的零/部分/完整信用字节累计，以及 16/48/63 位边界。
+
+现有 `.o/.ko` 为 root 所有；为避免覆盖它们，编译检查复用 Kbuild 的 `.cmd`
+参数，对生产 `scheduler.c` 和 `cq.c` 生成临时对象，不链接或安装。8 个组合：
+`(R,S,B,T)=(0,0,1,0),(0,1,1,0),(1,0,1,0),(1,1,1,0),`
+`(1,0,64,0),(1,1,64,0),(1,0,1,1),(1,1,64,1)`，共 16 次对象编译通过。
+执行方式如下（只解析编译配方，不执行任意 shell 配方）：
+
+```bash
+python3 - <<'PY'
+import pathlib, shlex, subprocess, tempfile
+repo = pathlib.Path('/home/lingbo11/zxm/rdma-kerndriver')
+build = pathlib.Path('/lib/modules/5.4.0-86-generic/build').resolve()
+out = pathlib.Path(tempfile.mkdtemp(prefix='srm-reroute-cq-compile-'))
+print('Compile objects only; artifacts:', out, flush=True)
+configs = [(0,0,1,0), (0,1,1,0), (1,0,1,0), (1,1,1,0),
+           (1,0,64,0), (1,1,64,0), (1,0,1,1), (1,1,64,1)]
+for reroute, simplify, batch, timing in configs:
+    name = f'r{reroute}-s{simplify}-b{batch}-t{timing}'
+    for source in ('scheduler','cq'):
+        recipe = repo / f'drivers/infiniband/hw/mlx5/.{source}.o.cmd'
+        args = shlex.split(recipe.read_text().splitlines()[0].split(' := ',1)[1])
+        assert args[0] == 'gcc' and '-c' in args
+        args = [x for x in args if not x.startswith('-Wp,-MD,') and x != '-w']
+        args[args.index('-o')+1] = str(out / f'{name}-{source}.o')
+        args += [f'-DMLX5_SRM_ENABLE_REROUTE={reroute}',
+                 f'-DMLX5_SRM_ENABLE_CQE_SIMPLIFY={simplify}',
+                 f'-DMLX5_SRM_CQE_PUBLISH_BATCH={batch}',
+                 f'-DMLX5_SRM_ENABLE_WQE_TIMING={timing}']
+        result = subprocess.run(args, cwd=build, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if result.returncode:
+            print(result.stdout)
+            raise SystemExit(result.returncode)
+        print('PASS', name, source, flush=True)
+PY
+```
+
+上述是编译检查，不等于已生成可安装的新模块。正式构建安装仍使用原来的
+`sudo bash kernel_make.sh`（会安装并卸载/重载模块，必须在停止实验的窗口执行）。
+本轮尚未测量吞吐，也没有证明恢复到 180Gbps；性能比较要保持实际活动 KQP 数一致。
+
+---
+
 本记录对应 `srm-reroute-size-aware` 初版。结论仅限源码、编译和内存模拟，
 **不是双机 RDMA 验收报告**。
 

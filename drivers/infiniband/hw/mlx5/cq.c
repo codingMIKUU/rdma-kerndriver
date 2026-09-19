@@ -106,6 +106,7 @@ static void *next_cqe_sw(struct mlx5_ib_cq *cq)
     return get_sw_cqe(cq, cq->mcq.cons_index);
 }
 
+/* PRIVATE_CQ_COMPLETE_TEST_BEGIN */
 static inline u64 mlx5_ib_srmc_complete_post(struct mlx5_ib_qp *qp,
 					     struct mlx5_ib_wq *wq,
 					     u16 wqe_ctr,
@@ -169,6 +170,7 @@ static inline u64 mlx5_ib_srmc_complete_post(struct mlx5_ib_qp *qp,
 
 	return completed;
 }
+/* PRIVATE_CQ_COMPLETE_TEST_END */
 
 static enum ib_wc_opcode get_umr_comp(struct mlx5_ib_wq *wq, int idx)
 {
@@ -1228,6 +1230,224 @@ int mlx5_ib_poll_srm_progress(struct ib_cq *ibcq, int num_entries,
 	*completed_wqes = completed_sum;
 	return npolled;
 }
+
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+/* PRIVATE_CQ_TEST_BEGIN: the offline test compiles this production function.
+ * num_entries is a snapshot of this SQ's doorbelled, uncompleted BBs. Each
+ * Hollow WR occupies one BB; gaps (e.g. unsignaled WRs) use the counter's
+ * cumulative distance instead of incorrectly returning only one credit.
+ * The CQ is exclusive to srmc: no QPN lookup or touched-QP list. In the
+ * no-reroute/idle-reroute fast path the SQ cursor and logical watermark are
+ * published once per poll; a live migration still needs per-CQE mapping.
+ * A short batch is always flushed.
+ */
+int mlx5_ib_poll_srm_private_progress(struct mlx5_ib_srmc *srmc,
+				      int num_entries, u32 *completed_wqes)
+{
+	struct mlx5_ib_qp *qp = srmc->ini_cb.qp;
+	struct mlx5_ib_cq *cq = to_mcq(srmc->ini_cb.cq);
+	struct mlx5_ib_dev *dev = to_mdev(cq->ibcq.device);
+	struct mlx5_sq_ctrl_page *ctrl = srmc->ctrl_page;
+	u64 cursor;
+	u32 completed = 0, consumed = 0;
+	unsigned long flags;
+	int npolled = 0, error = 0;
+	int budget = min_t(int, num_entries, MLX5_SRM_PRIVATE_CQ_POLL_BUDGET);
+#if MLX5_SRM_ENABLE_REROUTE
+	u64 fast_start;
+	u32 fast_count = 0;
+	bool idle_fast;
+#endif
+
+	*completed_wqes = 0;
+	if (unlikely(dev->mdev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR))
+		return -EIO;
+	if (unlikely(!qp || !ctrl || qp->srmc_owner != srmc))
+		return -EINVAL;
+	if (num_entries <= 0)
+		return 0;
+
+	spin_lock_irqsave(&cq->lock, flags);
+	cursor = READ_ONCE(srmc->cq_complete_idx);
+#if MLX5_SRM_ENABLE_REROUTE
+	/* The scheduler is the only migration/CQ worker. A transaction cannot
+	 * begin during this poll; normal IDLE CQEs stay on the batched path. */
+	idle_fast = mlx5_srm_rr_idle(srmc);
+	fast_start = cursor;
+#endif
+	while (npolled < budget && completed < (u32)num_entries) {
+		struct mlx5_cqe64 *cqe64;
+		void *cqe = next_cqe_sw(cq);
+		u32 qpn;
+		u8 opcode;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+		u64 cqe_poll_tsc;
+#endif
+
+		if (!cqe)
+			break;
+		cqe64 = cq->mcq.cqe_sz == 64 ? cqe : cqe + 64;
+		rmb();
+#if MLX5_SRM_ENABLE_WQE_TIMING
+		cqe_poll_tsc = rdtsc_ordered();
+#endif
+		opcode = get_cqe_opcode(cqe64);
+		if (unlikely(opcode == MLX5_CQE_RESIZE_CQ)) {
+			/* Only startup resizing is used. Bound even administrative
+			 * CQEs so a corrupt CQ cannot create an unbounded poll. */
+			if (!cq->resize_buf || consumed >= (u32)budget) {
+				error = -EIO;
+				break;
+			}
+			++cq->mcq.cons_index;
+			++consumed;
+			free_cq_buf(dev, &cq->buf);
+			cq->buf = *cq->resize_buf;
+			kfree(cq->resize_buf);
+			cq->resize_buf = NULL;
+			continue;
+		}
+		qpn = be32_to_cpu(cqe64->sop_drop_qpn) & 0xffffff;
+		if (unlikely(qpn != qp->ibqp.qp_num ||
+			     (opcode != MLX5_CQE_REQ && opcode != MLX5_CQE_REQ_ERR))) {
+			error = -EINVAL;
+			break;
+		}
+#if MLX5_SRM_ENABLE_REROUTE
+		if (idle_fast && likely(opcode == MLX5_CQE_REQ)) {
+			/* V1 reroute is all-signaled and one BB per WR. Checking the
+			 * 16-bit CQE counter still catches duplicates across wrap. */
+			if (unlikely(be16_to_cpu(cqe64->wqe_counter) != (u16)cursor)) {
+				error = -ERANGE;
+				break;
+			}
+#if MLX5_SRM_ENABLE_WQE_TIMING
+			mlx5_srm_timing_publish_kernel_cqe(srmc, cursor,
+							    cqe_poll_tsc);
+#endif
+			cursor = mlx5_srm_rr_seq(cursor + 1);
+			++fast_count;
+			++completed;
+			++npolled;
+			++cq->mcq.cons_index;
+			++consumed;
+			continue;
+		}
+
+		if (idle_fast && fast_count) {
+			/* An error belongs to the mapped slow path. Publish preceding
+			 * successes before it, including their physical SQ cursor. */
+			WRITE_ONCE(srmc->cq_complete_idx, cursor);
+			WRITE_ONCE(qp->sq.tail, (u32)cursor);
+			mlx5_srm_rr_complete_idle_batch(srmc, fast_start,
+						    fast_count);
+			fast_count = 0;
+		}
+		idle_fast = false;
+		{
+			struct mlx5_ib_srmc *origin = srmc;
+			struct ib_wc wc = {};
+			u32 credit_one = 0;
+			u64 post;
+
+			if (opcode == MLX5_CQE_REQ_ERR)
+				mlx5_handle_error_cqe(dev,
+					(struct mlx5_err_cqe *)cqe64, &wc);
+			post = mlx5_ib_srmc_complete_post(qp, &qp->sq,
+				be16_to_cpu(cqe64->wqe_counter), &credit_one);
+			if (unlikely(post == U64_MAX ||
+				     credit_one > (u32)num_entries - completed)) {
+				error = -ERANGE;
+				break;
+			}
+			cursor = READ_ONCE(srmc->cq_complete_idx);
+			completed += credit_one;
+			++npolled;
+			++cq->mcq.cons_index;
+			++consumed;
+			mlx5_srm_rr_complete(&origin, &post, wc.status,
+					  wc.vendor_err,
+#if MLX5_SRM_ENABLE_WQE_TIMING
+					  cqe_poll_tsc
+#else
+					  0
+#endif
+					  );
+			if (unlikely(opcode == MLX5_CQE_REQ_ERR))
+				break;
+		}
+#else
+		{
+			u32 advance = (u16)(be16_to_cpu(cqe64->wqe_counter) -
+					      (u16)cursor) + 1;
+
+			/* Reject duplicates/stale counters; do not fabricate a
+			 * completion or credit across a 16-bit counter wrap. */
+			if (unlikely(advance > (u32)num_entries - completed ||
+				     advance > qp->sq.wqe_cnt)) {
+				error = -ERANGE;
+				break;
+			}
+			cursor += advance;
+			completed += advance;
+			++npolled;
+			++cq->mcq.cons_index;
+			++consumed;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+			mlx5_srm_timing_publish_kernel_cqe(srmc, cursor - 1,
+							    cqe_poll_tsc);
+#endif
+			if (unlikely(opcode == MLX5_CQE_REQ_ERR)) {
+				struct ib_wc wc = {};
+
+				mlx5_handle_error_cqe(dev,
+					(struct mlx5_err_cqe *)cqe64, &wc);
+				if (READ_ONCE(ctrl->completion_error_status) ==
+				    IB_WC_SUCCESS) {
+					WRITE_ONCE(ctrl->completion_error_idx, cursor);
+					WRITE_ONCE(ctrl->completion_error_status,
+						   wc.status);
+					WRITE_ONCE(ctrl->completion_error_vendor,
+						   wc.vendor_err);
+				}
+				break;
+			}
+		}
+#endif
+	}
+	if (consumed)
+		mlx5_cq_set_ci(&cq->mcq);
+	if (npolled)
+		wmb();
+#if MLX5_SRM_ENABLE_REROUTE
+	if (fast_count) {
+		WRITE_ONCE(srmc->cq_complete_idx, cursor);
+		WRITE_ONCE(qp->sq.tail, (u32)cursor);
+		mlx5_srm_rr_complete_idle_batch(srmc, fast_start, fast_count);
+	}
+	if (npolled)
+		mlx5_srm_rr_flush_native(&sched_group.scheds[0]);
+	if (unlikely(error))
+		mlx5_srm_rr_fail(srmc);
+#else
+	if (npolled) {
+		WRITE_ONCE(srmc->cq_complete_idx, cursor);
+		WRITE_ONCE(qp->sq.tail, (u32)cursor);
+		/* Return CQ slots before allowing producers to reuse SQ slots.
+		 * Publish timestamps/error information before this single store. */
+		smp_store_release(&ctrl->cons_idx, cursor);
+	}
+#endif
+	spin_unlock_irqrestore(&cq->lock, flags);
+	if (unlikely(error))
+		pr_warn_ratelimited("SRM private CQ parse failed: kqp=%d qpn=%u next=%llu pending=%d error=%d\n",
+				    srmc->srmc_idx, qp->ibqp.qp_num, cursor,
+				    num_entries - completed, error);
+	*completed_wqes = completed;
+	return npolled ? npolled : error;
+}
+/* PRIVATE_CQ_TEST_END */
+#endif
 
 #endif /* MLX5_SRM_ENABLE_CQE_SIMPLIFY */
 

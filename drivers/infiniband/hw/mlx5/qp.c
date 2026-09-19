@@ -187,6 +187,63 @@ static bool mlx5_ib_is_skip_kern_qp(struct mlx5_ib_qp *qp)
 	       (qp->flags_en & MLX5_QP_FLAG_SRM_SKIP_KERN_QP);
 }
 
+#if MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY
+/* owner_lock held. No application-QP pointer is kept by the poller. SRMCs
+ * live until scheduler stop, so a concurrent detach only removes a hint. */
+static void mlx5_ib_latency_cq_ref(struct mlx5_ib_srmc *s, bool add,
+				 u32 usr_rc)
+{
+	struct mlx5_ib_sched *sched = &sched_group.scheds[0];
+	struct mlx5_ib_sched_worker *worker;
+	u32 idx;
+
+	if (!s || !sched->workers || s->owner_worker >= sched->worker_count)
+		return;
+	idx = s->srmc_idx;
+	if (WARN_ON_ONCE(idx >= MLX5_SRM_CQ_SLOTS))
+		return;
+	worker = &sched->workers[s->owner_worker];
+	if (add) {
+		if (!worker->latency_cq_refs[idx]++) {
+			set_bit(idx, worker->latency_cqs);
+			WRITE_ONCE(worker->latency_cq_count,
+				   worker->latency_cq_count + 1);
+		}
+		pr_info("SRM latency CQ priority attach usr_rc=%u sched=%d worker=%u kqp=%u qpn=%u\n",
+			usr_rc, sched->id, s->owner_worker, idx,
+			s->ini_cb.qp->ibqp.qp_num);
+	} else if (worker->latency_cq_refs[idx] &&
+		   !--worker->latency_cq_refs[idx]) {
+		clear_bit(idx, worker->latency_cqs);
+		WRITE_ONCE(worker->latency_cq_count,
+			   worker->latency_cq_count - 1);
+	}
+}
+
+static void mlx5_ib_latency_cq_refs(struct mlx5_ib_qp *qp, bool add)
+{
+	if (!(qp->flags_en & MLX5_QP_FLAG_SRM_LATENCY_CQ) || !qp->srmc_owner)
+		return;
+#if MLX5_SRM_ENABLE_REROUTE
+	{
+		struct mlx5_ib_sched *sched = &sched_group.scheds[0];
+		u32 base = qp->srmc_owner->srmc_idx / MLX5_SRM_REROUTE_PATHS *
+			   MLX5_SRM_REROUTE_PATHS;
+		u32 p;
+
+		/* Both current and draining paths keep priority across reroutes. */
+		for (p = 0; p < MLX5_SRM_REROUTE_PATHS; p++)
+			mlx5_ib_latency_cq_ref(sched->srmc_by_idx[base + p], add,
+					       qp->ibqp.qp_num);
+	}
+#else
+	mlx5_ib_latency_cq_ref(qp->srmc_owner, add, qp->ibqp.qp_num);
+	if (qp->large_srmc_owner && qp->large_srmc_owner != qp->srmc_owner)
+		mlx5_ib_latency_cq_ref(qp->large_srmc_owner, add, qp->ibqp.qp_num);
+#endif
+}
+#endif
+
 static void mlx5_ib_unregister_srm_owners(struct mlx5_ib_qp *qp)
 {
 	struct mlx5_ib_srmc *srmc_owner;
@@ -194,6 +251,10 @@ static void mlx5_ib_unregister_srm_owners(struct mlx5_ib_qp *qp)
 
 	mutex_lock(&sched_group.owner_lock);
 
+#if MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY
+	if (qp->srm_owner_registered && !sched_group.owner_stopping)
+		mlx5_ib_latency_cq_refs(qp, false);
+#endif
 	/* Clear the published pointers before touching the owners themselves. */
 	srmc_owner = qp->srmc_owner;
 	large_srmc_owner = qp->large_srmc_owner;
@@ -1996,6 +2057,9 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 			list_add_tail(&qp->srm_owner_list,
 				      &sched_group.owner_qps);
 			qp->srm_owner_registered = 1;
+#if MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY
+			mlx5_ib_latency_cq_refs(qp, true);
+#endif
 		}
 		if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP)
 			pr_info("hollow RC attach: usr_rc=%u small_srmc=%d small_qpn=%u large_srmc=%d large_qpn=%u users=%d\n",
@@ -4307,6 +4371,11 @@ static int process_vendor_flags(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 	process_vendor_flag(dev, &flags, MLX5_QP_FLAG_UAR_PAGE_INDEX, true, qp);
 	process_vendor_flag(dev, &flags, MLX5_QP_FLAG_SRM_SENDER, true, qp);
 	process_vendor_flag(dev, &flags, MLX5_QP_FLAG_SRM_SKIP_KERN_QP, true, qp);
+	/* Recognize the hint even in disabled builds: only the scheduler policy
+	 * is switched off, not the create-QP ABI. */
+	process_vendor_flag(dev, &flags, MLX5_QP_FLAG_SRM_LATENCY_CQ,
+			    mlx5_ib_is_hollow_rc_qp(qp) &&
+			    !mlx5_ib_is_skip_kern_qp(qp), qp);
 
 	cond = qp->flags_en & ~(MLX5_QP_FLAG_TUNNEL_OFFLOADS |
 				MLX5_QP_FLAG_TIR_ALLOW_SELF_LB_UC |

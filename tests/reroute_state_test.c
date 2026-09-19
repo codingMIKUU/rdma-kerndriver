@@ -29,6 +29,7 @@ typedef uint64_t atomic64_t;
 #define pr_err(...) ((void)0)
 #define READ_ONCE(a) (a)
 #define WRITE_ONCE(a,b) ((a)=(b))
+#define likely(a) (a)
 #define smp_store_release(a,b) (*(a)=(b))
 #define smp_load_acquire(a) (*(a))
 #define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))
@@ -46,7 +47,8 @@ typedef uint64_t atomic64_t;
 #define bitmap_zero(p,n) memset(p,0,(((n)+63)/64)*8)
 #define __set_bit(n,p) ((p)[(n)/64] |= 1UL<<((n)%64))
 #define __clear_bit(n,p) ((p)[(n)/64] &= ~(1UL<<((n)%64)))
-#define test_bit(n,p) (((p)[(n)/64]>>((n)%64))&1)
+static u64 bitmap_reads, token_reads, descriptor_reads;
+#define test_bit(n,p) (bitmap_reads++, (((p)[(n)/64]>>((n)%64))&1))
 #define cpu_to_be32 htobe32
 #define be32_to_cpu be32toh
 #define page_address(p) (p)
@@ -98,9 +100,10 @@ struct mlx5_ib_sched {
     struct { struct mlx5_sq_ctrl_page *credit_ctrl; } workers[1];
 };
 static struct {struct mlx5_ib_sched *scheds;} sched_group;
-static void *mlx5_frag_buf_get_wqe(void **buf,u32 idx) { return (char *)*buf+64*idx; }
+static void *mlx5_frag_buf_get_wqe(void **buf,u32 idx)
+{ descriptor_reads++; return (char *)*buf+64*idx; }
 static u64 mlx5_ib_srmc_get_publish_token(struct mlx5_ib_srmc *s,u32 idx)
-{ return ((u64 *)s->publish_pages[0])[idx&(s->publish_depth-1)]; }
+{ token_reads++; return ((u64 *)s->publish_pages[0])[idx&(s->publish_depth-1)]; }
 static u64 mlx5_srm_publish_seq(u64 t) { return t>>16; }
 static u16 mlx5_srm_publish_usr_rc(u64 t) { return t; }
 #include "../drivers/infiniband/hw/mlx5/reroute.inc"
@@ -127,6 +130,9 @@ static void init(u64 start)
         s->publish_pages=calloc(1,sizeof(void *));
         s->publish_pages[0]=calloc(1,PAGE_SIZE);
         assert(!rr_path_init(&sched,s));
+        /* These ABI slots are reserved now, not live CQ-writer counters. */
+        s->ctrl_page->route.completed_bytes=0x12345678;
+        s->ctrl_page->route.physical_cons=0x87654321;
         s->ctrl_page->cons_idx=s->ctrl_page->db_tail=start;
         s->ctrl_page->resv_idx=start|(p<2?0:MLX5_SRM_REROUTE_FROZEN);
         s->sched_post_idx=s->cq_complete_idx=s->rr->logical_cons=start;
@@ -138,6 +144,8 @@ static void fini(void)
 {
     unsigned p;
     for(p=0;p<4;p++) {
+        assert(paths[p].ctrl_page->route.completed_bytes==0x12345678);
+        assert(paths[p].ctrl_page->route.physical_cons==0x87654321);
         rr_path_free(&paths[p]);
         free(paths[p].ini_cb.qp->sq.fbc);free(paths[p].ini_cb.qp);
         free(paths[p].ctrl_page);
@@ -158,14 +166,30 @@ static void fill(struct mlx5_ib_srmc *s,u64 idx,u16 user,u32 bytes,bool ready)
     else ((u64 *)s->publish_pages[0])[idx & (s->publish_depth-1)] =
         (((idx + 1 - s->publish_depth) & MLX5_SRM_PUBLISH_SEQ_MASK) << 16) | user;
 }
-static void complete(struct mlx5_ib_srmc *s,u64 idx,u32 status)
+static int complete(struct mlx5_ib_srmc *s,u64 idx,u32 status)
 {
     struct mlx5_ib_srmc *origin=s;
+    struct mlx5_ib_srmc *expected_origin=s;
     u64 post=idx;
+    u64 expected_post=idx;
+    u64 reads=token_reads;
+    int ret;
+    if(s->rr->meta) {
+        struct rr_meta *m=&s->rr->meta[idx&(s->ini_cb.qp->sq.wqe_cnt-1)];
+        if(m->origin) { expected_origin=m->origin;expected_post=m->post; }
+    }
     s->ctrl_page->db_tail=add(idx,1);
     s->cq_complete_idx=add(idx,1);
-    mlx5_srm_rr_complete(&origin,&post,status,17,12345);
+    ret=mlx5_srm_rr_complete(&origin,&post,status,17,12345);
+    assert(origin==expected_origin && post==expected_post);
+#if !MLX5_SRM_ENABLE_CQE_SIMPLIFY
+    /* Native CQ routing, not rr_complete, owns token validation/lookup. */
+    assert(token_reads==reads);
+#else
+    (void)reads;
+#endif
     mlx5_srm_rr_flush_native(&sched);
+    return ret;
 }
 static void step_to(enum rr_phase phase)
 {
@@ -240,6 +264,8 @@ static void run(u32 total,u64 start)
     }
     complete(d,g->dst_end,0);
     step_to(RR_IDLE);
+    assert(s->rr->completed_bytes==100+(copying?0:total));
+    assert(d->rr->completed_bytes==123+(copying?total:0));
     assert(paths[0].ctrl_page->route.state==MLX5_SRM_ROUTE_SPARE);
     assert(paths[0].ctrl_page->resv_idx&MLX5_SRM_REROUTE_FROZEN);
     assert(paths[0].cq_complete_idx==add(start,3));
@@ -291,7 +317,7 @@ static void run_detector(void)
     for(i=0;i<2;i++) {
         paths[0].ctrl_page->route.posted_bytes+=1000;
         paths[1].ctrl_page->route.posted_bytes+=1000;
-        paths[1].ctrl_page->route.completed_bytes+=1000;
+        paths[1].rr->completed_bytes+=1000;
         rr_detect(g);jiffies+=10;
     }
     assert(g->bad[0]==2);
@@ -299,13 +325,115 @@ static void run_detector(void)
     for(i=0;i<3;i++) {
         paths[0].ctrl_page->route.posted_bytes+=1000;
         paths[1].ctrl_page->route.posted_bytes+=1000;
-        paths[1].ctrl_page->route.completed_bytes+=1000;
+        paths[1].rr->completed_bytes+=1000;
         rr_detect(g);jiffies+=10;
         assert(g->phase==(i==2?RR_READY:RR_IDLE));
     }
     srm_reroute_enable=false;
     step_to(RR_IDLE); /* disabling detection does not abandon transaction */
     fini();
+}
+
+static void run_normal_fast_path(void)
+{
+    u64 starts[]={0,65535,(1ULL<<48)-1,MLX5_SRM_REROUTE_MASK};
+    unsigned i,enabled;
+    for(enabled=0;enabled<2;enabled++) for(i=0;i<4;i++) {
+        struct mlx5_ib_srmc *s;
+        struct rr_meta *meta;
+        unsigned long *done;
+        void **tokens;
+        u64 start=starts[i],bits,reads;
+        init(start);s=&paths[0];srm_reroute_enable=enabled;
+        fill(s,start,7,1234,true);
+        meta=s->rr->meta;done=s->rr->done;tokens=s->publish_pages;
+        s->rr->meta=NULL;s->rr->done=NULL;s->publish_pages=NULL;
+        bits=bitmap_reads;reads=token_reads;
+        /* A never-migrated successful CQE must not touch any of these. */
+        assert(complete(s,start,0)==0);
+        assert(bitmap_reads==bits && token_reads==reads);
+        assert(s->ctrl_page->cons_idx==add(start,1));
+        assert(s->rr->logical_cons==add(start,1));
+        assert(s->rr->completed_bytes==1234);
+        s->rr->meta=meta;s->rr->done=done;s->publish_pages=tokens;
+        fini();
+    }
+    /* Errors must not take the successful fast path even in an idle group. */
+    init(0);fill(&paths[0],0,7,99,true);
+    assert(complete(&paths[0],0,13)==0);
+    assert(sched.rr_groups[0].phase==RR_FAILED);
+    assert(paths[0].ctrl_page->completion_error_status==13);
+#if MLX5_SRM_ENABLE_CQE_SIMPLIFY
+    assert(rr_record(&paths[0],7)->status==13);
+#endif
+    fini();
+}
+
+#if MLX5_SRM_ENABLE_PRIVATE_CQ && MLX5_SRM_ENABLE_CQE_SIMPLIFY
+static void run_private_idle_batch(void)
+{
+    const u64 starts[] = {0, 65534, MLX5_SRM_REROUTE_MASK - 1};
+    unsigned int k, enabled;
+
+    for (enabled = 0; enabled < 2; enabled++) {
+        for (k = 0; k < sizeof(starts) / sizeof(starts[0]); k++) {
+            struct mlx5_ib_srmc *s;
+            struct rr_meta *meta;
+            unsigned long *done;
+            void **tokens;
+            u64 before, reads;
+
+            init(starts[k]);
+            s = &paths[0];
+            srm_reroute_enable = enabled;
+            fill(s, starts[k], 1, 101, true);
+            fill(s, add(starts[k], 1), 2, 202, true);
+            fill(s, add(starts[k], 2), 3, 303, true);
+            meta = s->rr->meta;
+            done = s->rr->done;
+            tokens = s->publish_pages;
+            s->rr->meta = NULL;
+            s->rr->done = NULL;
+            s->publish_pages = NULL;
+            before = s->ctrl_page->cons_idx;
+            reads = descriptor_reads;
+            assert(mlx5_srm_rr_idle(s));
+            mlx5_srm_rr_complete_idle_batch(s, starts[k], 3);
+            assert(s->ctrl_page->cons_idx == before);
+            assert(s->rr->logical_cons == add(starts[k], 3));
+            assert(s->rr->completed_bytes == (enabled ? 606 : 0));
+            assert(descriptor_reads - reads == (enabled ? 3 : 0));
+            mlx5_srm_rr_flush_native(&sched);
+            assert(s->ctrl_page->cons_idx == add(starts[k], 3));
+            assert(!s->rr->publish_pending);
+            s->rr->meta = meta;
+            s->rr->done = done;
+            s->publish_pages = tokens;
+            fini();
+        }
+    }
+}
+#endif
+
+static void run_db_byte_prefix(void)
+{
+    u64 starts[]={0,60,65530,(1ULL<<48)-6,MLX5_SRM_REROUTE_MASK-5};
+    unsigned i,n,grant;
+    for(i=0;i<5;i++) {
+        u64 start=starts[i],total=0,expected=0;
+        init(start);
+        for(n=0;n<12;n++) {
+            u32 bytes=(n+1)*123;
+            fill(&paths[0],add(start,n),n,bytes,true);total+=bytes;
+        }
+        for(grant=0;grant<=12;grant++) {
+            u64 reads=descriptor_reads;
+            assert(rr_db_prefix_bytes(&paths[0],start,12,grant,total)==expected);
+            assert(descriptor_reads-reads==(grant<12-grant?grant:12-grant));
+            if(grant<12) expected+=(grant+1)*123;
+        }
+        fini();
+    }
 }
 int main(void)
 {
@@ -323,9 +451,13 @@ int main(void)
     }
     assert(mlx5_srm_rr_delta(1,MLX5_SRM_REROUTE_MASK)==2);
     run_budget_and_errors();run_detector();
+    run_normal_fast_path();run_db_byte_prefix();
+#if MLX5_SRM_ENABLE_PRIVATE_CQ && MLX5_SRM_ENABLE_CQE_SIMPLIFY
+    run_private_idle_batch();
+#endif
     for(p=0;p<513;p++) free(dev.sq_ctrl_pool.pages[p]);
     free(dev.sq_ctrl_pool.pages);
-    printf("PASS: 240 classified + 4800 empty migrations; budgets, owner contention, error mapping, detector, NOP retirement, 16/48/63-bit wrap; simplify=%d\n",
+    printf("PASS: 240 classified + 4800 empty migrations; budgets, owner contention, error mapping, detector, NOP retirement, 16/48/63-bit wrap; idle fast path, private completion counters, native token reads, partial DB byte accounting; simplify=%d\n",
            MLX5_SRM_ENABLE_CQE_SIMPLIFY);
     return 0;
 }

@@ -58,7 +58,7 @@ module_param_named(srm_stats_enable, srm_stats_enable, bool, 0644);
 MODULE_PARM_DESC(srm_stats_enable,
                  "Enable one-second hollow RC scheduler statistics");
 
-static bool srm_direct_db_stats_enable = 1;
+static bool srm_direct_db_stats_enable = 0;
 module_param_named(srm_direct_db_stats_enable,
                    srm_direct_db_stats_enable, bool, 0644);
 MODULE_PARM_DESC(srm_direct_db_stats_enable,
@@ -1326,6 +1326,9 @@ static u64 mlx5_srm_cqe_p99_upper(const struct mlx5_srm_cqe_cycle_stats *s)
 #endif
 
 struct mlx5_srm_cq_workspace {
+#if MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY
+    struct mlx5_ib_sched_worker *latency_worker;
+#endif
 #if MLX5_SRM_ENABLE_WQE_TIMING
     struct mlx5_srm_db_timing_stats db_timing;
 #endif
@@ -1523,6 +1526,7 @@ mlx5_srm_ring_shared_db(struct mlx5_ib_qp *qp,
 #endif
 }
 
+/* PRIVATE_CQ_BUDGET_TEST_BEGIN */
 static __always_inline int
 mlx5_srm_refresh_poll_budget(struct mlx5_ib_sched *sched,
                              struct mlx5_ib_srmc *srmc)
@@ -1535,17 +1539,32 @@ mlx5_srm_refresh_poll_budget(struct mlx5_ib_sched *sched,
         return 0;
     }
 
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+    /* db_tail is published after the actual user/kernel doorbell. Credits
+     * alone include other CQs and must not keep this CQ on the poll ring. */
+    outstanding = srmc->ctrl_page ?
+        mlx5_srm_seq_delta(smp_load_acquire(&srmc->ctrl_page->db_tail),
+                           READ_ONCE(srmc->cq_complete_idx)) : 0;
+    if ((s64)outstanding < 0)
+        outstanding = 0;
+#else
     outstanding = mlx5_srm_worker_outstanding(worker);
+#endif
     WRITE_ONCE(srmc->sig_cnt, min_t(u64, outstanding, INT_MAX));
     return READ_ONCE(srmc->sig_cnt);
 }
+/* PRIVATE_CQ_BUDGET_TEST_END */
 
 static inline bool mlx5_srm_resolve_cqe_ctx(
     struct mlx5_ib_sched *sched,
     struct mlx5_qp_ctrl_pool *sq_ctrl_pool,
     u64 wrid,
     struct mlx5_srm_cq_workspace *workspace,
-    struct mlx5_srm_cqe_publish_entry *entry)
+    struct mlx5_srm_cqe_publish_entry *entry
+#if MLX5_SRM_ENABLE_REROUTE
+    , struct mlx5_ib_srmc *resolved_srmc, u64 resolved_post
+#endif
+    )
 {
     struct mlx5_ib_usr_rc_route *route;
     struct mlx5_ib_srmc *send_srmc;
@@ -1559,8 +1578,20 @@ static inline bool mlx5_srm_resolve_cqe_ctx(
     u16 usr_rc_cnt;
     u32 uidx;
 
+#if MLX5_SRM_ENABLE_REROUTE
+    /* rr_complete already resolved the original KQP and full sequence.
+     * Do not pack/unpack WRID, look up the KQP/ctrl again, or read its token
+     * twice. The common route validation below is still mandatory. */
+    if (unlikely(!resolved_srmc))
+        return false;
+    send_srmc = resolved_srmc;
+    ctrl_page = send_srmc->ctrl_page;
+    kqp_idx = send_srmc->srmc_idx;
+    post_idx = resolved_post;
+#else
     kqp_idx = mlx5_srm_wrid_kqp(wrid);
     post_idx = mlx5_srm_wrid_post(wrid);
+#endif
 
     if (unlikely(kqp_idx >= mlx5_srm_effective_kqps())) {
         pr_warn_ratelimited("invalid hollow RC wrid kqp %u post %llu\n",
@@ -1568,6 +1599,7 @@ static inline bool mlx5_srm_resolve_cqe_ctx(
         return false;
     }
 
+#if !MLX5_SRM_ENABLE_REROUTE
     if (likely(workspace->cached_kqp_idx == kqp_idx &&
                workspace->cached_srmc &&
                workspace->cached_ctrl_page)) {
@@ -1580,6 +1612,7 @@ static inline bool mlx5_srm_resolve_cqe_ctx(
         workspace->cached_srmc = send_srmc;
         workspace->cached_ctrl_page = ctrl_page;
     }
+#endif
     if (unlikely(!send_srmc || !send_srmc->ini_cb.qp)) {
         pr_warn_ratelimited("inactive hollow RC wrid kqp %u post %llu\n",
                             kqp_idx, post_idx);
@@ -1591,8 +1624,10 @@ static inline bool mlx5_srm_resolve_cqe_ctx(
         return false;
     }
 
+#if !MLX5_SRM_ENABLE_REROUTE
     post_idx = mlx5_srm_extend_post48(
         smp_load_acquire(&ctrl_page->cons_idx), post_idx);
+#endif
 
     slot = post_idx & (send_srmc->ini_cb.qp->sq.wqe_cnt - 1);
     
@@ -1872,8 +1907,13 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
         completed_wqes = 0;
         phase_start = mlx5_ib_srm_cq_timing_active(stats) ?
                           ktime_get_ns() : 0;
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+        cqe_num = mlx5_ib_poll_srm_private_progress(srmc,
+            srmc->sig_cnt, &completed_wqes);
+#else
         cqe_num = mlx5_ib_poll_srm_progress(
             srmc->ini_cb.cq, srmc->sig_cnt, &completed_wqes);
+#endif
         if (cqe_num > 0)
         {
             mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_KERNEL_POLL,
@@ -1982,7 +2022,6 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
                     0
 #endif
                     ) == 2) continue; /* SQ-retirement NOP, no user CQE. */
-                wc[i].wr_id = mlx5_srm_make_wrid(origin->srmc_idx, origin_post);
 #endif
 
                 iter_start = mlx5_ib_srm_cq_timing_active(stats) ?
@@ -1994,7 +2033,11 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
 
                 if (!mlx5_srm_resolve_cqe_ctx(sched, sq_ctrl_pool,
                                               wc[i].wr_id, workspace,
-                                              &entry)) {
+                                              &entry
+#if MLX5_SRM_ENABLE_REROUTE
+                                              , origin, origin_post
+#endif
+                                              )) {
 #if !MLX5_SRM_ENABLE_REROUTE
                     mlx5_srm_complete_wrid_ctrl(
                         sq_ctrl_pool, wc[i].wr_id, complete_cache,
@@ -2799,6 +2842,41 @@ static void mlx5_ib_srm_report_stats(
     stats->last_report = jiffies;
 }
 
+/* LATENCY_CQ_PRIORITY_TEST_BEGIN */
+#if MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY
+static inline int mlx5_srm_poll_latency_cq(
+    struct mlx5_ib_sched *sched, struct mlx5_qp_ctrl_pool *sq_ctrl_pool,
+    struct mlx5_ib_srmc *normal, struct ib_wc *wc, void **cqe,
+    struct mlx5_srm_cq_workspace *workspace,
+    struct mlx5_ib_srm_sched_stats *stats)
+{
+    struct mlx5_ib_sched_worker *worker = workspace->latency_worker;
+    struct mlx5_ib_srmc *s;
+    unsigned long idx;
+    int ret;
+
+    if (!READ_ONCE(worker->latency_cq_count))
+        return 0;
+    idx = find_next_bit(worker->latency_cqs, MLX5_SRM_CQ_SLOTS,
+                        worker->latency_cq_cursor);
+    if (idx == MLX5_SRM_CQ_SLOTS)
+        idx = find_first_bit(worker->latency_cqs, MLX5_SRM_CQ_SLOTS);
+    if (idx == MLX5_SRM_CQ_SLOTS)
+        return 0; /* Last tag concurrently removed. */
+    worker->latency_cq_cursor = idx + 1;
+    s = READ_ONCE(sched->srmc_by_idx[idx]);
+    if (!s || s == normal || s->owner_worker != worker->worker_id)
+        return 0;
+
+    /* Refreshes db_tail internally, including user DB not yet discovered
+     * by the normal SQ scan. One bounded batch, never wait for completion.
+     * Leave the normal ring and its membership bits entirely untouched. */
+    ret = srm_poll_srmc_once(sched, sq_ctrl_pool, s, wc, cqe, workspace, stats);
+    return ret > 0 ? ret : 0;
+}
+#endif
+/* LATENCY_CQ_PRIORITY_TEST_END */
+
 static __always_inline int poll_srmc_inline(
     struct mlx5_ib_sched *sched,
     struct mlx5_qp_ctrl_pool *sq_ctrl_pool,
@@ -2823,13 +2901,20 @@ static __always_inline int poll_srmc_inline(
     u64 queue_start = queue_timing ? ktime_get_ns() : 0;
     u64 queue_ns = 0;
 
+#if MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY
+    if (queue_timing)
+        queue_ns += ktime_get_ns() - queue_start;
+    polled += mlx5_srm_poll_latency_cq(sched, sq_ctrl_pool, pre_srmc,
+                                      wc, cqe, workspace, stats);
+    queue_start = queue_timing ? ktime_get_ns() : 0;
+#endif
     pre_srmcs[old_tail] = NULL; // 清空当前位置
 
     if (!pre_srmc) {
         if (queue_timing)
             mlx5_ib_srm_record_cq_inline_queue(
-                stats, ktime_get_ns() - queue_start);
-        return 0; // 无待处理的SRMC，直接返回
+                stats, queue_ns + ktime_get_ns() - queue_start);
+        return polled; // Normal ring may be empty after a priority poll.
     }
 
     // 移动尾指针（位运算替代模运算，假设SRMC_POLLING_CNT是2的幂）
@@ -2844,6 +2929,18 @@ static __always_inline int poll_srmc_inline(
     if (ret > 0)
         polled += ret;
 
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+    /* A slow QP must not monopolize this worker while other CQs hold its
+     * global credits. One bounded poll, then round-robin. The ring has more
+     * slots than all KQPs combined; in_queue prevents duplicate entries. */
+    if (pre_srmc->sig_cnt &&
+        !WARN_ON_ONCE(pre_srmcs[*polling_head] != NULL)) {
+        pre_srmcs[*polling_head] = pre_srmc;
+        *polling_head = (*polling_head + 1) & (SRMC_POLLING_CNT - 1);
+    } else {
+        in_queue[MLX5_SRM_CQ_INDEX(pre_srmc->srmc_idx)] = 0;
+    }
+#else
     // 处理poll后仍有未完成的sig_cnt
     if (pre_srmc->sig_cnt)
     {
@@ -2857,7 +2954,7 @@ static __always_inline int poll_srmc_inline(
                                            true, wc, cqe, workspace,
                                            stats);
             queue_start = queue_timing ? ktime_get_ns() : 0;
-            in_queue[pre_srmc->srmc_idx & (CQ_NUM - 1)] = 0; // 位运算优化
+            in_queue[MLX5_SRM_CQ_INDEX(pre_srmc->srmc_idx)] = 0;
         }
         // 情况2：共享CQ已满，必须poll到至少出现一个空位
         else if (unlikely(srmc_cq_full(pre_srmc)))
@@ -2874,7 +2971,7 @@ static __always_inline int poll_srmc_inline(
             // 处理完成后判断是否仍有剩余信号
             if (!pre_srmc->sig_cnt)
             {
-                in_queue[pre_srmc->srmc_idx & (CQ_NUM - 1)] = 0; // 位运算优化
+                in_queue[MLX5_SRM_CQ_INDEX(pre_srmc->srmc_idx)] = 0;
             }
             else
             {
@@ -2892,8 +2989,9 @@ static __always_inline int poll_srmc_inline(
     // 无剩余信号，标记为出队
     else
     {
-        in_queue[pre_srmc->srmc_idx & (CQ_NUM - 1)] = 0; // 位运算优化
+        in_queue[MLX5_SRM_CQ_INDEX(pre_srmc->srmc_idx)] = 0;
     }
+#endif
 
     if (queue_timing)
         mlx5_ib_srm_record_cq_inline_queue(
@@ -3541,6 +3639,9 @@ static __always_inline bool srm_poll_latency_once(
 
 int scheduler_polling(void *sched_data)
 {
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+    struct mlx5_ib_srmc **cq_srmc_tb = NULL;
+#endif
     extern struct mlx5_ib_sched_group sched_group;
     int ret;
     struct mlx5_ib_sched_id *sched_id = (struct mlx5_ib_sched_id *)sched_data;
@@ -3561,8 +3662,11 @@ int scheduler_polling(void *sched_data)
     struct mlx5_ib_srmc *srmc;
     struct mlx5_ib_srm_sched_stats *srm_stats = NULL;
     struct mlx5_srm_cq_workspace *cq_workspace = NULL;
-    struct ib_wc *wc;
-    void **cqe, *ucqe;
+    struct ib_wc *wc = NULL;
+    void **cqe = NULL, *ucqe;
+    struct mlx5_ib_srmc **pre_srmcs = NULL;
+    u8 *in_queue = NULL;
+    int *level_qp_st_arr = NULL;
     int qpn;
     int op_own;
     int uidx, idx;
@@ -3634,6 +3738,10 @@ int scheduler_polling(void *sched_data)
     wc = mlx5_ib_srm_kvcalloc_node(SQ_DEPTH, sizeof(*wc));
     cq_workspace = kvzalloc_node(sizeof(*cq_workspace), GFP_KERNEL,
                                  srm_numa_node);
+#if MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY
+    if (cq_workspace)
+        cq_workspace->latency_worker = worker;
+#endif
 #if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS
     if (cq_workspace)
         cq_workspace->diag_last_report = jiffies;
@@ -3691,13 +3799,11 @@ int scheduler_polling(void *sched_data)
     uint32_t poll_round = 0;
     const int POLL_ALL_INTERVAL = 10000; // 全体遍历的时间
     struct mlx5_ib_srmc *pre_srmc = NULL;
-    struct mlx5_ib_srmc **pre_srmcs =
-        mlx5_ib_srm_kvcalloc_node(SRMC_POLLING_CNT,
-                                  sizeof(*pre_srmcs));
+    pre_srmcs = mlx5_ib_srm_kvcalloc_node(SRMC_POLLING_CNT,
+                                         sizeof(*pre_srmcs));
     int polling_tail, polling_head;
     polling_tail = polling_head = 0;
 
-    u8 *in_queue;
     in_queue = mlx5_ib_srm_kvcalloc_node(NUM_SRMC * 2,
                                          sizeof(*in_queue)); // 大小要是num_kqps的4倍
 
@@ -3709,9 +3815,19 @@ int scheduler_polling(void *sched_data)
 
 
 
-    struct mlx5_ib_srmc *cq_srmc_tb[CQ_NUM] = {0}; // 保存每个cq对应srmc代表
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+    /* NUM_SRMC pointers must not live on the kernel thread's stack. */
+    cq_srmc_tb = mlx5_ib_srm_kvcalloc_node(MLX5_SRM_CQ_SLOTS,
+                                          sizeof(*cq_srmc_tb));
+#else
+    struct mlx5_ib_srmc *cq_srmc_tb[CQ_NUM] = {0};
+#endif
 
-    if (!cqe || !wc || !cq_workspace || !pre_srmcs || !in_queue) {
+    if (!cqe || !wc || !cq_workspace || !pre_srmcs || !in_queue
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+        || !cq_srmc_tb
+#endif
+        ) {
         pr_err("scheduler thread %d: temporary buffer allocation failed\n",
                id);
         WRITE_ONCE(sched->init_error, -ENOMEM);
@@ -3723,7 +3839,6 @@ int scheduler_polling(void *sched_data)
 
     uint32_t level_wqe_cnt, wqe_cnt, user_threads_idx;
     int sending_case; // 对应新的wqe个数和旧的wqe个数的几种情况,0~2代表三种情况，3代表应该break了
-    int *level_qp_st_arr = NULL;
 
     while (!kthread_should_stop())
     {
@@ -3911,7 +4026,32 @@ int scheduler_polling(void *sched_data)
             i = poll_ring_head;
             poll_ring_head = poll_ring_next[i];
 #if MLX5_SRM_ENABLE_REROUTE
-            i = rr_schedule(sched, i % (num_kqps * 2));
+            {
+                u32 virtual_slot = i % (num_kqps * 2);
+                struct mlx5_srm_rr_group *g =
+                    &sched->rr_groups[virtual_slot / 2];
+
+                i = rr_schedule(sched, virtual_slot);
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+                /* Once routing points to the target, the old SQ may still
+                 * have hardware work. Its own CQ must remain on the poll
+                 * ring, including the retirement NOP posted in RR_RECYCLE. */
+                if (unlikely(g->phase != RR_IDLE && g->src &&
+                             g->src->ini_cb.qp)) {
+                    struct mlx5_ib_srmc *old = g->src;
+                    u32 old_idx = MLX5_SRM_CQ_INDEX(old->srmc_idx);
+
+                    mlx5_srm_refresh_poll_budget(sched, old);
+                    if (old->sig_cnt && !in_queue[old_idx] &&
+                        !pre_srmcs[polling_head]) {
+                        pre_srmcs[polling_head] = old;
+                        polling_head = (polling_head + 1) &
+                                       (SRMC_POLLING_CNT - 1);
+                        in_queue[old_idx] = 1;
+                    }
+                }
+#endif
+            }
             if (i == U32_MAX) continue;
 #endif
 
@@ -3949,7 +4089,7 @@ int scheduler_polling(void *sched_data)
              * block below. Bootstrap the existing polling queue from the
              * shared issued/completed state so those CQEs are still polled.
              */
-            cq_idx = srmc->srmc_idx % CQ_NUM;
+            cq_idx = MLX5_SRM_CQ_INDEX(srmc->srmc_idx);
             if (!cq_srmc_tb[cq_idx])
                 cq_srmc_tb[cq_idx] = srmc;
             pre_srmc = cq_srmc_tb[cq_idx];
@@ -4106,6 +4246,11 @@ int scheduler_polling(void *sched_data)
                     }
                 }
                 inflight = mlx5_srm_worker_outstanding(worker);
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+                /* Still visit all SQs: user DBs on a CQ not yet visited
+                 * must be discovered even when global credit is full. */
+                break;
+#endif
             }
             if (kthread_should_stop())
                 goto out;
@@ -4120,7 +4265,7 @@ int scheduler_polling(void *sched_data)
             if (!credit)
                 continue;
 
-            cq_idx = srmc->srmc_idx % (CQ_NUM);
+            cq_idx = MLX5_SRM_CQ_INDEX(srmc->srmc_idx);
             if (cq_srmc_tb[cq_idx] == NULL)
                 cq_srmc_tb[cq_idx] = srmc;
 
@@ -4132,9 +4277,16 @@ int scheduler_polling(void *sched_data)
             }
 
             if (unlikely(srmc_cq_full(pre_srmc))) {
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+                ret = srm_poll_srmc_once(sched, sq_ctrl_pool, pre_srmc,
+                                        wc, cqe, cq_workspace, srm_stats);
+                if (srmc_cq_full(pre_srmc))
+                    continue;
+#else
                 ret = srm_poll_until_space(sched, sq_ctrl_pool, pre_srmc,
                                            false, wc, cqe, cq_workspace,
                                            srm_stats);
+#endif
                 if (kthread_should_stop())
                     goto out;
             }
@@ -4147,6 +4299,9 @@ int scheduler_polling(void *sched_data)
                 int sent = 0;
                 u32 claimed = 0;
                 u64 scan_start;
+#if MLX5_SRM_ENABLE_REROUTE
+                u64 rr_scanned_bytes = 0;
+#endif
 #if MLX5_SRM_ENABLE_WQE_TIMING
                 struct mlx5_srm_db_timing_batch timing_batch;
                 u64 db_done_tsc;
@@ -4314,6 +4469,11 @@ int scheduler_polling(void *sched_data)
 #if MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
                     sent_bytes += wqe_bytes;
 #endif
+#if MLX5_SRM_ENABLE_REROUTE
+                    /* This descriptor is already hot from validation. Only
+                     * account this sum after credit fixes the actual prefix. */
+                    rr_scanned_bytes += rr_descriptor_bytes(ctrl);
+#endif
                     srmc->sched_post_idx++;
                     srmc->ini_cb.qp->sq.cur_post++;
                     last_ctrl = ctrl;
@@ -4393,6 +4553,10 @@ int scheduler_polling(void *sched_data)
                     continue;
                 }
                 if (unlikely(claimed < sent)) {
+#if MLX5_SRM_ENABLE_REROUTE
+                    rr_scanned_bytes = rr_db_prefix_bytes(
+                        srmc, scan_start, sent, claimed, rr_scanned_bytes);
+#endif
                     sent = claimed;
                     srmc->sched_post_idx = scan_start + sent;
                     srmc->ini_cb.qp->sq.cur_post =
@@ -4426,14 +4590,9 @@ int scheduler_polling(void *sched_data)
                 mlx5_srm_ring_shared_db(srmc->ini_cb.qp, ctrl_page,
                                         sent, last_ctrl);
 #if MLX5_SRM_ENABLE_REROUTE
-                {
-                    u32 n;
-                    u64 bytes = READ_ONCE(ctrl_page->route.posted_bytes);
-                    for (n = 0; n < sent; n++)
-                        bytes += rr_bytes(srmc, scan_start + n);
-                    smp_store_release(&ctrl_page->route.posted_bytes, bytes);
-                    srmc->sched_post_idx = mlx5_srm_rr_seq(srmc->sched_post_idx);
-                }
+                smp_store_release(&ctrl_page->route.posted_bytes,
+                    READ_ONCE(ctrl_page->route.posted_bytes) + rr_scanned_bytes);
+                srmc->sched_post_idx = mlx5_srm_rr_seq(srmc->sched_post_idx);
 #endif
 #if MLX5_SRM_ENABLE_WQE_TIMING
                 db_done_tsc = rdtsc_ordered();
@@ -4480,6 +4639,12 @@ int scheduler_polling(void *sched_data)
                 if (!in_queue[cq_idx])
                 {
                     if (pre_srmcs[polling_head] != NULL) {
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+                        /* Unreachable with one entry per CQ. Leave the
+                         * existing ring intact; the next sweep rediscovers
+                         * this DB through db_tail if the invariant fails. */
+                        WARN_ON_ONCE(1);
+#else
                         pre_srmc = pre_srmcs[polling_tail];
                         pre_srmcs[polling_tail] = NULL;
                         polling_tail = (polling_tail + 1) % SRMC_POLLING_CNT;
@@ -4489,8 +4654,9 @@ int scheduler_polling(void *sched_data)
                                 sched, sq_ctrl_pool, pre_srmc, true, wc,
                                 cqe, cq_workspace, srm_stats);
                             if (!pre_srmc->sig_cnt)
-                                in_queue[pre_srmc->srmc_idx % CQ_NUM] = 0;
+                                in_queue[MLX5_SRM_CQ_INDEX(pre_srmc->srmc_idx)] = 0;
                         }
+#endif
                     }
 
                     if (pre_srmcs[polling_head] == NULL) {
@@ -4540,6 +4706,9 @@ int scheduler_polling(void *sched_data)
     }
 out:
     DEBUG_LOG("scheduler thread %d exit\n", id);
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+    kvfree(cq_srmc_tb);
+#endif
     if (direct_db_stats_active && sq_ctrl_pool)
         mlx5_srm_direct_db_set_worker_flags(sq_ctrl_pool, worker, false);
     if (srm_stats) {
@@ -4561,6 +4730,9 @@ out:
     return 0;
 err:
     pr_err("scheduler thread %d exit in error state\n", id);
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+    kvfree(cq_srmc_tb);
+#endif
     if (direct_db_stats_active && sq_ctrl_pool)
         mlx5_srm_direct_db_set_worker_flags(sq_ctrl_pool, worker, false);
     WRITE_ONCE(sched->init_error, -EIO);
@@ -4593,6 +4765,15 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
     u32 total_kqps = mlx5_srm_effective_kqps();
     char thread_info[64];
 
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+    if (!total_kqps || total_kqps > MLX5_SRM_CQ_SLOTS)
+        return -EINVAL;
+    pr_info("SRM CQ mode=private-per-kqp simplify=1 reroute=%u poll_budget=%u publish=poll-exit\n",
+            MLX5_SRM_ENABLE_REROUTE,
+            MLX5_SRM_PRIVATE_CQ_POLL_BUDGET);
+#endif
+    pr_info("SRM latency CQ priority enabled=%u policy=one-priority-then-round-robin\n",
+            MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY);
 #if MLX5_SRM_ENABLE_REROUTE
     if (srm_sched_cpu_num != 1 || MLX5_SRM_ENABLE_LARGE_KERNEL_QP ||
         MLX5_SRM_ENABLE_READY_FASTPATH || NUM_SCHED != 1) {
@@ -5075,7 +5256,7 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
             struct mlx5_ib_sched_worker *worker =
                 &owner_sched->workers[worker_id];
 
-            for (j = 0; j < CQ_NUM; j++) {
+            for (j = 0; j < MLX5_SRM_CQ_SLOTS; j++) {
                 if (!worker->shared_cq[j])
                     continue;
                 ib_destroy_cq(worker->shared_cq[j]);
@@ -5983,6 +6164,10 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
         return -EINVAL;
     worker = &sched->workers[srmc->owner_worker];
 
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+    if (srmc->srmc_idx < 0 || srmc->srmc_idx >= MLX5_SRM_CQ_SLOTS)
+        return -EINVAL;
+#endif
     cb->addr_str = IP_ADDR;
     cb->port = PORT_NUM;
     cb->state = IDLE;
@@ -6045,20 +6230,26 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
      * must cover the scheduler-wide completion metadata pool, rather than
      * only the SQ depth of the first KQP that creates it.
      */
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+    /* Start at the requested SQ size, then validate against the actual BB
+     * count after QP creation. Never multiply the global CQ pool per KQP. */
+    cq_attr.cqe = max_t(u32, sq_depth, 1);
+#else
     cq_attr.cqe = SQ_DEPTH;
+#endif
     cq_attr.comp_vector = 0;
     // change to event?
-    if (!worker->shared_cq[srmc->srmc_idx % CQ_NUM]) {
+    if (!worker->shared_cq[MLX5_SRM_CQ_INDEX(srmc->srmc_idx)]) {
         cb->cq = ib_create_cq(cb->cm_id->device, NULL, NULL, NULL,
                               &cq_attr);
         if (!IS_ERR(cb->cq)) {
-            worker->shared_cq[srmc->srmc_idx % CQ_NUM] = cb->cq;
+            worker->shared_cq[MLX5_SRM_CQ_INDEX(srmc->srmc_idx)] = cb->cq;
             pr_info("SRM kernel CQ sched=%d worker=%u cq_idx=%u cqe=%d\n",
                     id, worker->worker_id,
-                    srmc->srmc_idx % CQ_NUM, cb->cq->cqe);
+                    MLX5_SRM_CQ_INDEX(srmc->srmc_idx), cb->cq->cqe);
         }
     } else {
-        cb->cq = worker->shared_cq[srmc->srmc_idx % CQ_NUM];
+        cb->cq = worker->shared_cq[MLX5_SRM_CQ_INDEX(srmc->srmc_idx)];
     }
     if (IS_ERR(cb->cq))
     {
@@ -6097,6 +6288,33 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
         cb->qp->is_srmc_kernel_qp = 1;
         /* CQ polling reconstructs Hollow RC routing from the owning SRMC. */
         cb->qp->srmc_owner = srmc;
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+        {
+            /* Users can DB without the scheduler: the CQ must hold every
+             * reservable one-BB WR, not merely this poll's/global credit
+             * budget. This matches the provider's 2/3 SQ reservation cap. */
+            u32 reserve_limit = (u64)cb->qp->sq.wqe_cnt * 2 / 3;
+
+            if (reserve_limit >= 65536) {
+                pr_err("SRM private CQ: SQ window %u exceeds unambiguous 16-bit CQE counter range\n",
+                       reserve_limit);
+                ret = -EINVAL;
+                goto err2;
+            }
+            if (cb->cq->cqe < reserve_limit) {
+                ret = ib_resize_cq(cb->cq, reserve_limit);
+                if (ret) {
+                    pr_err("SRM private CQ resize failed: needed=%u error=%d\n",
+                           reserve_limit, ret);
+                    goto err2;
+                }
+            }
+            pr_info("SRM private CQ ready sched=%d worker=%u kqp=%d qpn=%u cqn=%u cqe=%d sq_bbs=%u reserve_limit=%u\n",
+                    id, worker->worker_id, srmc->srmc_idx,
+                    cb->qp->ibqp.qp_num, to_mcq(cb->cq)->mcq.cqn,
+                    cb->cq->cqe, cb->qp->sq.wqe_cnt, reserve_limit);
+        }
+#endif
         ctrl_page = mlx5_sq_ctrl_get_slot(&dev->sq_ctrl_pool,
                                           srmc->srmc_idx);
         if (!ctrl_page) {
