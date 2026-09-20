@@ -125,7 +125,7 @@ static const size_t SCHED_SIZE_LIMIT = MLX5_SRM_SCHED_SIZE_LIMIT;
 
 #define MLX5_SRM_LARGE_DB_LIMIT 100
 static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
-#define MLX5_SRM_ENABLE_LARGE_DB_LIMIT 1
+#define MLX5_SRM_ENABLE_LARGE_DB_LIMIT 0
 #define MLX5_SRM_LARGE_DB_LIMIT_ACTIVE \
     (MLX5_SRM_ENABLE_LARGE_KERNEL_QP && \
      MLX5_SRM_ENABLE_LARGE_DB_LIMIT && (MLX5_SRM_LARGE_DB_LIMIT > 0))
@@ -323,7 +323,9 @@ static inline u64 mlx5_srm_extend_post48(u64 reference, u64 post48)
 struct mlx5_ib_cqbuf
 {
     void *buf;
+    void *vmap_base;
     struct page **pages;
+    size_t npages;
     size_t cq_size;
     int cqe_sz;
     int cqn;
@@ -410,6 +412,9 @@ struct mlx5_wqe_info
 };
 struct mlx5_ib_srmc
 {
+#if !MLX5_SRM_ENABLE_REROUTE && MLX5_SRM_MAX_INFLIGHT_BYTES
+    u64 byte_completed; /* sole CQ worker; no migration state required */
+#endif
 #if MLX5_SRM_ENABLE_REROUTE
     struct mlx5_srm_rr_path *rr;
 #endif
@@ -561,7 +566,8 @@ enum srmc_create_flag
 
 
 int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int qpn, int cqn, u32 uidx);
-int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt_addr, size_t size, int cqn);
+int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group,
+                      struct mlx5_ib_cq *cq);
 int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn);
 int mlx5_ib_bind_usr_rc_cq(struct mlx5_ib_sched_group *sched_group,
 			   u32 usr_rc_cnt, int cqn, u32 uidx);
@@ -589,6 +595,9 @@ int mlx5_ib_server_init(struct mlx5_ib_server *server);
 void mlx5_ib_server_exit(struct mlx5_ib_server *server,
                          struct mlx5_ib_sched_group *sched_group);
 int polling_cqe(void *data);
+#if !MLX5_SRM_ENABLE_REROUTE && MLX5_SRM_MAX_INFLIGHT_BYTES
+void mlx5_srm_complete_byte_span(struct mlx5_ib_srmc *s, u64 first, u32 count);
+#endif
 int mlx5_ib_register_external_table(void *table, size_t size, struct page **pages, void *level_table, size_t level_size, struct page **level_pages,
                                            void *xrc_table, size_t xrc_size, struct page **xrc_pages, int xrc_qp_num_per_srm);
 int srm_map_bf(struct mlx5_ib_sched_group *sched_group,struct mlx5_ib_create_qp *ucmd,struct mlx5_ib_dev *dev);

@@ -9,19 +9,19 @@ static unsigned int srm_reroute_interval_us = 1000;
 module_param(srm_reroute_interval_us, uint, 0644);
 MODULE_PARM_DESC(srm_reroute_interval_us,
                  "Multi-KQP reroute detector interval in microseconds");
-static unsigned int srm_reroute_ratio_gap = 1;
+static unsigned int srm_reroute_ratio_gap = 0;
 module_param(srm_reroute_ratio_gap, uint, 0644);
 static unsigned int srm_reroute_bad_windows = 3;
 module_param(srm_reroute_bad_windows, uint, 0644);
-static unsigned int srm_reroute_cooldown_us = 1000;
+static unsigned int srm_reroute_cooldown_us = 10;
 module_param(srm_reroute_cooldown_us, uint, 0644);
 MODULE_PARM_DESC(srm_reroute_cooldown_us,
                  "Minimum microseconds between multi-KQP reroutes");
 /* Editable default, in bytes: total payload of ALL frozen, un-DB'd WQEs.
  * >= threshold copies to the new SQ; < threshold drains the old SQ. */
-static unsigned long srm_reroute_copy_threshold_bytes = 1000UL * 1024;
+static unsigned long srm_reroute_copy_threshold_bytes = 1;
 module_param(srm_reroute_copy_threshold_bytes, ulong, 0644);
-static unsigned int srm_reroute_warn_ms = 1000;
+static unsigned int srm_reroute_warn_ms = 10;
 module_param(srm_reroute_warn_ms, uint, 0644);
 /* Diagnose one logical group at a time without logging every 10 ms check. */
 static bool srm_reroute_detect_log_enable=1;
@@ -59,53 +59,87 @@ struct mlx5_srm_rr_group {
     unsigned long *dependent;
     u64 *dep_end;
     u64 db_stop, freeze_end, cursor, bytes, dst_begin, dst_end, copied;
-    u64 timing_start_cycles, timing_prewrite_cycles;
+    u64 timing_work_start, timing_before_prewrite, timing_after_prewrite;
     u64 last_posted[2], last_completed[2];
     u64 next_check_ns, last_switch_ns;
     unsigned long next_detect_log, last_warn, started;
     u32 bad[2], source_slot, outstanding;
     enum rr_phase phase;
     u32 id;
-    bool copy, copying_done, timing_reported;
+    bool copy, copying_done, drain_db_ready, timing_reported;
+    bool timing_running, timing_prewrite_open;
 };
+
+/* Accumulate only execution slices in rr_begin()/rr_step(). A descheduled
+ * transaction, ordinary CQ/DB work, detection and printk are not measured.
+ * These are TSC deltas, not PMU task cycles: interrupts/preemption INSIDE a
+ * slice may still add noise. Do not disable either merely for instrumentation.
+ * The two buckets retain the route-publication / DB-eligibility boundaries;
+ * cleanup after the latter is outside this metric, as before. */
+static void rr_timing_pause(struct mlx5_srm_rr_group *g)
+{
+    u64 cycles;
+
+    if (!g->timing_running) return;
+    cycles = rdtsc_ordered() - g->timing_work_start;
+    if (g->timing_prewrite_open)
+        g->timing_after_prewrite += cycles;
+    else
+        g->timing_before_prewrite += cycles;
+    g->timing_running = false;
+}
+
+static void rr_timing_resume(struct mlx5_srm_rr_group *g)
+{
+    if (g->timing_running || g->timing_reported) return;
+    g->timing_work_start = rdtsc_ordered();
+    g->timing_running = true;
+}
 
 static void rr_report_kernel_db_eligible(struct mlx5_srm_rr_group *g)
 {
-    u64 now;
     u64 switch_to_prewrite;
     u64 prewrite_to_kernel_db;
     u64 total;
-    u64 transition_wqes;
-    u64 transition_avg_wqe_cycles;
+    u64 source_undb_wqes;
+    u64 blocked_undb_avg_cycles;
 
-    if (g->timing_reported || !g->timing_start_cycles ||
-        !g->timing_prewrite_cycles)
+    if (g->timing_reported || !g->timing_prewrite_open)
         return;
 
-    now = rdtsc_ordered();
-    switch_to_prewrite = g->timing_prewrite_cycles -
-                         g->timing_start_cycles;
-    prewrite_to_kernel_db = now - g->timing_prewrite_cycles;
+    rr_timing_pause(g);
+    switch_to_prewrite = g->timing_before_prewrite;
+    prewrite_to_kernel_db = g->timing_after_prewrite;
     total = switch_to_prewrite + prewrite_to_kernel_db;
-    transition_wqes = mlx5_srm_rr_seq(g->freeze_end - g->db_stop);
-    transition_avg_wqe_cycles = transition_wqes ?
-        div64_u64(total, transition_wqes) : 0;
+    /* Freeze-time source suffix, whether copied or drained in place. Both
+     * boundaries remain fixed even after the source DB tail advances.
+     * Exclude already-DB'd source work and all new target reservations.
+     * Use modular subtraction so a sequence wrap preserves the count. */
+    source_undb_wqes = mlx5_srm_rr_seq(g->freeze_end - g->db_stop);
+    blocked_undb_avg_cycles = source_undb_wqes ?
+        div64_u64(total, source_undb_wqes) : 0;
     g->timing_reported = true;
-    pr_info("SRM_REROUTE_TIMING group=%u src=%d dst=%d mode=%s switch_to_user_prewrite_cycles=%llu user_prewrite_to_kernel_db_cycles=%llu total_cycles=%llu transition_wqes=%llu transition_wait_scope=reroute_total transition_wait_cycles=%llu transition_wait_avg_wqe_cycles=%llu\n",
+    pr_info("SRM_REROUTE_TIMING group=%u src=%d dst=%d mode=%s timing_scope=reroute_work_tsc switch_to_user_prewrite_cycles=%llu user_prewrite_to_kernel_db_cycles=%llu total_cycles=%llu timing_end=%s blocked_undb_scope=source_frozen_undb_wqes blocked_undb_wqes=%llu blocked_undb_avg_scope=reroute_work_per_source_undb_wqe blocked_undb_avg_cycles=%llu blocked_undb_avg_valid=%u\n",
             g->id, g->src ? g->src->srmc_idx : -1,
             g->dst ? g->dst->srmc_idx : -1,
             g->copy ? "copy" : "drain", switch_to_prewrite,
-            prewrite_to_kernel_db, total, transition_wqes,
-            total, transition_avg_wqe_cycles);
+            prewrite_to_kernel_db, total,
+            g->copy ? "copy_ready" : "drain_ready",
+            source_undb_wqes, blocked_undb_avg_cycles,
+            (unsigned int)!!source_undb_wqes);
 }
 
 static void rr_log(struct mlx5_srm_rr_group *g, const char *event)
 {
+    bool timed = g->timing_running;
+
+    rr_timing_pause(g);
     pr_info("SRM_REROUTE event=%s group=%u src=%d dst=%d db_stop=%llu freeze_end=%llu wqes=%llu bytes=%llu elapsed_ms=%u\n",
         event, g->id, g->src ? g->src->srmc_idx : -1,
         g->dst ? g->dst->srmc_idx : -1, g->db_stop, g->freeze_end,
         mlx5_srm_rr_seq(g->freeze_end - g->db_stop), g->bytes,
         jiffies_to_msecs(jiffies - g->started));
+    if (timed) rr_timing_resume(g);
 }
 
 static void rr_warn(struct mlx5_srm_rr_group *g, const char *event)
@@ -194,6 +228,34 @@ static u64 rr_bytes(struct mlx5_ib_srmc *s, u64 post)
     return rr_descriptor_bytes(rr_wqe(s, post));
 }
 
+/* db_owner serializes BOTH user and kernel DB. CQ progress can only increase
+ * this snapshot's available credit while we scan; never clip/reorder a WQE. */
+static u64 rr_db_byte_available(struct mlx5_ib_srmc *s)
+{
+    struct mlx5_srm_route_ctrl *c = &s->ctrl_page->route;
+    u64 posted;
+    if (!MLX5_SRM_MAX_INFLIGHT_BYTES) return ~0ULL;
+    /* The frozen drain source must submit its old suffix without waiting
+     * for byte credit. rr_can_db() still bounds it at freeze_end, user DB
+     * stays disabled, and worker/CQ credit remains enforced by the caller.
+     * Keep actual posted/completed byte accounting even above the cap. */
+    if (READ_ONCE(c->state) == MLX5_SRM_ROUTE_DRAIN) return ~0ULL;
+    posted = READ_ONCE(c->posted_bytes);
+    return mlx5_srm_rr_byte_available(posted,
+        smp_load_acquire(&c->completed_bytes), c->inflight_limit_bytes);
+}
+
+/* Charge the completing PHYSICAL SQ, before any migration origin remapping.
+ * Maintenance NOPs bypass this helper. Private idle CQ batches call it once
+ * for the whole batch, retaining batched completion publication. */
+static void rr_complete_bytes(struct mlx5_ib_srmc *s, u64 bytes)
+{
+    s->rr->completed_bytes += bytes;
+    if (MLX5_SRM_MAX_INFLIGHT_BYTES)
+        smp_store_release(&s->ctrl_page->route.completed_bytes,
+                          s->rr->completed_bytes);
+}
+
 /* The scan owns db_owner but does not reserve worker credit. If another
  * producer consumes credit, account only the prefix actually granted. Read
  * the shorter of that prefix and the discarded suffix, BEFORE ringing DB.
@@ -230,6 +292,8 @@ rr_record(struct mlx5_ib_srmc *s, u16 user)
 static int rr_sched_init(struct mlx5_ib_sched *sched)
 {
     int g;
+    pr_info("SRM reroute byte window: per_physical_kqp=%u bytes (0=unlimited), oversized_wr=single_when_empty, drain_source=unlimited\n",
+            (unsigned int)MLX5_SRM_MAX_INFLIGHT_BYTES);
     sched->rr_groups = kvcalloc(num_kqps, sizeof(*sched->rr_groups), GFP_KERNEL);
     if (!sched->rr_groups) return -ENOMEM;
     for (g = 0; g < num_kqps; g++) {
@@ -280,6 +344,9 @@ static int rr_path_init(struct mlx5_ib_sched *sched, struct mlx5_ib_srmc *s)
     c->state = p < 2 ? MLX5_SRM_ROUTE_ACTIVE : MLX5_SRM_ROUTE_SPARE;
     c->user_db = p < 2;
     c->abi = MLX5_SRM_REROUTE_ABI | MLX5_SRM_ENABLE_CQE_SIMPLIFY << 16;
+    c->inflight_limit_bytes = MLX5_SRM_MAX_INFLIGHT_BYTES;
+    c->posted_bytes = 0;
+    c->completed_bytes = 0;
     c->active[0] = 0;
     c->active[1] = 1;
     if (p >= 2) WRITE_ONCE(s->ctrl_page->resv_idx, MLX5_SRM_REROUTE_FROZEN);
@@ -348,9 +415,10 @@ static bool rr_begin(struct mlx5_srm_rr_group *g, unsigned int active)
         }
     }
     if (!dst || !rr_lock(src)) return false;
-    g->timing_start_cycles = rdtsc_ordered();
-    g->timing_prewrite_cycles = 0;
+    g->timing_before_prewrite = g->timing_after_prewrite = 0;
+    g->timing_running = g->timing_prewrite_open = false;
     g->timing_reported = false;
+    rr_timing_resume(g);
     smp_store_release(&src->ctrl_page->route.user_db, 0);
     /* fetch_or is the linearization point for the producer CAS. */
     reserved = atomic64_fetch_or(MLX5_SRM_REROUTE_FROZEN,
@@ -360,11 +428,12 @@ static bool rr_begin(struct mlx5_srm_rr_group *g, unsigned int active)
     g->freeze_end = mlx5_srm_rr_seq(reserved);
     g->cursor = g->db_stop;
     g->bytes = g->copied = g->outstanding = 0;
-    g->copying_done = false;
+    g->copying_done = g->drain_db_ready = false;
     g->phase = RR_READY;
     g->started = g->last_warn = jiffies;
     WRITE_ONCE(src->ctrl_page->route.state, MLX5_SRM_ROUTE_WAIT_READY);
     rr_unlock(src);
+    rr_timing_pause(g);
     rr_log(g, "freeze");
     return true;
 }
@@ -411,18 +480,21 @@ bool mlx5_srm_rr_maintenance_post(struct mlx5_ib_srmc *s, u16 counter,
     return true;
 }
 
-/* Called once per visit. Runtime disable stops only new detection, never
- * abandons a live transaction. A hole leaves the SAME frozen cursor intact. */
-static void rr_step(struct mlx5_srm_rr_group *g)
+/* Run immediately-ready phases in one visit, sharing ONE descriptor budget
+ * across validation, dependency snapshot, both copy passes and retirement.
+ * Only actual waits or budget exhaustion yield; a hole retains its cursor. */
+static void rr_step_work(struct mlx5_srm_rr_group *g)
 {
     struct mlx5_ib_srmc *s = g->src, *d = g->dst;
     u32 budget = MLX5_SRM_REROUTE_BUDGET;
     u64 n, tail;
     if (g->phase == RR_IDLE || g->phase == RR_FAILED) return;
+next_phase:
     if (g->phase == RR_READY) {
-        while (g->cursor != g->freeze_end && budget--) {
+        while (g->cursor != g->freeze_end && budget) {
             struct mlx5_wqe_ctrl_seg *w;
             u32 op, ds;
+            budget--;
             if (!rr_ready(s, g->cursor)) { rr_warn(g, "wait-hole"); return; }
             w = rr_wqe(s, g->cursor);
             op = be32_to_cpu(w->opmod_idx_opcode);
@@ -444,21 +516,26 @@ static void rr_step(struct mlx5_srm_rr_group *g)
         rr_log(g, g->copy ? "classify-copy" : "classify-drain");
         bitmap_zero(g->dependent, MLX5_SRM_REROUTE_USERS);
         g->cursor = READ_ONCE(s->cq_complete_idx);
-        g->phase = g->copy ? RR_SNAPSHOT : RR_RESERVE;
-        return;
+        g->phase = RR_SNAPSHOT;
+        goto next_phase;
     }
     if (g->phase == RR_SNAPSHOT) {
+        u64 end = g->copy ? g->db_stop : g->freeze_end;
         /* Snapshot endpoints per user, not stale inflight counters. CQ may
-         * advance during this bounded scan; endpoint gates remain correct. */
-        while (g->cursor != g->db_stop && budget--) {
+         * advance during this bounded scan; endpoint gates remain correct.
+         * Drain includes the un-DB'd old suffix too: those requests still
+         * run on the source and must precede the same user's new requests. */
+        while (g->cursor != end && budget) {
             u16 user = mlx5_srm_publish_usr_rc(
                 mlx5_ib_srmc_get_publish_token(s, g->cursor));
+            budget--;
             __set_bit(user, g->dependent);
             g->cursor = mlx5_srm_rr_seq(g->cursor + 1);
             g->dep_end[user] = g->cursor;
         }
-        if (g->cursor == g->db_stop) g->phase = RR_RESERVE;
-        return;
+        if (g->cursor != end) return;
+        g->phase = RR_RESERVE;
+        goto next_phase;
     }
     if (g->phase == RR_RESERVE) {
         struct mlx5_srm_route_ctrl *route = &g->paths[0]->ctrl_page->route;
@@ -482,20 +559,23 @@ static void rr_step(struct mlx5_srm_rr_group *g)
         /* The generation release publishes the new active path to userspace.
          * From this point producers may reserve and prefill the target SQ,
          * while route.user_db remains closed. */
-        g->timing_prewrite_cycles = rdtsc_ordered();
+        rr_timing_pause(g);
+        g->timing_prewrite_open = true;
+        rr_timing_resume(g);
         g->cursor = g->db_stop;
         g->phase = g->copy ? RR_COPY0 : RR_OLD_DRAIN;
         WRITE_ONCE(s->ctrl_page->route.state,
                    g->copy ? MLX5_SRM_ROUTE_COPY : MLX5_SRM_ROUTE_DRAIN);
         rr_log(g, "prefill-open");
-        return;
+        goto next_phase;
     }
     if (g->phase == RR_COPY0 || g->phase == RR_COPY1) {
-        while (g->cursor != g->freeze_end && budget--) {
+        while (g->cursor != g->freeze_end && budget) {
             u64 old = g->cursor;
             u64 token = mlx5_ib_srmc_get_publish_token(s, old);
             u16 user = mlx5_srm_publish_usr_rc(token);
             bool blocked = test_bit(user, g->dependent);
+            budget--;
             g->cursor = mlx5_srm_rr_seq(old + 1);
             if (blocked != (g->phase == RR_COPY1)) continue;
             tail = mlx5_srm_rr_seq(g->dst_begin + g->copied);
@@ -533,42 +613,56 @@ static void rr_step(struct mlx5_srm_rr_group *g)
         }
         if (g->cursor != g->freeze_end) return;
         if (g->phase == RR_COPY0) {
-            g->phase = RR_COPY1; g->cursor = g->db_stop; return;
+            g->phase = RR_COPY1; g->cursor = g->db_stop; goto next_phase;
         }
         g->copying_done = true;
         g->phase = RR_COPY_DRAIN;
+        rr_timing_pause(g);
         rr_log(g, "copy-complete");
-        /* The scheduler may now DB an eligible copied/prefilled prefix;
+        /* The scheduler may now DB an eligible copied prefix;
          * per-user old-path dependencies remain enforced by rr_can_db(). */
         rr_report_kernel_db_eligible(g);
-        return;
+        goto next_phase;
     }
     if (g->phase == RR_COPY_DRAIN || g->phase == RR_OLD_DRAIN) {
         u64 end = g->copy ? g->db_stop : g->freeze_end;
+        if (!g->copy && !g->drain_db_ready) {
+            /* Keep scheduling the old SQ until its entire frozen suffix
+             * has been doorbelled. Completion is a per-user dependency,
+             * not a prerequisite for opening conditional kernel DB. */
+            if (mlx5_srm_rr_delta(
+                    smp_load_acquire(&s->ctrl_page->db_tail), end) < 0) {
+                rr_warn(g, "wait-old-db"); return;
+            }
+            g->drain_db_ready = true;
+            rr_timing_pause(g);
+            rr_log(g, "drain-ready");
+            rr_report_kernel_db_eligible(g);
+        }
         if (mlx5_srm_rr_delta(READ_ONCE(s->cq_complete_idx), end) < 0) {
             rr_warn(g, "wait-old-cqe"); return;
         }
         if (!rr_lock(d)) return;
         WRITE_ONCE(d->ctrl_page->route.state, MLX5_SRM_ROUTE_ACTIVE);
         smp_store_release(&d->ctrl_page->route.user_db, 1);
+        rr_timing_pause(g);
         rr_unlock(d);
         WRITE_ONCE(s->ctrl_page->route.state, MLX5_SRM_ROUTE_RETIRED);
         g->phase = RR_RECYCLE;
         g->cursor = g->db_stop;
         rr_log(g, "new-db-open");
-        /* Drain mode has no copied prefix. The target becomes DB-eligible
-         * only after the complete old source interval has drained. */
-        if (!g->copy)
-            rr_report_kernel_db_eligible(g);
-        return;
+        /* This opens unrestricted user DB; conditional kernel DB and its
+         * timing endpoint were already published at copy/drain-ready. */
+        goto next_phase;
     }
     if (g->phase == RR_RECYCLE) {
         if (g->outstanding) return;
         /* Do not expose capacity before hardware has consumed the skipped
          * slots: otherwise prefilling a reused SQ can overwrite its NOPs. */
         if (g->copy) {
-            while (g->cursor != g->freeze_end && budget--) {
+            while (g->cursor != g->freeze_end && budget) {
                 struct mlx5_wqe_ctrl_seg *w = rr_wqe(s, g->cursor);
+                budget--;
                 memset(w, 0, 64);
                 w->opmod_idx_opcode = cpu_to_be32(((u16)g->cursor << 8) |
                                                 MLX5_OPCODE_NOP);
@@ -576,8 +670,8 @@ static void rr_step(struct mlx5_srm_rr_group *g)
                 g->cursor = mlx5_srm_rr_seq(g->cursor + 1);
             }
             if (g->cursor != g->freeze_end) return;
-            rr_retire_sq(g);
-            return;
+            if (!rr_retire_sq(g)) return;
+            goto next_phase;
         }
         g->phase = RR_NOP_WAIT;
     }
@@ -595,6 +689,16 @@ static void rr_step(struct mlx5_srm_rr_group *g)
         rr_log(g, "recycled");
         g->phase = RR_IDLE; g->src = g->dst = NULL;
     }
+}
+
+/* Every exit (hole, busy owner, CQ dependency, or budget) closes the slice.
+ * In particular, waiting until the next scheduler visit is never charged. */
+static void rr_step(struct mlx5_srm_rr_group *g)
+{
+    if (g->phase == RR_IDLE || g->phase == RR_FAILED) return;
+    rr_timing_resume(g);
+    rr_step_work(g);
+    rr_timing_pause(g);
 }
 
 static void rr_detect(struct mlx5_srm_rr_group *g, u64 now_ns)
@@ -654,9 +758,10 @@ static u32 rr_schedule(struct mlx5_ib_sched *sched, u32 virtual_slot,
     u32 slot = virtual_slot % 2;
     struct mlx5_srm_route_ctrl *route;
     if (!g->paths[0]) return U32_MAX;
-    rr_step(g);
     rr_detect(g, now_ns);
-    if (g->phase == RR_OLD_DRAIN && slot == g->source_slot)
+    rr_step(g);
+    if (g->phase == RR_OLD_DRAIN && !g->drain_db_ready &&
+        slot == g->source_slot)
         return g->src->srmc_idx;
     route = &g->paths[0]->ctrl_page->route;
     return g->id * MLX5_SRM_REROUTE_PATHS + READ_ONCE(route->active[slot]);
@@ -673,9 +778,13 @@ bool mlx5_srm_rr_can_db(struct mlx5_ib_srmc *s, u64 post)
     case MLX5_SRM_ROUTE_DRAIN:
         return mlx5_srm_rr_delta(g->freeze_end, post) > 0;
     case MLX5_SRM_ROUTE_TARGET:
-        if (!g->copying_done ||
-            mlx5_srm_rr_delta(g->dst_end, post) <= 0 ||
-            !rr_ready(s, post)) return false;
+        if (g->copy) {
+            if (!g->copying_done ||
+                mlx5_srm_rr_delta(g->dst_end, post) <= 0) return false;
+        } else if (!g->drain_db_ready) {
+            return false;
+        }
+        if (!rr_ready(s, post)) return false;
         user = mlx5_srm_publish_usr_rc(mlx5_ib_srmc_get_publish_token(s, post));
         return !test_bit(user, g->dependent) ||
             mlx5_srm_rr_delta(READ_ONCE(g->src->cq_complete_idx),
@@ -713,12 +822,12 @@ void mlx5_srm_rr_complete_idle_batch(struct mlx5_ib_srmc *s,
 {
     u32 i;
 
-    if (READ_ONCE(srm_reroute_enable)) {
+    if (MLX5_SRM_MAX_INFLIGHT_BYTES || READ_ONCE(srm_reroute_enable)) {
         u64 bytes = 0;
 
         for (i = 0; i < count; i++)
             bytes += rr_bytes(s, mlx5_srm_rr_seq(first + i));
-        s->rr->completed_bytes += bytes;
+        rr_complete_bytes(s, bytes);
     }
     s->rr->logical_cons = mlx5_srm_rr_seq(first + count);
     rr_publish_cons(s);
@@ -752,7 +861,7 @@ int mlx5_srm_rr_complete(struct mlx5_ib_srmc **physical, u64 *post,
      * the destination can be ACTIVE while imported requests remain in flight.
      * Keep errors on the slow path, even when automatic detection is off. */
     if (likely(!status && g->phase == RR_IDLE)) {
-        d->rr->completed_bytes += rr_bytes(d, *post);
+        rr_complete_bytes(d, rr_bytes(d, *post));
         d->rr->logical_cons = mlx5_srm_rr_seq(*post + 1);
 #if MLX5_SRM_ENABLE_WQE_TIMING
         mlx5_srm_timing_publish_kernel_cqe(d, *post, tsc);
@@ -767,7 +876,7 @@ int mlx5_srm_rr_complete(struct mlx5_ib_srmc **physical, u64 *post,
         if (status) mlx5_srm_rr_fail(d);
         return 2;
     }
-    d->rr->completed_bytes += rr_bytes(d, *post);
+    rr_complete_bytes(d, rr_bytes(d, *post));
     m = &d->rr->meta[*post & (d->ini_cb.qp->sq.wqe_cnt - 1)];
     migrated = m->origin != NULL;
     if (migrated) {

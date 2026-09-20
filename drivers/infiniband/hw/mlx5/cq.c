@@ -164,6 +164,9 @@ static inline u64 mlx5_ib_srmc_complete_post(struct mlx5_ib_qp *qp,
 	if (completed_wqes)
 		*completed_wqes = (u32)forward + 1;
 
+#if !MLX5_SRM_ENABLE_REROUTE && MLX5_SRM_MAX_INFLIGHT_BYTES
+	mlx5_srm_complete_byte_span(srmc, expected, (u32)forward + 1);
+#endif
 	WRITE_ONCE(srmc->cq_complete_idx,
 		MLX5_SRM_ENABLE_REROUTE ? mlx5_srm_rr_seq(completed + 1) : completed + 1);
 	wq->tail = (u32)(completed + 1);
@@ -1431,6 +1434,10 @@ int mlx5_ib_poll_srm_private_progress(struct mlx5_ib_srmc *srmc,
 		mlx5_srm_rr_fail(srmc);
 #else
 	if (npolled) {
+#if MLX5_SRM_MAX_INFLIGHT_BYTES
+		mlx5_srm_complete_byte_span(srmc,
+			READ_ONCE(srmc->cq_complete_idx), completed);
+#endif
 		WRITE_ONCE(srmc->cq_complete_idx, cursor);
 		WRITE_ONCE(qp->sq.tail, (u32)cursor);
 		/* Return CQ slots before allowing producers to reuse SQ slots.
@@ -1790,7 +1797,6 @@ int mlx5_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 	int cqe_size;
 	int eqn;
 	int err;
-	bool srm_cq_mapped = false;
 
 	if (entries < 0 ||
 	    (entries > (1 << MLX5_CAP_GEN(dev->mdev, log_max_cq_sz))))
@@ -1805,6 +1811,7 @@ int mlx5_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 
 	cq->ibcq.cqe = entries - 1;
 	mutex_init(&cq->resize_mutex);
+	cq->srm_cq_mapped = false;
 	spin_lock_init(&cq->lock);
 	cq->resize_buf = NULL;
 	cq->resize_umem = NULL;
@@ -1850,27 +1857,9 @@ int mlx5_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 		goto err_cqb;
 
 	mlx5_ib_dbg(dev, "cqn 0x%x\n", cq->mcq.cqn);
-		if(udata){
-			//map cq buf to kernel space
-			struct mlx5_ib_create_cq ucmd;
-			int ucmdlen;
-			ucmdlen = min(udata->inlen, sizeof(ucmd));
-			if (ucmdlen < offsetof(struct mlx5_ib_create_cq, flags)) {
-				err = -EINVAL;
-				goto err_cmd;
-			}
-
-			if (ib_copy_from_udata(&ucmd, udata, ucmdlen)) {
-				err = -EFAULT;
-				goto err_cmd;
-			}
-			err = mlx5_ib_map_cq_ubuf(&sched_group, ucmd.buf_addr,
-						  entries * cqe_size,
-						  cq->mcq.cqn);
-			if (err)
-				goto err_cmd;
-			srm_cq_mapped = true;
-		}
+	/* A user CQ is not necessarily a Hollow CQ. The software mapping is
+	 * created lazily when a Hollow/SRM send QP binds this CQ. Ordinary RC
+	 * retains only the standard hardware umem registration. */
 	if (udata)
 		cq->mcq.tasklet_ctx.comp = mlx5_ib_cq_comp;
 	else
@@ -1890,8 +1879,6 @@ int mlx5_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 	return 0;
 
 err_cmd:
-	if (srm_cq_mapped)
-		mlx5_ib_unmap_cq_ubuf(&sched_group, cq->mcq.cqn);
 	mlx5_core_destroy_cq(dev->mdev, &cq->mcq);
 
 err_cqb:
@@ -1914,10 +1901,13 @@ int mlx5_ib_destroy_cq(struct ib_cq *cq, struct ib_udata *udata)
 		return ret;
 
 	if (udata) {
-		ret = mlx5_ib_unmap_cq_ubuf(&sched_group, mcq->mcq.cqn);
-		if (ret && ret != -ENOENT)
-			mlx5_ib_warn(dev, "failed to unmap CQ buffer 0x%x: %d\n",
-				    mcq->mcq.cqn, ret);
+		if (mcq->srm_cq_mapped) {
+			ret = mlx5_ib_unmap_cq_ubuf(&sched_group, mcq->mcq.cqn);
+			if (ret && ret != -ENOENT)
+				mlx5_ib_warn(dev, "failed to unmap CQ buffer 0x%x: %d\n",
+					    mcq->mcq.cqn, ret);
+			mcq->srm_cq_mapped = false;
+		}
 		destroy_cq_user(mcq, udata);
 	} else {
 		destroy_cq_kernel(dev, mcq);
@@ -2167,6 +2157,12 @@ int mlx5_ib_resize_cq(struct ib_cq *ibcq, int entries, struct ib_udata *udata)
 		return 0;
 
 	mutex_lock(&cq->resize_mutex);
+	/* Scheduler writers retain this mapping until a quiescent epoch. Do
+	 * not replace their storage underneath them. Ordinary CQs still resize. */
+	if (cq->srm_cq_mapped) {
+		err = -EBUSY;
+		goto ex;
+	}
 	if (udata) {
 		unsigned long page_size;
 

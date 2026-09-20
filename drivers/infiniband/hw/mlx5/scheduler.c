@@ -256,14 +256,16 @@ static inline void mlx5_srm_ctrl_complete_flush(
 
 static void mlx5_ib_cqb_release(struct mlx5_ib_cqbuf *cqb)
 {
-    int npages;
+    size_t i;
 
     if (!cqb)
         return;
 
-    vunmap(cqb->buf);
-    npages = DIV_ROUND_UP(cqb->cq_size, PAGE_SIZE);
-    put_user_pages(cqb->pages, npages);
+    vunmap(cqb->vmap_base);
+    /* These are extra get_page() references to the CQ's existing umem,
+     * not another get_user_pages()/FOLL_PIN registration. */
+    for (i = 0; i < cqb->npages; i++)
+        put_page(cqb->pages[i]);
     kfree(cqb->pages);
     kfree(cqb);
 }
@@ -857,48 +859,74 @@ mlx5_ib_find_cqb_by_cqn_locked(struct mlx5_ib_sched_group *sched_group, int cqn)
     return NULL;
 }
 
+/* CQ_MAP_TEST_BEGIN: map existing CQ pages only when a software sender binds. */
 int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group,
-                        unsigned long virt_addr, size_t size, int cqn)
+                      struct mlx5_ib_cq *cq)
 {
-    DEBUG_LOG("in mlx5_ib_map_cq_ubuf\n");
-    int ret;
+    struct ib_umem *umem;
+    struct sg_page_iter iter;
+    struct scatterlist *sgl;
+    unsigned int nents;
+    int cqn;
+    int ret = 0;
     int i;
     int slot = -1;
-    struct mlx5_ib_cqbuf *uq;
-    size_t npages;
-    struct page **pages;
+    struct mlx5_ib_cqbuf *uq = NULL;
+    size_t npages, offset, span, held = 0;
+    struct page **pages = NULL;
 
-    if (!sched_group || !virt_addr || !size)
+    if (!sched_group || !cq)
         return -EINVAL;
 
-    mutex_lock(&sched_group->cq_lock);
-    if (mlx5_ib_find_cqb_by_cqn_locked(sched_group, cqn)) {
-        mutex_unlock(&sched_group->cq_lock);
-        pr_warn_ratelimited("CQ buffer CQN %d is already mapped\n", cqn);
-        return -EEXIST;
+    /* Serialize the first attachment with other QP attachments and resize.
+     * Ordinary RC never calls here. Reuse ib_umem's validated SG list rather
+     * than GUP on current->mm (which also requires an mmap lock). */
+    mutex_lock(&cq->resize_mutex);
+    if (cq->srm_cq_mapped)
+        goto out_resize;
+    umem = cq->buf.umem;
+    if (IS_ERR_OR_NULL(umem) || !umem->length) {
+        ret = -EINVAL;
+        goto out_resize;
     }
-    mutex_unlock(&sched_group->cq_lock);
-
-    npages = DIV_ROUND_UP(size, PAGE_SIZE);
-    pages = kmalloc_array_node(npages, sizeof(struct page *), GFP_KERNEL,
-                               srm_numa_node);
-    if (!pages)
-        return -ENOMEM;
-    ret = get_user_pages(virt_addr, npages, FOLL_WRITE, pages, NULL);
-    if (ret < npages)
-    {
-        // 如果获取的页面数少于预期，释放资源并返回错误
-        for (i = 0; i < ret; i++)
-            put_page(pages[i]);
-        kfree(pages);
-        return -EFAULT;
+    if (umem->is_odp || umem->is_dmabuf || umem->is_peer ||
+        cq->cqe_size != 64) {
+        ret = -EOPNOTSUPP;
+        goto out_resize;
+    }
+    offset = ib_umem_offset(umem);
+    if (check_add_overflow(umem->length, offset, &span) ||
+        span > SIZE_MAX - (PAGE_SIZE - 1)) {
+        ret = -EOVERFLOW;
+        goto out_resize;
+    }
+    npages = DIV_ROUND_UP(span, PAGE_SIZE);
+    if (npages > UINT_MAX) {
+        ret = -EOVERFLOW;
+        goto out_resize;
+    }
+    cqn = cq->mcq.cqn;
+#ifdef HAVE_SG_APPEND_TABLE
+    sgl = umem->sgt_append.sgt.sgl;
+    nents = umem->sgt_append.sgt.orig_nents;
+#else
+    sgl = umem->sg_head.sgl;
+    nents = umem->sg_nents;
+#endif
+    if (!sgl || !nents) {
+        ret = -EINVAL;
+        goto out_resize;
     }
 
     mutex_lock(&sched_group->cq_lock);
+    if (READ_ONCE(sched_group->owner_stopping)) {
+        ret = -ESHUTDOWN;
+        goto out_unlock;
+    }
     if (mlx5_ib_find_cqb_by_cqn_locked(sched_group, cqn)) {
         ret = -EEXIST;
-        pr_warn_ratelimited("concurrent CQ buffer mapping for CQN %d\n", cqn);
-        goto err_unlock_pages;
+        pr_warn_ratelimited("CQ buffer CQN %d is already mapped\n", cqn);
+        goto out_unlock;
     }
 
     for (i = 0; i < sched_group->cqb_cnt; i++) {
@@ -910,52 +938,83 @@ int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group,
     if (slot < 0) {
         if (sched_group->cqb_cnt >= ARRAY_SIZE(sched_group->cqb_arr)) {
             ret = -ENOSPC;
-            goto err_unlock_pages;
+            goto out_unlock;
         }
-        slot = sched_group->cqb_cnt++;
+        slot = sched_group->cqb_cnt;
     }
 
+    /* kzalloc_node is paired with tracked kfree in this OFED tree; unlike
+     * kmalloc_array_node it does not cause memtrack unknown-address spam. */
+    if (npages > SIZE_MAX / sizeof(*pages)) {
+        ret = -EOVERFLOW;
+        goto out_unlock;
+    }
+    pages = kzalloc_node(npages * sizeof(*pages), GFP_KERNEL, srm_numa_node);
+    if (!pages) {
+        ret = -ENOMEM;
+        goto out_unlock;
+    }
+    for_each_sg_page(sgl, &iter, nents, 0) {
+        struct page *page = sg_page_iter_page(&iter);
+
+        if (held == npages)
+            break;
+        if (!page) {
+            ret = -EFAULT;
+            goto err_pages;
+        }
+        get_page(page);
+        pages[held++] = page;
+    }
+    if (held != npages) {
+        ret = -EFAULT;
+        goto err_pages;
+    }
     uq = kzalloc_node(sizeof(struct mlx5_ib_cqbuf), GFP_KERNEL,
                       srm_numa_node);
     if (!uq) {
         ret = -ENOMEM;
-        goto err_shrink_slot;
+        goto err_pages;
     }
     uq->cqn = cqn;
-    uq->cq_size = size;
-    uq->buf = vmap(pages, npages, VM_MAP, PAGE_KERNEL);
+    uq->cq_size = umem->length;
+    uq->vmap_base = vmap(pages, npages, VM_MAP, PAGE_KERNEL);
     uq->pages = pages;
-    uq->cqe_sz = 64;
+    uq->npages = npages;
+    uq->cqe_sz = cq->cqe_size;
     if (sched_group->num_sched > 0 && sched_group->scheds &&
         sched_group->scheds[0].worker_count)
         uq->owner_worker = (u32)cqn %
                            sched_group->scheds[0].worker_count;
     else
         uq->owner_worker = 0;
-    if (!uq->buf)
+    if (!uq->vmap_base)
     {
         kfree(uq);
         ret = -ENOMEM;
         pr_err("failed to map CQ buffer for CQN %d\n", cqn);
-        goto err_shrink_slot;
+        goto err_pages;
     }
+    uq->buf = (char *)uq->vmap_base + offset;
     pr_info("hollow RC user CQ cqn=%d owner_worker=%u\n",
             cqn, uq->owner_worker);
     sched_group->cqb_arr[slot] = uq;
+    if (slot == sched_group->cqb_cnt)
+        sched_group->cqb_cnt++;
+    cq->srm_cq_mapped = true;
+    goto out_unlock;
 
-    mutex_unlock(&sched_group->cq_lock);
-
-    return 0;
-
-err_shrink_slot:
-    if (slot == sched_group->cqb_cnt - 1)
-        sched_group->cqb_cnt--;
-err_unlock_pages:
-    mutex_unlock(&sched_group->cq_lock);
-    put_user_pages(pages, npages);
+err_pages:
+    while (held)
+        put_page(pages[--held]);
     kfree(pages);
+out_unlock:
+    mutex_unlock(&sched_group->cq_lock);
+out_resize:
+    mutex_unlock(&cq->resize_mutex);
     return ret;
 }
+/* CQ_MAP_TEST_END */
 
 int mlx5_ib_unmap_cq_ubuf(struct mlx5_ib_sched_group *sched_group, int cqn)
 {
@@ -2370,6 +2429,57 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
 }
 
 const int num_kqps = 32;
+
+/* BYTE_WINDOW_TEST_BEGIN: no-reroute DB/CQ accounting, also tested offline. */
+#if !MLX5_SRM_ENABLE_REROUTE && MLX5_SRM_MAX_INFLIGHT_BYTES
+static u64 rr_descriptor_bytes(const void *wqe)
+{
+    return mlx5_srm_payload_bytes(wqe);
+}
+
+static u64 rr_bytes(struct mlx5_ib_srmc *s, u64 post)
+{
+    struct mlx5_ib_wq *sq = &s->ini_cb.qp->sq;
+    return rr_descriptor_bytes(mlx5_frag_buf_get_wqe(
+        &sq->fbc, post & (sq->wqe_cnt - 1)));
+}
+
+static u64 rr_db_byte_available(struct mlx5_ib_srmc *s)
+{
+    struct mlx5_srm_route_ctrl *c = &s->ctrl_page->route;
+    return mlx5_srm_rr_byte_available(READ_ONCE(c->posted_bytes),
+        smp_load_acquire(&c->completed_bytes), c->inflight_limit_bytes);
+}
+
+static u64 rr_db_prefix_bytes(struct mlx5_ib_srmc *s, u64 start,
+                              u32 scanned, u32 granted, u64 scanned_bytes)
+{
+    u32 n;
+    u64 bytes = 0;
+    if (!granted) return 0;
+    if (granted == scanned) return scanned_bytes;
+    if (granted <= scanned - granted) {
+        for (n = 0; n < granted; n++) bytes += rr_bytes(s, start + n);
+        return bytes;
+    }
+    for (n = granted; n < scanned; n++)
+        scanned_bytes -= rr_bytes(s, start + n);
+    return scanned_bytes;
+}
+
+/* Called before publishing cons_idx: until then these SQ slots cannot be
+ * overwritten. Include unsignaled predecessors and return each byte once.
+ * Private CQ calls once per poll, not once per CQE. */
+void mlx5_srm_complete_byte_span(struct mlx5_ib_srmc *s, u64 first, u32 count)
+{
+    u32 n;
+    u64 bytes = 0;
+    for (n = 0; n < count; n++) bytes += rr_bytes(s, first + n);
+    s->byte_completed += bytes;
+    smp_store_release(&s->ctrl_page->route.completed_bytes, s->byte_completed);
+}
+#endif
+/* BYTE_WINDOW_TEST_END */
 
 #include "reroute.inc"
 
@@ -4303,8 +4413,9 @@ int scheduler_polling(void *sched_data)
                 int sent = 0;
                 u32 claimed = 0;
                 u64 scan_start;
-#if MLX5_SRM_ENABLE_REROUTE
+#if MLX5_SRM_ENABLE_REROUTE || MLX5_SRM_MAX_INFLIGHT_BYTES
                 u64 rr_scanned_bytes = 0;
+                u64 rr_available_bytes;
 #endif
 #if MLX5_SRM_ENABLE_WQE_TIMING
                 struct mlx5_srm_db_timing_batch timing_batch;
@@ -4347,6 +4458,14 @@ int scheduler_polling(void *sched_data)
                     continue;
                 }
 #endif
+#if MLX5_SRM_ENABLE_REROUTE || MLX5_SRM_MAX_INFLIGHT_BYTES
+                rr_available_bytes = rr_db_byte_available(srmc);
+                if (!rr_available_bytes) {
+                    smp_store_release(&ctrl_page->db_owner,
+                                      MLX5_SRM_DB_OWNER_FREE);
+                    continue;
+                }
+#endif
                 scan_start = srmc->sched_post_idx;
                 srmc->ini_cb.qp->sq.cur_post =
                     (u32)srmc->sched_post_idx;
@@ -4367,7 +4486,7 @@ int scheduler_polling(void *sched_data)
                 if (srm_stats_enable)
                     wqe_check_start_cycles = rdtsc_ordered();
 #if MLX5_SRM_ENABLE_READY_FASTPATH && \
-    !MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
+    !MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE && !MLX5_SRM_MAX_INFLIGHT_BYTES
                 {
                     u64 ready = smp_load_acquire(&ctrl_page->ready_idx);
                     u64 resv = smp_load_acquire(&ctrl_page->resv_idx);
@@ -4473,10 +4592,17 @@ int scheduler_polling(void *sched_data)
 #if MLX5_SRM_SCHED_SIZE_LIMIT_ACTIVE
                     sent_bytes += wqe_bytes;
 #endif
-#if MLX5_SRM_ENABLE_REROUTE
+#if MLX5_SRM_ENABLE_REROUTE || MLX5_SRM_MAX_INFLIGHT_BYTES
                     /* This descriptor is already hot from validation. Only
                      * account this sum after credit fixes the actual prefix. */
-                    rr_scanned_bytes += rr_descriptor_bytes(ctrl);
+                    {
+                        u64 payload = rr_descriptor_bytes(ctrl);
+                        if (!mlx5_srm_rr_byte_can_post(rr_available_bytes,
+                                rr_scanned_bytes, payload,
+                                ctrl_page->route.inflight_limit_bytes, sent))
+                            break;
+                        rr_scanned_bytes += payload;
+                    }
 #endif
                     srmc->sched_post_idx++;
                     srmc->ini_cb.qp->sq.cur_post++;
@@ -4557,7 +4683,7 @@ int scheduler_polling(void *sched_data)
                     continue;
                 }
                 if (unlikely(claimed < sent)) {
-#if MLX5_SRM_ENABLE_REROUTE
+#if MLX5_SRM_ENABLE_REROUTE || MLX5_SRM_MAX_INFLIGHT_BYTES
                     rr_scanned_bytes = rr_db_prefix_bytes(
                         srmc, scan_start, sent, claimed, rr_scanned_bytes);
 #endif
@@ -4593,9 +4719,11 @@ int scheduler_polling(void *sched_data)
 #endif
                 mlx5_srm_ring_shared_db(srmc->ini_cb.qp, ctrl_page,
                                         sent, last_ctrl);
-#if MLX5_SRM_ENABLE_REROUTE
+#if MLX5_SRM_ENABLE_REROUTE || MLX5_SRM_MAX_INFLIGHT_BYTES
                 smp_store_release(&ctrl_page->route.posted_bytes,
                     READ_ONCE(ctrl_page->route.posted_bytes) + rr_scanned_bytes);
+#endif
+#if MLX5_SRM_ENABLE_REROUTE
                 srmc->sched_post_idx = mlx5_srm_rr_seq(srmc->sched_post_idx);
 #endif
 #if MLX5_SRM_ENABLE_WQE_TIMING
@@ -4769,6 +4897,8 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
     u32 total_kqps = mlx5_srm_effective_kqps();
     char thread_info[64];
 
+    pr_info("SRM byte window: reroute=%u per_physical_kqp=%u bytes (0=unlimited) oversized_wr=single_when_empty\n",
+            MLX5_SRM_ENABLE_REROUTE, (u32)MLX5_SRM_MAX_INFLIGHT_BYTES);
 #if MLX5_SRM_ENABLE_PRIVATE_CQ
     if (!total_kqps || total_kqps > MLX5_SRM_CQ_SLOTS)
         return -EINVAL;
@@ -6328,6 +6458,12 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
         /* CQ polling publishes this KQP's cumulative hardware completion
          * cursor directly to the mmap-visible control slot. */
         srmc->ctrl_page = ctrl_page;
+        WRITE_ONCE(ctrl_page->route.inflight_limit_bytes,
+                   MLX5_SRM_MAX_INFLIGHT_BYTES);
+        WRITE_ONCE(ctrl_page->route.posted_bytes, 0);
+        WRITE_ONCE(ctrl_page->route.completed_bytes, 0);
+        WRITE_ONCE(ctrl_page->flags, READ_ONCE(ctrl_page->flags) |
+                   MLX5_SRM_CTRL_F_BYTE_WINDOW);
         WRITE_ONCE(ctrl_page->completion_error_idx, U64_MAX);
         WRITE_ONCE(ctrl_page->completion_error_status, IB_WC_SUCCESS);
         WRITE_ONCE(ctrl_page->completion_error_vendor, 0);

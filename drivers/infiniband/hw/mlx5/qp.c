@@ -3606,6 +3606,11 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 #if MLX5_SRM_ENABLE_REROUTE
 		if (READ_ONCE(sched_group.owner_stopping)) return -ESHUTDOWN;
 #endif
+		if (MLX5_SRM_MAX_INFLIGHT_BYTES &&
+		    !(qp->flags_en & MLX5_QP_FLAG_SRM_BYTE_WINDOW)) {
+			pr_err("Hollow byte window requires updated rdma-core provider\n");
+			return -EPROTO;
+		}
 		err = mlx5_ib_bind_hollow_rc_shared_pd(dev, pd, context);
 		if (err)
 			return err;
@@ -3642,6 +3647,14 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 			return -EINVAL;
 		}
 
+		err = mlx5_ib_map_cq_ubuf(&sched_group,
+					 to_mcq(init_attr->send_cq));
+		if (err) {
+			ida_free(&mlx5_usr_rc_ida, qp->usr_rc_id);
+			qp->usr_rc_id_valid = 0;
+			return err;
+		}
+
 		err = mlx5_ib_bind_usr_rc_cq(&sched_group,
 					     params->resp.usr_rc_cnt,
 					     to_mcq(init_attr->send_cq)->mcq.cqn,
@@ -3667,6 +3680,17 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 			qp->bfregn = MLX5_IB_INVALID_BFREG;
 			return 0;
 		}
+
+	/* Legacy SRM also consumes the scheduler's CQ mapping; do not restore
+	 * eager mappings for unrelated RC/XRC user CQs. */
+	if (init_attr->qp_type == IB_QPT_SRM) {
+		if (!init_attr->send_cq)
+			return -EINVAL;
+		err = mlx5_ib_map_cq_ubuf(&sched_group,
+					 to_mcq(init_attr->send_cq));
+		if (err)
+			return err;
+	}
 
 		if (init_attr->qp_type != IB_QPT_RAW_PACKET) {
 			ts_format = get_qp_ts_format(dev, to_mcq(init_attr->send_cq),
@@ -4371,6 +4395,8 @@ static int process_vendor_flags(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 	process_vendor_flag(dev, &flags, MLX5_QP_FLAG_UAR_PAGE_INDEX, true, qp);
 	process_vendor_flag(dev, &flags, MLX5_QP_FLAG_SRM_SENDER, true, qp);
 	process_vendor_flag(dev, &flags, MLX5_QP_FLAG_SRM_SKIP_KERN_QP, true, qp);
+	process_vendor_flag(dev, &flags, MLX5_QP_FLAG_SRM_BYTE_WINDOW,
+			    mlx5_ib_is_hollow_rc_qp(qp), qp);
 	/* Recognize the hint even in disabled builds: only the scheduler policy
 	 * is switched off, not the create-QP ABI. */
 	process_vendor_flag(dev, &flags, MLX5_QP_FLAG_SRM_LATENCY_CQ,

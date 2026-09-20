@@ -640,6 +640,9 @@ struct mlx5_ib_cq {
 	/* protect resize cq
 	 */
 	struct mutex		resize_mutex;
+	/* Only Hollow/SRM send CQs have a scheduler-side CPU mapping.
+	 * Protected by resize_mutex; CQ lifetime is held by the verbs core. */
+	bool			srm_cq_mapped;
 	struct mlx5_ib_cq_buf  *resize_buf;
 	struct ib_umem	       *resize_umem;
 	int			cqe_size;

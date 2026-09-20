@@ -9,13 +9,13 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <limits.h>
+#include <rdma/mlx5-srm-reroute.h>
 
-typedef uint64_t u64;
+typedef unsigned long long u64;
 typedef uint32_t u32;
 typedef uint16_t u16;
 typedef uint8_t u8;
 typedef int64_t s64;
-static inline u64 mlx5_srm_rr_seq(u64 v) { return v & ((1ULL<<63)-1); }
 static inline s64 mlx5_srm_seq_delta(u64 a, u64 b)
 {
 #if MLX5_SRM_ENABLE_REROUTE
@@ -69,9 +69,11 @@ struct mlx5_ib_cq {
 struct mlx5_sq_ctrl_page {
     u64 cons_idx, completion_error_idx, db_tail;
     u32 completion_error_status, completion_error_vendor;
+    struct mlx5_srm_route_ctrl route;
 };
 struct mlx5_ib_srmc;
-struct mlx5_ib_wq { u32 tail, wqe_cnt; };
+struct mock_fbc { unsigned char *buf; };
+struct mlx5_ib_wq { u32 tail, wqe_cnt; struct mock_fbc fbc; };
 struct mlx5_ib_qp {
     struct { u32 qp_num; } ibqp;
     struct mlx5_ib_wq sq;
@@ -83,6 +85,7 @@ struct mlx5_ib_srmc {
     u64 cq_complete_idx;
     int srmc_idx;
     int sig_cnt;
+    u64 byte_completed;
 };
 struct mlx5_ib_sched_worker { int unused; };
 struct mlx5_ib_sched { struct mlx5_ib_sched_worker *worker; };
@@ -99,6 +102,15 @@ static struct mlx5_sq_ctrl_page ctrl;
 static struct mlx5_ib_qp qp;
 static struct mlx5_ib_srmc s;
 static unsigned char entries[2048][128];
+static unsigned char sq_entries[1024][64];
+static u32 byte_publishes;
+#if !MLX5_SRM_ENABLE_REROUTE && MLX5_SRM_MAX_INFLIGHT_BYTES
+static void *mlx5_frag_buf_get_wqe(struct mock_fbc *f, u32 index)
+{ return f->buf + index * 64; }
+static u64 rr_db_byte_available(struct mlx5_ib_srmc *);
+static u64 rr_db_prefix_bytes(struct mlx5_ib_srmc *, u64, u32, u32, u64);
+void mlx5_srm_complete_byte_span(struct mlx5_ib_srmc *, u64, u32);
+#endif
 static u32 head, ci_stores, publishes, timing_calls, last_ci;
 static u64 last_time_post;
 #if MLX5_SRM_ENABLE_REROUTE
@@ -125,6 +137,9 @@ static void mlx5_cq_set_ci(struct mock_mcq *c)
 }
 static void publish(u64 *p, u64 val)
 {
+    if (p == &ctrl.route.completed_bytes) {
+        ++byte_publishes; *p = val; return;
+    }
     assert(ci_stores && last_ci == cq.mcq.cons_index);
     ++publishes;
     *p = val;
@@ -208,12 +223,23 @@ int mlx5_ib_poll_srm_private_progress(struct mlx5_ib_srmc *, int, u32 *);
 
 static void reset(u64 cursor, u32 size)
 {
+    u32 i;
     memset(&cq,0,sizeof(cq)); memset(&ctrl,0,sizeof(ctrl));
     memset(&qp,0,sizeof(qp)); memset(&s,0,sizeof(s));
     memset(entries,0,sizeof(entries));
     core.state=0;
     cq.ibcq.device=&dev; cq.mcq.cqe_sz=size;
     qp.ibqp.qp_num=77; qp.sq.wqe_cnt=1024; qp.sq.tail=(u32)cursor;
+    qp.sq.fbc.buf = &sq_entries[0][0];
+    memset(sq_entries, 0, sizeof(sq_entries));
+    for (i = 0; i < 1024; ++i) {
+        u32 op = htonl(0x08), ds = htonl(4), len = htonl((i % 7 + 1) * 512);
+        memcpy(sq_entries[i], &op, 4);
+        memcpy(sq_entries[i] + 4, &ds, 4);
+        memcpy(sq_entries[i] + 48, &len, 4);
+    }
+    ctrl.route.inflight_limit_bytes = MLX5_SRM_MAX_INFLIGHT_BYTES;
+    byte_publishes = 0;
     qp.srmc_owner=&s;
     s.ini_cb.qp=&qp; s.ini_cb.cq=&cq.ibcq; s.ctrl_page=&ctrl;
     s.cq_complete_idx=ctrl.cons_idx=cursor;
@@ -238,16 +264,48 @@ static void add(u64 post, u8 opcode, u32 qpn)
 static void finish(int expected, int pending, u32 expected_wqes, u64 cursor)
 {
     u32 done=99, before=publishes;
+#if !MLX5_SRM_ENABLE_REROUTE && MLX5_SRM_MAX_INFLIGHT_BYTES
+    u64 before_bytes = ctrl.route.completed_bytes, delta = 0;
+    u32 byte_before = byte_publishes, n;
+    for (n = 0; n < expected_wqes; n++)
+        delta += mlx5_srm_payload_bytes(sq_entries[(s.cq_complete_idx+n)&1023]);
+#endif
     int ret=mlx5_ib_poll_srm_private_progress(&s,pending,&done);
     assert(ret==expected && done==expected_wqes);
     assert(publishes-before == (expected>0 ? 1U : 0U));
     assert(s.cq_complete_idx==cursor && ctrl.cons_idx==cursor && qp.sq.tail==(u32)cursor);
+#if !MLX5_SRM_ENABLE_REROUTE && MLX5_SRM_MAX_INFLIGHT_BYTES
+    assert(ctrl.route.completed_bytes - before_bytes == delta);
+    assert(byte_publishes - byte_before == (expected > 0 ? 1U : 0U));
+#endif
 }
 int main(void)
 {
     struct mlx5_ib_sched_worker worker;
     struct mlx5_ib_sched sched={&worker};
     u32 size;
+#if !MLX5_SRM_ENABLE_REROUTE && MLX5_SRM_MAX_INFLIGHT_BYTES
+    /* Same completion helper used by shared CQ, including unsignaled spans. */
+    reset(65534, 64);
+    {
+        u64 sum = 0; u32 n, done = 0;
+        for (n = 0; n < 3; ++n)
+            sum += mlx5_srm_payload_bytes(sq_entries[(65534+n)&1023]);
+        s.byte_completed = ctrl.route.completed_bytes = UINT64_MAX - 99;
+        ctrl.route.posted_bytes = ctrl.route.completed_bytes + sum;
+        assert(rr_db_byte_available(&s) == MLX5_SRM_MAX_INFLIGHT_BYTES - sum);
+        assert(rr_db_prefix_bytes(&s, 65534, 3, 0, sum) == 0);
+        assert(rr_db_prefix_bytes(&s, 65534, 3, 3, sum) == sum);
+        assert(rr_db_prefix_bytes(&s, 65534, 3, 1, sum) ==
+               mlx5_srm_payload_bytes(sq_entries[1022]));
+        assert(rr_db_prefix_bytes(&s, 65534, 3, 2, sum) ==
+               sum - mlx5_srm_payload_bytes(sq_entries[0]));
+        mlx5_ib_srmc_complete_post(&qp, &qp.sq, 0, &done);
+        assert(done == 3 && ctrl.cons_idx == 65534);
+        assert(ctrl.route.posted_bytes == ctrl.route.completed_bytes);
+        assert(rr_db_byte_available(&s) == MLX5_SRM_MAX_INFLIGHT_BYTES);
+    }
+#endif
     reset(100,64); ctrl.db_tail=110;
     assert(mlx5_srm_refresh_poll_budget(&sched,&s)==10);
     ctrl.db_tail=100;

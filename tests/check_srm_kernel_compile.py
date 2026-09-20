@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--private-cq", type=int, choices=(0, 1), default=0)
     parser.add_argument("--latency-cq-priority", type=int, choices=(0, 1), default=0)
     parser.add_argument("--reroute", type=int, choices=(0, 1), default=None)
+    parser.add_argument("--byte-limit", type=int, default=None)
     args = parser.parse_args()
     if args.latency_cq_priority and not args.private_cq:
         parser.error("latency CQ priority requires --private-cq 1")
@@ -52,6 +53,7 @@ def main():
             command = [x for x in command if not x.startswith(
                 ("-DMLX5_SRM_ENABLE_PRIVATE_CQ=",
                  "-DMLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY=",
+                 "-DMLX5_SRM_MAX_INFLIGHT_BYTES=",
                  "-DMLX5_SRM_ENABLE_REROUTE="))]
             output = command.index("-o") + 1
             combinations = (itertools.product((0, 1), repeat=3) if args.diagnostics
@@ -71,7 +73,9 @@ def main():
                                "-DMLX5_SRM_ENABLE_PRIVATE_CQ=" + str(args.private_cq),
                                "-DMLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY=" + str(args.latency_cq_priority)] +
                                ([] if args.reroute is None else [
-                               "-DMLX5_SRM_ENABLE_REROUTE=" + str(args.reroute)]),
+                               "-DMLX5_SRM_ENABLE_REROUTE=" + str(args.reroute)]) +
+                               ([] if args.byte_limit is None else [
+                               "-DMLX5_SRM_MAX_INFLIGHT_BYTES=" + str(args.byte_limit)]),
                                cwd=config["KSRC_OBJ"], check=True)
         print("PASS: selected CQ variants compile; no module installed")
 
