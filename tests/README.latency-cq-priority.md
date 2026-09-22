@@ -24,8 +24,6 @@
 - 优先 CQ 不必已在正常队列中：直接通过原有 `db_tail` / 完成游标判定
   outstanding，因而也能发现用户 DB；不增加 syscall。
 - 大小流双 QP：两条路径均登记，优先集合内轮转。
-- 换路：登记该逻辑组的四条路径，涵盖新活动路径和旧路径排空。
-  空闲备用路径没有 outstanding，不访问硬件 CQ。正常轮询仍然保留。
 - 销毁逻辑 QP 时撤销引用；多个逻辑 QP 指向同一个 CQ 时，最后一个
   时延标记引用退出才取消优先级。调度器停机仍沿用原 stop-before-free 顺序。
 
@@ -80,8 +78,6 @@ python3 tests/check_srm_kernel_compile.py --private-cq 1 \
   --latency-cq-priority 1 --units scheduler qp
 python3 tests/check_srm_kernel_compile.py --private-cq 1 \
   --latency-cq-priority 0 --units scheduler qp
-python3 tests/check_srm_kernel_compile.py --private-cq 1 \
-  --latency-cq-priority 1 --reroute 1 --units scheduler qp
 python3 tests/check_srm_kernel_compile.py --private-cq 1 \
   --latency-cq-priority 1 --units scheduler --diagnostics --wqe-timing
 

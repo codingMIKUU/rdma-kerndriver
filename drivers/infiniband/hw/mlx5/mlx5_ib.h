@@ -20,7 +20,6 @@
 #include <linux/mlx5/transobj.h>
 #include <rdma/ib_user_verbs.h>
 #include <rdma/mlx5-abi.h>
-#include <uapi/rdma/mlx5-srm-reroute.h>
 #include <rdma/uverbs_ioctl.h>
 #include <rdma/mlx5_user_ioctl_cmds.h>
 #include <rdma/mlx5_user_ioctl_verbs.h>
@@ -574,10 +573,6 @@ struct mlx5_ib_qp {
 	struct mlx5_qp_farm_db_mmap_entry *farm_db_mmap_entry;
 	struct mlx5_qp_sq_mmap_entry *large_sq_mmap_entry;
 	struct mlx5_qp_publish_mmap_entry *large_sq_publish_entry;
-#if MLX5_SRM_ENABLE_REROUTE
-	/* Mapping holders only, never registered as hardware/user QPs. */
-	struct mlx5_ib_qp *rr_maps[4];
-#endif
 	u32			sq_ctrl_slot_idx;
 	u16			usr_rc_id;
 	u8			usr_rc_id_valid:1;

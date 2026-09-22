@@ -24,7 +24,6 @@ def main():
                         help="also compile with WQE timing off and on")
     parser.add_argument("--private-cq", type=int, choices=(0, 1), default=0)
     parser.add_argument("--latency-cq-priority", type=int, choices=(0, 1), default=0)
-    parser.add_argument("--reroute", type=int, choices=(0, 1), default=None)
     args = parser.parse_args()
     if args.latency_cq_priority and not args.private_cq:
         parser.error("latency CQ priority requires --private-cq 1")
@@ -51,15 +50,12 @@ def main():
                 "-DMLX5_SRM_ENABLE_WQE_TIMING=")]
             command = [x for x in command if not x.startswith(
                 ("-DMLX5_SRM_ENABLE_PRIVATE_CQ=",
-                 "-DMLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY=",
-                 "-DMLX5_SRM_ENABLE_REROUTE="))]
+                 "-DMLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY="))]
             output = command.index("-o") + 1
             combinations = (itertools.product((0, 1), repeat=3) if args.diagnostics
                             else ((0, 0, 0), (1, 0, 0)))
             variants = itertools.product(combinations, (0, 1) if args.wqe_timing else (0,))
             for (mode, db_stats, cq_stats), timing in variants:
-                if args.private_cq and not mode:
-                    continue
                 variant = "cq%d-db%d-cycles%d" % (mode, db_stats, cq_stats)
                 variant += "-timing%d" % timing
                 command[output] = str(Path(tmp) / (unit + "-" + variant + ".o"))
@@ -69,9 +65,7 @@ def main():
                                "-DMLX5_SRM_ENABLE_CQE_CYCLE_STATS=" + str(cq_stats),
                                "-DMLX5_SRM_ENABLE_WQE_TIMING=" + str(timing),
                                "-DMLX5_SRM_ENABLE_PRIVATE_CQ=" + str(args.private_cq),
-                               "-DMLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY=" + str(args.latency_cq_priority)] +
-                               ([] if args.reroute is None else [
-                               "-DMLX5_SRM_ENABLE_REROUTE=" + str(args.reroute)]),
+                               "-DMLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY=" + str(args.latency_cq_priority)],
                                cwd=config["KSRC_OBJ"], check=True)
         print("PASS: selected CQ variants compile; no module installed")
 

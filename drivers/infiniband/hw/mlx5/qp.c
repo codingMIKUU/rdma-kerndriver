@@ -94,75 +94,6 @@ struct mlx5_ib_qp_event_work {
 static struct workqueue_struct *mlx5_ib_qp_event_wq;
 
 static DEFINE_IDA(mlx5_usr_rc_ida);
-#if MLX5_SRM_ENABLE_REROUTE
-extern struct mlx5_ib_sched_group sched_group;
-/* Control-plane quarantine: an old migrated CQE must never address a newly
- * created logical QP which happens to reuse its 16-bit user ID. */
-static DEFINE_MUTEX(rr_retire_lock);
-static DECLARE_BITMAP(rr_retired_ids, NUM_SQB);
-static struct {
-	struct mlx5_sq_ctrl_page *ctrl[MLX5_SRM_REROUTE_PATHS];
-	u64 end[MLX5_SRM_REROUTE_PATHS];
-	u64 epoch;
-} rr_retired[NUM_SQB];
-
-static void mlx5_srm_rr_retire_user(struct mlx5_ib_qp *qp)
-{
-	struct mlx5_ib_sched *sched;
-	u32 base, p, id = qp->usr_rc_id;
-
-	/* Caller has already unbound the CQ route; no new posts may race
-	 * ibv_destroy_qp, just as in the base verbs interface. */
-	mutex_lock(&sched_group.owner_lock);
-	if (!qp->srmc_owner || sched_group.owner_stopping) {
-		ida_free(&mlx5_usr_rc_ida, id);
-		mutex_unlock(&sched_group.owner_lock);
-		return;
-	}
-	sched = &sched_group.scheds[0];
-	base = qp->srmc_owner->srmc_idx;
-	mutex_lock(&rr_retire_lock);
-	for (p = 0; p < MLX5_SRM_REROUTE_PATHS; p++) {
-		struct mlx5_ib_srmc *s = READ_ONCE(sched->srmc_by_idx[base + p]);
-		rr_retired[id].ctrl[p] = s ? s->ctrl_page : NULL;
-		rr_retired[id].end[p] = s ?
-			mlx5_srm_rr_seq(smp_load_acquire(&s->ctrl_page->resv_idx)) : 0;
-	}
-	rr_retired[id].epoch = atomic64_inc_return(&sched_group.route_epoch);
-	__set_bit(id, rr_retired_ids);
-	mutex_unlock(&rr_retire_lock);
-	mutex_unlock(&sched_group.owner_lock);
-}
-
-void mlx5_srm_rr_reap_users(struct mlx5_ib_sched *sched, bool stopped)
-{
-	static unsigned long cursor;
-	unsigned long id;
-	u32 p, budget = stopped ? NUM_SQB : 256;
-	if (stopped) mutex_lock(&rr_retire_lock);
-	else if (!mutex_trylock(&rr_retire_lock)) return;
-	id = stopped ? 0 : cursor;
-	while (budget-- && (id = find_next_bit(rr_retired_ids, NUM_SQB, id)) < NUM_SQB) {
-		bool ready = stopped || smp_load_acquire(
-			&sched->workers[0].quiescent_epoch) >= rr_retired[id].epoch;
-		if (!stopped)
-			for (p = 0; ready && p < MLX5_SRM_REROUTE_PATHS; p++) {
-				struct mlx5_sq_ctrl_page *c = rr_retired[id].ctrl[p];
-				if (c && mlx5_srm_rr_delta(smp_load_acquire(&c->cons_idx),
-							 rr_retired[id].end[p]) < 0)
-					ready = false;
-			}
-		if (ready) {
-			__clear_bit(id, rr_retired_ids);
-			memset(&rr_retired[id], 0, sizeof(rr_retired[id]));
-			ida_free(&mlx5_usr_rc_ida, id);
-		}
-		id++;
-	}
-	cursor = id < NUM_SQB ? id : 0;
-	mutex_unlock(&rr_retire_lock);
-}
-#endif
 static DEFINE_MUTEX(mlx5_publish_lock);
 
 struct mlx5_ib_sqd {
@@ -224,23 +155,9 @@ static void mlx5_ib_latency_cq_refs(struct mlx5_ib_qp *qp, bool add)
 {
 	if (!(qp->flags_en & MLX5_QP_FLAG_SRM_LATENCY_CQ) || !qp->srmc_owner)
 		return;
-#if MLX5_SRM_ENABLE_REROUTE
-	{
-		struct mlx5_ib_sched *sched = &sched_group.scheds[0];
-		u32 base = qp->srmc_owner->srmc_idx / MLX5_SRM_REROUTE_PATHS *
-			   MLX5_SRM_REROUTE_PATHS;
-		u32 p;
-
-		/* Both current and draining paths keep priority across reroutes. */
-		for (p = 0; p < MLX5_SRM_REROUTE_PATHS; p++)
-			mlx5_ib_latency_cq_ref(sched->srmc_by_idx[base + p], add,
-					       qp->ibqp.qp_num);
-	}
-#else
 	mlx5_ib_latency_cq_ref(qp->srmc_owner, add, qp->ibqp.qp_num);
 	if (qp->large_srmc_owner && qp->large_srmc_owner != qp->srmc_owner)
 		mlx5_ib_latency_cq_ref(qp->large_srmc_owner, add, qp->ibqp.qp_num);
-#endif
 }
 #endif
 
@@ -1326,21 +1243,6 @@ mlx5_ib_find_pseudo_random_srmc_by_gid(union ib_gid *dgid, u32 usr_rc_id)
 		return NULL;
 	owner_worker = READ_ONCE(cqb->owner_worker);
 
-#if MLX5_SRM_ENABLE_REROUTE
-	{
-		struct mlx5_ib_sched *sched = &sched_group.scheds[0];
-		hash = jhash(dgid->raw, sizeof(dgid->raw), 0x5a17c9e3);
-		hash = jhash_2words(hash, usr_rc_id, 0x9e3779b9);
-		/* Return the group controller, not a randomly selected physical SQ. */
-		selected = READ_ONCE(sched->srmc_by_idx[
-			(hash % num_kqps) * MLX5_SRM_REROUTE_PATHS]);
-		if (!selected || !selected->rr ||
-		    memcmp(selected->dgid.raw, dgid->raw, sizeof(dgid->raw)))
-			return NULL;
-		selected->ini_cb.refcnt++;
-		return selected;
-	}
-#endif
 	for (si = 0; si < max_t(int, 1, sched_group.num_sched); si++) {
 		struct mlx5_ib_sched *sched = &sched_group.scheds[si];
 
@@ -1904,69 +1806,6 @@ static void mlx5_ib_fill_large_kernel_qp_info(struct mlx5_ib_srmc *srmc,
 	resp->large_kernel_max_inline_data = kqp->max_inline_data;
 }
 
-#if MLX5_SRM_ENABLE_REROUTE
-static int mlx5_ib_rr_maps(struct mlx5_ib_dev *dev,
-	struct mlx5_ib_ucontext *ctx, struct mlx5_ib_qp *qp,
-	struct mlx5_ib_modify_qp_resp *resp)
-{
-	struct mlx5_ib_modify_qp_resp *part;
-	struct mlx5_ib_sched *sched = &sched_group.scheds[0];
-	u32 base = qp->srmc_owner->srmc_idx, p;
-	int err = 0;
-
-	part = kzalloc(sizeof(*part), GFP_KERNEL);
-	if (!part) return -ENOMEM;
-	memcpy(&resp->reroute[0], resp, sizeof(resp->reroute[0]));
-	for (p = 1; p < MLX5_SRM_REROUTE_PATHS; p++) {
-		struct mlx5_ib_qp *map = qp->rr_maps[p];
-		struct mlx5_ib_srmc *s = READ_ONCE(sched->srmc_by_idx[base + p]);
-		if (!s || !s->rr || !s->ini_cb.qp) { err = -EINVAL; break; }
-		if (!map) {
-			map = kzalloc(sizeof(*map), GFP_KERNEL);
-			if (!map) { err = -ENOMEM; break; }
-			qp->rr_maps[p] = map;
-		}
-		map->srmc_owner = s;
-		memset(part, 0, sizeof(*part));
-		part->sq_state_mmap_offset = resp->sq_state_mmap_offset;
-		part->sq_state_mmap_len = resp->sq_state_mmap_len;
-		part->sq_state_slot_idx = s->srmc_idx;
-		err = mlx5_ib_modify_qp_sq_mmap(dev, ctx, map, part);
-		if (!err) err = mlx5_ib_create_qp_publish_mmap(ctx, map, part);
-		if (!err) err = mlx5_ib_prepare_farm_db_mmaps(dev, ctx, map, part);
-		if (err) break;
-		mlx5_ib_fill_kernel_qp_info(map, part);
-		memcpy(&resp->reroute[p], part, sizeof(resp->reroute[p]));
-	}
-	kfree(part);
-	if (err) return err;
-	resp->reroute_abi = MLX5_SRM_REROUTE_ABI |
-		MLX5_SRM_ENABLE_CQE_SIMPLIFY << 16;
-	resp->reroute_paths = MLX5_SRM_REROUTE_PATHS;
-	resp->reroute_route_slot = base;
-	resp->reroute_completion_offset = NUM_SRMC * 512 +
-		qp->usr_rc_id * sizeof(struct mlx5_srm_migration_completion);
-	return 0;
-}
-
-static void mlx5_ib_rr_unmap(struct mlx5_ib_qp *qp)
-{
-	u32 p;
-	for (p = 1; p < MLX5_SRM_REROUTE_PATHS; p++) {
-		struct mlx5_ib_qp *m = qp->rr_maps[p];
-		if (!m) continue;
-		if (m->sq_mmap_entry)
-			rdma_user_mmap_entry_remove(&m->sq_mmap_entry->mentry.rdma_entry);
-		if (m->sq_publish_entry)
-			rdma_user_mmap_entry_remove(&m->sq_publish_entry->mentry.rdma_entry);
-		if (m->farm_uar_mmap_entry)
-			rdma_user_mmap_entry_remove(&m->farm_uar_mmap_entry->rdma_entry);
-		if (m->farm_db_mmap_entry)
-			rdma_user_mmap_entry_remove(&m->farm_db_mmap_entry->mentry.rdma_entry);
-		kfree(m); qp->rr_maps[p] = NULL;
-	}
-}
-#endif
 
 static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 					 struct ib_pd *pd,
@@ -1986,13 +1825,6 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 
 	if (!udata)
 		return -EINVAL;
-#if MLX5_SRM_ENABLE_REROUTE
-	if (udata->outlen < sizeof(*resp)) {
-		pr_err("SRM reroute requires updated provider: response bytes=%zu expected=%zu\n",
-		       udata->outlen, sizeof(*resp));
-		return -EPROTO;
-	}
-#endif
 	if (!(attr_mask & IB_QP_AV))
 		return -EINVAL;
 	if (!(rdma_ah_get_ah_flags(&attr->ah_attr) & IB_AH_GRH))
@@ -2093,10 +1925,6 @@ static int mlx5_ib_attach_hollow_rc_srmc(struct mlx5_ib_dev *dev,
 	err = mlx5_ib_prepare_farm_db_mmaps(dev, context, qp, resp);
 	if (err)
 		goto out_owner_unlock;
-#if MLX5_SRM_ENABLE_REROUTE
-	err = mlx5_ib_rr_maps(dev, context, qp, resp);
-	if (err) goto out_owner_unlock;
-#endif
 
 	if (MLX5_SRM_ENABLE_LARGE_KERNEL_QP) {
 		if (!qp->large_srmc_owner) {
@@ -2315,9 +2143,6 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 
 	if (udata) {
 		/* User QP */
-#if MLX5_SRM_ENABLE_REROUTE
-		mlx5_ib_rr_unmap(qp);
-#endif
 		/*
 		 * Unmap is deferred to scheduler teardown to avoid racing with
 		 * scheduler_polling threads that still touch SQ/CQ buffers.
@@ -2357,13 +2182,6 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 		}
 
 		/* Keep ordinary RC QP teardown out of the Hollow RC owner path. */
-#if MLX5_SRM_ENABLE_REROUTE
-		if (qp->usr_rc_id_valid) {
-			mlx5_ib_unbind_usr_rc_cq(&sched_group, qp->usr_rc_id);
-			mlx5_srm_rr_retire_user(qp);
-			qp->usr_rc_id_valid = 0;
-		}
-#endif
 		if (qp->srm_owner_registered ||
 		    READ_ONCE(qp->srmc_owner) ||
 		    READ_ONCE(qp->large_srmc_owner))
@@ -3603,9 +3421,6 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 				rdma_udata_to_drv_context(udata, struct mlx5_ib_ucontext,
 							  ibucontext);
 
-#if MLX5_SRM_ENABLE_REROUTE
-		if (READ_ONCE(sched_group.owner_stopping)) return -ESHUTDOWN;
-#endif
 		err = mlx5_ib_bind_hollow_rc_shared_pd(dev, pd, context);
 		if (err)
 			return err;
@@ -3626,14 +3441,6 @@ static int create_user_qp(struct mlx5_ib_dev *dev, struct ib_pd *pd,
 			return err;
 		qp->usr_rc_id = err;
 		qp->usr_rc_id_valid = 1;
-#if MLX5_SRM_ENABLE_REROUTE
-		{
-			size_t off = NUM_SRMC * 512 + qp->usr_rc_id *
-				sizeof(struct mlx5_srm_migration_completion);
-			memset(page_address(dev->sq_ctrl_pool.pages[off / PAGE_SIZE]) +
-			       off % PAGE_SIZE, 0, sizeof(struct mlx5_srm_migration_completion));
-		}
-#endif
 		params->resp.usr_rc_cnt = qp->usr_rc_id;
 		params->resp.comp_mask |= MLX5_IB_CREATE_QP_RESP_MASK_USR_RC_CNT;
 		if (!init_attr->send_cq) {

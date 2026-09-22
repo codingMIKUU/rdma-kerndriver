@@ -7,7 +7,6 @@
 #include <linux/types.h>
 #include <linux/wait.h>
 #include <rdma/rdma_cm.h>
-#include <uapi/rdma/mlx5-srm-reroute.h>
 
 /* Must match rdma-core/providers/mlx5/mlx5.h. Keep the native CQE path
  * when disabled; this is the pre-MVAPICH fixed-window implementation. */
@@ -19,7 +18,7 @@
 #endif
 
 /* Kernel-only experiment: one send CQ per physical KQP. No userspace ABI
- * change. Keep off to preserve the existing shared-CQ/reroute experiment. */
+ * change. Disable to restore the existing shared-CQ path. */
 #ifndef MLX5_SRM_ENABLE_PRIVATE_CQ
 #define MLX5_SRM_ENABLE_PRIVATE_CQ 1
 #endif
@@ -29,9 +28,6 @@
 #if MLX5_SRM_ENABLE_PRIVATE_CQ != 0 && MLX5_SRM_ENABLE_PRIVATE_CQ != 1
 #error "MLX5_SRM_ENABLE_PRIVATE_CQ must be 0 or 1"
 #endif
-#if MLX5_SRM_ENABLE_PRIVATE_CQ && !MLX5_SRM_ENABLE_CQE_SIMPLIFY
-#error "private CQ requires CQE_SIMPLIFY=1"
-#endif
 #if MLX5_SRM_PRIVATE_CQ_POLL_BUDGET < 1 || MLX5_SRM_PRIVATE_CQ_POLL_BUDGET > 65536
 #error "private CQ poll budget must be in [1, 65536]"
 #endif
@@ -39,7 +35,7 @@
 /* General's explicitly tagged latency QP: one priority CQ poll before each
  * normal round-robin poll. Kernel-only switch; default keeps the baseline. */
 #ifndef MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY
-#define MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY 1
+#define MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY 0
 #endif
 #if MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY && !MLX5_SRM_ENABLE_PRIVATE_CQ
 #error "latency CQ priority requires private CQs"
@@ -63,7 +59,7 @@
 #define MLX5_SRM_ENABLE_DB_SHARE_STATS 0
 #endif
 #ifndef MLX5_SRM_ENABLE_CQE_CYCLE_STATS
-#define MLX5_SRM_ENABLE_CQE_CYCLE_STATS 0
+#define MLX5_SRM_ENABLE_CQE_CYCLE_STATS 1
 #endif
 #ifndef MLX5_SRM_DIAG_INTERVAL_MS
 #define MLX5_SRM_DIAG_INTERVAL_MS 1000U
@@ -125,7 +121,7 @@ static const size_t SCHED_SIZE_LIMIT = MLX5_SRM_SCHED_SIZE_LIMIT;
 
 #define MLX5_SRM_LARGE_DB_LIMIT 100
 static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
-#define MLX5_SRM_ENABLE_LARGE_DB_LIMIT 1
+#define MLX5_SRM_ENABLE_LARGE_DB_LIMIT 0
 #define MLX5_SRM_LARGE_DB_LIMIT_ACTIVE \
     (MLX5_SRM_ENABLE_LARGE_KERNEL_QP && \
      MLX5_SRM_ENABLE_LARGE_DB_LIMIT && (MLX5_SRM_LARGE_DB_LIMIT > 0))
@@ -140,7 +136,7 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
  */
 #define MLX5_SRM_ENABLE_READY_FASTPATH 0
 
-static u64 LIMIT_BATCHING = 1000000;
+static u64 LIMIT_BATCHING = 10000000;
 #define DEBUG_LOG \
     if (debug)    \
     printk
@@ -207,10 +203,9 @@ struct mlx5_sq_ctrl_page {
 	__u8 hot_hint_pad[56];
 	/* Power-of-two stride: a slot must never cross discontiguous pool pages. */
 	struct mlx5_srm_db_share db_share;
-	struct mlx5_srm_route_ctrl route;
+	__u8 slot_pad[128];
 } CACHELINE_ALIGNED_USER;
 static_assert(sizeof(struct mlx5_sq_ctrl_page) == 512);
-static_assert(offsetof(struct mlx5_sq_ctrl_page, route) == 384);
 
 #define MLX5_SRM_DB_OWNER_FREE   0U
 #define MLX5_SRM_DB_OWNER_USER   1U
@@ -296,11 +291,7 @@ static inline u64 mlx5_srm_wrid_post(u64 wrid)
  */
 static inline s64 mlx5_srm_seq_delta(u64 lhs, u64 rhs)
 {
-#if MLX5_SRM_ENABLE_REROUTE
-    return mlx5_srm_rr_delta(lhs, rhs);
-#else
     return (s64)(lhs - rhs);
-#endif
 }
 
 static inline bool mlx5_srm_seq_after(u64 lhs, u64 rhs)
@@ -317,7 +308,7 @@ static inline u64 mlx5_srm_extend_post48(u64 reference, u64 post48)
                 MLX5_SRM_WRID_POST_MASK;
 
     reference = delta >= half ? reference - (period - delta) : reference + delta;
-    return MLX5_SRM_ENABLE_REROUTE ? mlx5_srm_rr_seq(reference) : reference;
+    return reference;
 }
 
 struct mlx5_ib_cqbuf
@@ -410,9 +401,6 @@ struct mlx5_wqe_info
 };
 struct mlx5_ib_srmc
 {
-#if MLX5_SRM_ENABLE_REROUTE
-    struct mlx5_srm_rr_path *rr;
-#endif
     struct srm_cb ini_cb;
     struct srm_cb tgt_cb;
     union ib_gid dgid;
@@ -464,10 +452,6 @@ struct mlx5_ib_sched_worker
 } CACHELINE_ALIGNED;
 struct mlx5_ib_sched
 {
-#if MLX5_SRM_ENABLE_REROUTE
-    struct mlx5_srm_rr_group *rr_groups;
-    struct mlx5_ib_srmc *rr_publish_head;
-#endif
     struct mlx5_ib_sched_worker *workers;
     u32 worker_count;
     struct mutex srmc_lock;
@@ -592,18 +576,4 @@ int polling_cqe(void *data);
 int mlx5_ib_register_external_table(void *table, size_t size, struct page **pages, void *level_table, size_t level_size, struct page **level_pages,
                                            void *xrc_table, size_t xrc_size, struct page **xrc_pages, int xrc_qp_num_per_srm);
 int srm_map_bf(struct mlx5_ib_sched_group *sched_group,struct mlx5_ib_create_qp *ucmd,struct mlx5_ib_dev *dev);
-#if MLX5_SRM_ENABLE_REROUTE
-void mlx5_srm_rr_fail(struct mlx5_ib_srmc *s);
-#if MLX5_SRM_ENABLE_PRIVATE_CQ
-bool mlx5_srm_rr_idle(const struct mlx5_ib_srmc *s);
-void mlx5_srm_rr_complete_idle_batch(struct mlx5_ib_srmc *s,
-                                     u64 first, u32 count);
-#endif
-void mlx5_srm_rr_reap_users(struct mlx5_ib_sched *sched, bool stopped);
-bool mlx5_srm_rr_maintenance_post(struct mlx5_ib_srmc *s, u16 counter, u64 *post);
-int mlx5_srm_rr_complete(struct mlx5_ib_srmc **srmc, u64 *post,
-                         u32 status, u32 vendor, u64 tsc);
-bool mlx5_srm_rr_can_db(struct mlx5_ib_srmc *srmc, u64 post);
-void mlx5_srm_rr_flush_native(struct mlx5_ib_sched *sched);
-#endif
 #endif /* _MLX5_IB_SCHEDULER_H */

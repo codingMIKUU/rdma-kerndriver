@@ -106,7 +106,7 @@ int main(void)
     assert(POLL() == 1 && s[1].pending == 0 && head == tail);
     assert(!in_queue[1]);
     assert(POLL() == 0); /* empty priority CQ never waits */
-    /* Split/reroute candidates rotate, including wrap at end of bitmap. */
+    /* Split-queue candidates rotate, including wrap at end of bitmap. */
     w.latency_cq_count = 2;
     w.latency_cqs[0] = (1UL << 1) | (1UL << 2);
     w.latency_cq_cursor = MLX5_SRM_CQ_SLOTS;

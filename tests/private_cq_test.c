@@ -15,14 +15,9 @@ typedef uint32_t u32;
 typedef uint16_t u16;
 typedef uint8_t u8;
 typedef int64_t s64;
-static inline u64 mlx5_srm_rr_seq(u64 v) { return v & ((1ULL<<63)-1); }
 static inline s64 mlx5_srm_seq_delta(u64 a, u64 b)
 {
-#if MLX5_SRM_ENABLE_REROUTE
-    return (s64)((a - b) << 1) >> 1;
-#else
     return (s64)(a - b);
-#endif
 }
 #define likely(x) (x)
 #define unlikely(x) (x)
@@ -101,15 +96,6 @@ static struct mlx5_ib_srmc s;
 static unsigned char entries[2048][128];
 static u32 head, ci_stores, publishes, timing_calls, last_ci;
 static u64 last_time_post;
-#if MLX5_SRM_ENABLE_REROUTE
-static int rr_idle, rr_maintenance, rr_failures, rr_slow_calls;
-static int rr_publish_pending;
-static u32 rr_batch_calls, rr_batch_cqes;
-static u64 rr_maintenance_end;
-static struct mlx5_ib_srmc *rr_mapped_origin;
-static struct mlx5_sq_ctrl_page rr_origin_ctrl;
-static struct mlx5_ib_srmc rr_origin_s;
-#endif
 
 #define to_mcq(p) ((struct mlx5_ib_cq *)(p))
 #define to_mdev(p) (p)
@@ -142,65 +128,6 @@ static void mlx5_srm_timing_publish_kernel_cqe(struct mlx5_ib_srmc *p,
 { assert(p == &s && tsc == 1234); ++timing_calls; last_time_post=post; }
 #endif
 
-#if MLX5_SRM_ENABLE_REROUTE
-static int mlx5_srm_rr_maintenance_post(struct mlx5_ib_srmc *p,
-                                         u16 ctr, u64 *post)
-{
-    if (p == &s && rr_maintenance && ctr == (u16)(rr_maintenance_end-1)) {
-        *post=mlx5_srm_rr_seq(rr_maintenance_end-1);
-        return 1;
-    }
-    return 0;
-}
-static void mlx5_srm_rr_fail(struct mlx5_ib_srmc *p)
-{ assert(p==&s); ++rr_failures; }
-static int mlx5_srm_rr_idle(const struct mlx5_ib_srmc *p)
-{ assert(p==&s); return rr_idle; }
-static void mlx5_srm_rr_complete_idle_batch(struct mlx5_ib_srmc *p,
-                                             u64 start, u32 count)
-{
-    assert(p==&s && count);
-    ++rr_batch_calls;
-    rr_batch_cqes+=count;
-    assert(start==ctrl.cons_idx || rr_batch_calls==1);
-    rr_publish_pending=1;
-    (void)start;
-}
-static int mlx5_srm_rr_complete(struct mlx5_ib_srmc **physical, u64 *post,
-                                 u32 status, u32 vendor, u64 tsc)
-{
-    struct mlx5_ib_srmc *origin;
-    assert(*physical==&s && vendor==(status ? 0x87U : 0U));
-    (void)tsc;
-    ++rr_slow_calls;
-    if (rr_maintenance && mlx5_srm_rr_seq(*post+1)==rr_maintenance_end) {
-        rr_maintenance=0;
-        return 2;
-    }
-    rr_publish_pending=1;
-    origin=rr_mapped_origin ? rr_mapped_origin : &s;
-    if (status) {
-        origin->ctrl_page->completion_error_idx=mlx5_srm_rr_seq(*post+1);
-        origin->ctrl_page->completion_error_status=status;
-    }
-    *physical=origin;
-    return origin!=&s;
-}
-struct mlx5_ib_sched_group { struct mlx5_ib_sched scheds[1]; };
-static struct mlx5_ib_sched_group sched_group;
-static void mlx5_srm_rr_flush_native(struct mlx5_ib_sched *sched)
-{
-    assert(sched==&sched_group.scheds[0]);
-    if (rr_publish_pending) {
-        if (rr_mapped_origin)
-            publish(&rr_mapped_origin->ctrl_page->cons_idx,
-                    rr_mapped_origin->cq_complete_idx+1);
-        else
-            publish(&ctrl.cons_idx,s.cq_complete_idx);
-        rr_publish_pending=0;
-    }
-}
-#endif
 
 static inline u64 mlx5_ib_srmc_complete_post(struct mlx5_ib_qp *,
                                                struct mlx5_ib_wq *, u16, u32 *);
@@ -219,15 +146,6 @@ static void reset(u64 cursor, u32 size)
     s.cq_complete_idx=ctrl.cons_idx=cursor;
     ctrl.completion_error_idx=UINT64_MAX;
     head=ci_stores=publishes=timing_calls=last_ci=0; last_time_post=0;
-#if MLX5_SRM_ENABLE_REROUTE
-    rr_idle=1; rr_maintenance=rr_failures=rr_slow_calls=0;
-    rr_publish_pending=0;
-    rr_batch_calls=rr_batch_cqes=0; rr_maintenance_end=0;
-    rr_mapped_origin=NULL;
-    memset(&rr_origin_ctrl,0,sizeof(rr_origin_ctrl));
-    memset(&rr_origin_s,0,sizeof(rr_origin_s));
-    rr_origin_s.ctrl_page=&rr_origin_ctrl;
-#endif
 }
 static void add(u64 post, u8 opcode, u32 qpn)
 {
@@ -260,27 +178,33 @@ int main(void)
     assert(mlx5_srm_refresh_poll_budget(&sched,&s)==0);
     sched.worker=NULL;
     assert(mlx5_srm_refresh_poll_budget(&sched,&s)==0);
+    sched.worker=&worker;
     for (size=64; size<=128; size*=2) {
         const u64 starts[]={0,65534,UINT32_MAX-1ULL,
-#if MLX5_SRM_ENABLE_REROUTE
-                            (1ULL<<63)-2};
-#else
                             UINT64_MAX-1ULL};
-#endif
         unsigned int k;
         reset(0,size); finish(0,10,0,0); assert(!ci_stores);
         reset(7,size); add(7,MLX5_CQE_REQ,77);
         finish(0,0,0,7); finish(1,32,1,8); finish(0,31,0,8);
         for (k=0; k<sizeof(starts)/sizeof(starts[0]); ++k) {
             u64 st=starts[k]; int left=10, n;
+            u32 completed;
+
+            /* Native dispatch shares this counter decoder. It must advance
+             * the private hardware cursor without freeing SQ slots before
+             * the scheduler has copied the CQE to the user CQ. */
+            reset(st,size);
+            assert(mlx5_ib_srmc_complete_post(&qp, &qp.sq,
+                       (u16)(st+2), &completed) == st+2);
+            assert(completed==3 && s.cq_complete_idx==st+3);
+            assert(ctrl.cons_idx==st && !publishes);
+            ctrl.db_tail=st+5;
+            assert(mlx5_srm_refresh_poll_budget(&sched,&s)==2);
             reset(st,size);
             for (n=0;n<10;n++) add(st+n,MLX5_CQE_REQ,77);
             while (left) {
                 n=min_t(int,left,MLX5_SRM_PRIVATE_CQ_POLL_BUDGET);
                 st+=n;
-#if MLX5_SRM_ENABLE_REROUTE
-                st=mlx5_srm_rr_seq(st);
-#endif
                 finish(n,left,n,st); left-=n;
             }
 #if MLX5_SRM_ENABLE_WQE_TIMING
@@ -288,12 +212,7 @@ int main(void)
 #endif
         }
         /* Counter gap: one signaled completion reclaims preceding WRs. */
-#if MLX5_SRM_ENABLE_REROUTE
-        reset(65534,size); add(65536,MLX5_CQE_REQ,77);
-        finish(-ERANGE,3,0,65534); assert(rr_failures);
-#else
         reset(65534,size); add(65536,MLX5_CQE_REQ,77); finish(1,3,3,65537);
-#endif
         /* More ready CQEs than the DB snapshot must remain unconsumed. */
         reset(0,size); add(0,0,77); add(1,0,77);
         finish(1,1,1,1); assert(cq.mcq.cons_index==1); finish(1,1,1,2);
@@ -302,9 +221,7 @@ int main(void)
         add(1,MLX5_CQE_REQ_ERR,77); add(2,MLX5_CQE_REQ_ERR,77);
         finish(1,9,1,2);
         assert(ctrl.completion_error_idx==2 && ctrl.completion_error_status==13);
-#if !MLX5_SRM_ENABLE_REROUTE
         finish(1,8,1,3); assert(ctrl.completion_error_idx==2);
-#endif
         /* Reject unrelated QP, invalid opcode, stale/out-of-window counter. */
         reset(8,size); add(8,0,88); finish(-EINVAL,1,0,8); assert(!ci_stores);
         reset(8,size); add(8,11,77); finish(-EINVAL,1,0,8);
@@ -312,31 +229,6 @@ int main(void)
         reset(8,size); add(10,0,77); finish(-ERANGE,2,0,8);
         reset(8,size); add(8,0,77); add(8,0,77);
         finish(1,2,1,9); finish(-ERANGE,1,0,9);
-#if MLX5_SRM_ENABLE_REROUTE
-        /* A migrated CQE maps to the original control slot. The physical
-         * CQ has advanced, but must not publish that cursor to its users. */
-        reset(10,size); rr_idle=0; rr_mapped_origin=&rr_origin_s;
-        add(10,MLX5_CQE_REQ,77);
-        {
-            u32 done=0;
-            assert(mlx5_ib_poll_srm_private_progress(&s,1,&done)==1);
-            assert(done==1 && rr_slow_calls==1);
-            assert(s.cq_complete_idx==11 && ctrl.cons_idx==10);
-            assert(rr_origin_ctrl.cons_idx==1 && publishes==1);
-        }
-        /* The retirement NOP spans several physical BBs but only one
-         * issued credit. Its CQE does not report a user completion. */
-        reset(20,size); rr_idle=0; rr_maintenance=1;
-        rr_maintenance_end=25; ctrl.db_tail=25;
-        add(24,MLX5_CQE_REQ,77);
-        {
-            u32 done=0;
-            assert(mlx5_ib_poll_srm_private_progress(&s,5,&done)==1);
-            assert(done==1 && s.cq_complete_idx==25 && qp.sq.tail==25);
-            assert(ctrl.cons_idx==20 && publishes==0);
-            assert(!rr_maintenance && rr_slow_calls==1);
-        }
-#endif
         /* Resize CQE is administrative, not an SQ completion/credit. */
         reset(0,size); cq.resize_buf=calloc(1,sizeof(*cq.resize_buf));
         add(0,MLX5_CQE_RESIZE_CQ,77); add(0,0,77);
