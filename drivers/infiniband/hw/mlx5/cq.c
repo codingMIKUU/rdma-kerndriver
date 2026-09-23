@@ -978,6 +978,124 @@ out:
 	return soft_polled + npolled;
 }
 
+#if MLX5_SRM_ENABLE_PRIVATE_CQ && !MLX5_SRM_ENABLE_CQE_SIMPLIFY
+/* PRIVATE_CQ_NATIVE_TEST_BEGIN
+ * Only the owning scheduler polls this CQ. Borrow its CQE storage until
+ * routing has copied every entry to userspace; do NOT return CQ slots here.
+ * This avoids a second 64B copy while preventing DMA from overwriting the
+ * entries before the native distributor has consumed them.
+ */
+int mlx5_ib_poll_srm_private_cq(struct mlx5_ib_srmc *srmc, int num_entries,
+			      struct ib_wc *wc, void **cqe, u32 *completed_wqes)
+{
+	struct mlx5_ib_qp *qp = srmc->ini_cb.qp;
+	struct mlx5_ib_cq *cq = to_mcq(srmc->ini_cb.cq);
+	struct mlx5_ib_dev *dev = to_mdev(cq->ibcq.device);
+	unsigned long flags;
+	u32 completed = 0, administrative = 0;
+	int npolled = 0, error = 0;
+	int budget = min_t(int, num_entries,
+		min_t(int, MLX5_SRM_PRIVATE_CQ_POLL_BUDGET, SQ_DEPTH));
+
+	*completed_wqes = 0;
+	if (unlikely(dev->mdev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR))
+		return -EIO;
+	if (unlikely(!qp || !srmc->ctrl_page || qp->srmc_owner != srmc))
+		return -EINVAL;
+	if (num_entries <= 0)
+		return 0;
+
+	spin_lock_irqsave(&cq->lock, flags);
+	while (npolled < budget && completed < (u32)num_entries) {
+		void *raw = next_cqe_sw(cq);
+		struct mlx5_cqe64 *entry;
+		u32 credit_one = 0;
+		u64 post;
+		u8 opcode;
+
+		if (!raw)
+			break;
+		entry = cq->mcq.cqe_sz == 64 ? raw : raw + 64;
+		rmb();
+		opcode = get_cqe_opcode(entry);
+		if (unlikely(opcode == MLX5_CQE_RESIZE_CQ)) {
+			/* Resizing is startup-only. Never free a buffer containing
+			 * entries borrowed by this batch; retry after its release. */
+			if (npolled)
+				break;
+			if (!cq->resize_buf || administrative++ >= (u32)budget) {
+				error = -EIO;
+				break;
+			}
+			++cq->mcq.cons_index;
+			free_cq_buf(dev, &cq->buf);
+			cq->buf = *cq->resize_buf;
+			kfree(cq->resize_buf);
+			cq->resize_buf = NULL;
+			continue;
+		}
+		if (unlikely((be32_to_cpu(entry->sop_drop_qpn) & 0xffffff) !=
+			     qp->ibqp.qp_num ||
+			     (opcode != MLX5_CQE_REQ && opcode != MLX5_CQE_REQ_ERR))) {
+			error = -EINVAL;
+			break;
+		}
+#if !MLX5_SRM_ENABLE_REROUTE
+		/* Reject stale counters before the common completion helper can
+		 * advance the SQ or release byte credits. */
+		credit_one = (u16)(be16_to_cpu(entry->wqe_counter) -
+				  (u16)READ_ONCE(srmc->cq_complete_idx)) + 1;
+		if (unlikely(credit_one > (u32)num_entries - completed ||
+			     credit_one > qp->sq.wqe_cnt)) {
+			error = -ERANGE;
+			break;
+		}
+#endif
+		post = mlx5_ib_srmc_complete_post(qp, &qp->sq,
+			be16_to_cpu(entry->wqe_counter), &credit_one);
+		if (MLX5_SRM_ENABLE_REROUTE && unlikely(post == U64_MAX)) {
+			error = -EIO;
+			break;
+		}
+		wc[npolled].qp = &qp->ibqp;
+		wc[npolled].wr_id = mlx5_srm_make_wrid(srmc->srmc_idx, post);
+		wc[npolled].status = IB_WC_SUCCESS;
+		wc[npolled].vendor_err = 0;
+		if (unlikely(opcode == MLX5_CQE_REQ_ERR))
+			mlx5_handle_error_cqe(dev, (struct mlx5_err_cqe *)entry,
+					      &wc[npolled]);
+		cqe[npolled++] = entry; /* Always the native 64B CQE, also for 128B CQs. */
+		completed += credit_one;
+		++cq->mcq.cons_index;
+		if (unlikely(opcode == MLX5_CQE_REQ_ERR))
+			break; /* Deliver this error before consuming following flushes. */
+	}
+	/* No borrowed entries: an administrative-only poll can release now.
+	 * Empty polls do not write the CQ consumer doorbell at all. */
+	if (!npolled && administrative)
+		mlx5_cq_set_ci(&cq->mcq);
+	spin_unlock_irqrestore(&cq->lock, flags);
+	if (unlikely(error)) {
+#if MLX5_SRM_ENABLE_REROUTE
+		mlx5_srm_rr_fail(srmc);
+#endif
+		pr_warn_ratelimited("SRM private native CQ parse failed: kqp=%d qpn=%u error=%d\n",
+				    srmc->srmc_idx, qp->ibqp.qp_num, error);
+	}
+	*completed_wqes = completed;
+	return npolled ? npolled : error;
+}
+
+void mlx5_ib_release_srm_private_cq(struct mlx5_ib_srmc *srmc)
+{
+	/* Same single CQ consumer; QP teardown first stops the scheduler.
+	 * All source CQE reads and user CQ writes must precede slot reuse. */
+	mb();
+	mlx5_cq_set_ci(&to_mcq(srmc->ini_cb.cq)->mcq);
+}
+/* PRIVATE_CQ_NATIVE_TEST_END */
+#endif
+
 #if MLX5_SRM_ENABLE_CQE_SIMPLIFY
 #if MLX5_SRM_CQE_PUBLISH_BATCH > 1
 struct mlx5_srm_cq_progress_batch {

@@ -443,7 +443,12 @@ static struct mlx5_srm_db_timing_batch mlx5_srm_timing_db_snapshot(
     u32 n;
 
     for (n = 0; n < count; n++) {
-        u64 slot = first + n;
+        u64 slot =
+#if MLX5_SRM_ENABLE_REROUTE
+            mlx5_srm_rr_seq(first + n);
+#else
+            first + n;
+#endif
         size_t off = MLX5_SRM_TIMING_OFFSET(srmc->publish_depth) +
             (slot & (srmc->publish_depth - 1)) *
                 sizeof(struct mlx5_srm_wqe_timestamp);
@@ -476,7 +481,7 @@ static struct mlx5_srm_db_timing_batch mlx5_srm_timing_db_snapshot(
 static void mlx5_srm_timing_db_complete(
     struct mlx5_srm_db_timing_stats *stats,
     const struct mlx5_srm_db_timing_batch *batch,
-    u64 done, int sched, int worker)
+    u64 done)
 {
     u64 elapsed = done * batch->valid - batch->post_tsc_sum;
 
@@ -491,15 +496,6 @@ static void mlx5_srm_timing_db_complete(
     stats->missing += batch->missing;
     stats->invalid += batch->invalid;
     stats->checked += batch->valid + batch->missing + batch->invalid;
-    if (stats->checked < MLX5_SRM_TIMING_REPORT_WQES)
-        return;
-    pr_info("SRM_DB_TIMING algorithm=qpswitch source=kernel sched=%d worker=%d db_calls=%llu db_wqes=%llu post_to_db_cycles=%llu post_to_db_avg_cycles=%llu missing_timestamps=%llu invalid_timestamps=%llu\n",
-            sched, worker, stats->db_calls, stats->db_wqes,
-            stats->post_to_db_cycles,
-            stats->db_wqes ? div64_u64(stats->post_to_db_cycles,
-                                      stats->db_wqes) : 0,
-            stats->missing, stats->invalid);
-    memset(stats, 0, sizeof(*stats));
 }
 #endif
 
@@ -1290,12 +1286,17 @@ struct mlx5_srm_cqe_publish_lane {
     struct mlx5_srm_cqe_publish_entry entries[SRM_CQE_PUBLISH_BATCH];
 };
 
-#if MLX5_SRM_ENABLE_DB_SHARE_STATS
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_WQE_TIMING
 struct mlx5_srm_db_share_snapshot {
     u64 user_calls;
     u64 user_wqes;
     u64 kernel_calls;
     u64 kernel_wqes;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    u64 user_post_to_db_cycles;
+    u64 user_timed_wqes;
+    u64 user_timing_excluded;
+#endif
 };
 
 /* Never take db_owner just to sample statistics. A busy KQP is deferred to
@@ -1314,13 +1315,20 @@ static bool mlx5_srm_read_db_share(struct mlx5_srm_db_share *share,
         out->user_wqes = READ_ONCE(share->user_wqes);
         out->kernel_calls = READ_ONCE(share->kernel_calls);
         out->kernel_wqes = READ_ONCE(share->kernel_wqes);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+        out->user_post_to_db_cycles = READ_ONCE(share->user_post_to_db_cycles);
+        out->user_timed_wqes = READ_ONCE(share->user_timed_wqes);
+        out->user_timing_excluded = READ_ONCE(share->user_timing_excluded);
+#endif
         smp_rmb();
         if (seq == READ_ONCE(share->seq))
             return true;
     }
     return false;
 }
+#endif
 
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS
 static __always_inline void mlx5_srm_record_kernel_db_share(
     struct mlx5_sq_ctrl_page *ctrl, u32 sent)
 {
@@ -1389,13 +1397,16 @@ struct mlx5_srm_cq_workspace {
     struct mlx5_ib_sched_worker *latency_worker;
 #endif
 #if MLX5_SRM_ENABLE_WQE_TIMING
-    struct mlx5_srm_db_timing_stats db_timing;
+    /* Private to this worker; no shared counter writes in the kernel DB path.
+     * Preserve both sources if a KQP's user snapshot is temporarily busy. */
+    struct mlx5_srm_db_timing_stats db_timing[NUM_SRMC];
+    struct mlx5_srm_db_share_snapshot db_timing_previous[NUM_SRMC];
 #endif
     struct mlx5_srm_cqe_publish_lane publish_lane;
     u32 cached_kqp_idx;
     struct mlx5_ib_srmc *cached_srmc;
     struct mlx5_sq_ctrl_page *cached_ctrl_page;
-#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS || MLX5_SRM_ENABLE_WQE_TIMING
     unsigned long diag_last_report;
 #endif
 #if MLX5_SRM_ENABLE_CQE_CYCLE_STATS
@@ -1406,7 +1417,7 @@ struct mlx5_srm_cq_workspace {
 #endif
 };
 
-#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS || MLX5_SRM_ENABLE_WQE_TIMING
 static u64 mlx5_srm_diag_ratio(u64 numerator, u64 denominator, u32 scale)
 {
     /* Quotient + remainder also avoids multiplying a large cycle sum. */
@@ -1433,6 +1444,67 @@ static void mlx5_srm_report_diag(int sched_id,
         return;
     window_ms = jiffies_to_msecs(now - workspace->diag_last_report);
 
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    {
+        struct mlx5_srm_db_share_snapshot user = {};
+        struct mlx5_srm_db_timing_stats kernel = {};
+        u64 valid, cycles;
+        u32 i, sampled = 0, deferred = 0;
+
+        for (i = worker->kqp_begin; i < worker->kqp_end && i < NUM_SRMC; i++) {
+            struct mlx5_sq_ctrl_page *ctrl = mlx5_sq_ctrl_get_slot(pool, i);
+            struct mlx5_srm_db_share_snapshot snapshot_now, *previous;
+            struct mlx5_srm_db_timing_stats *pending;
+
+            if (!ctrl)
+                continue;
+            if (!mlx5_srm_read_db_share(&ctrl->db_share, &snapshot_now)) {
+                deferred++;
+                continue;
+            }
+            previous = &workspace->db_timing_previous[i];
+            user.user_calls += snapshot_now.user_calls - previous->user_calls;
+            user.user_wqes += snapshot_now.user_wqes - previous->user_wqes;
+            user.user_post_to_db_cycles += snapshot_now.user_post_to_db_cycles -
+                                          previous->user_post_to_db_cycles;
+            user.user_timed_wqes += snapshot_now.user_timed_wqes -
+                                   previous->user_timed_wqes;
+            user.user_timing_excluded += snapshot_now.user_timing_excluded -
+                                        previous->user_timing_excluded;
+            *previous = snapshot_now;
+            pending = &workspace->db_timing[i];
+            kernel.db_calls += pending->db_calls;
+            kernel.db_wqes += pending->db_wqes;
+            kernel.post_to_db_cycles += pending->post_to_db_cycles;
+            kernel.missing += pending->missing;
+            kernel.invalid += pending->invalid;
+            kernel.checked += pending->checked;
+            memset(pending, 0, sizeof(*pending));
+            sampled++;
+        }
+        valid = user.user_timed_wqes + kernel.db_wqes;
+        cycles = user.user_post_to_db_cycles + kernel.post_to_db_cycles;
+        if (user.user_calls || kernel.db_calls)
+            pr_info("SRM_DB_TIMING algorithm=qpswitch source=all sched=%d worker=%u "
+                    "scope=kqp_deltas window_ms=%u sampled_kqps=%u deferred_kqps=%u "
+                    "user_db_calls=%llu user_db_wqes=%llu user_timed_wqes=%llu "
+                    "user_post_to_db_cycles=%llu user_post_to_db_avg_cycles=%llu "
+                    "user_timing_excluded=%llu kernel_db_calls=%llu kernel_db_wqes=%llu "
+                    "kernel_timed_wqes=%llu kernel_post_to_db_cycles=%llu "
+                    "kernel_post_to_db_avg_cycles=%llu kernel_missing_timestamps=%llu "
+                    "kernel_invalid_timestamps=%llu db_wqes=%llu timed_wqes=%llu "
+                    "post_to_db_cycles=%llu post_to_db_avg_cycles=%llu\n",
+                    sched_id, worker->worker_id, window_ms, sampled, deferred,
+                    user.user_calls, user.user_wqes, user.user_timed_wqes,
+                    user.user_post_to_db_cycles,
+                    mlx5_srm_diag_ratio(user.user_post_to_db_cycles, user.user_timed_wqes, 1),
+                    user.user_timing_excluded, kernel.db_calls, kernel.checked,
+                    kernel.db_wqes, kernel.post_to_db_cycles,
+                    mlx5_srm_diag_ratio(kernel.post_to_db_cycles, kernel.db_wqes, 1),
+                    kernel.missing, kernel.invalid, user.user_wqes + kernel.checked,
+                    valid, cycles, mlx5_srm_diag_ratio(cycles, valid, 1));
+    }
+#endif
 #if MLX5_SRM_ENABLE_DB_SHARE_STATS
     {
         struct mlx5_srm_db_share_snapshot total = {};
@@ -1580,7 +1652,7 @@ mlx5_srm_ring_shared_db(struct mlx5_ib_qp *qp,
     qp->bf.offset = READ_ONCE(ctrl_page->bf_offset);
     mlx5r_ring_db(qp, sent, last_ctrl);
     WRITE_ONCE(ctrl_page->bf_offset, qp->bf.offset);
-#if MLX5_SRM_ENABLE_DB_SHARE_STATS
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS && !MLX5_SRM_ENABLE_WQE_TIMING
     mlx5_srm_record_kernel_db_share(ctrl_page, sent);
 #endif
 }
@@ -2047,9 +2119,15 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
         completed_wqes = 0;
         phase_start = mlx5_ib_srm_cq_timing_active(stats) ?
                           ktime_get_ns() : 0;
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+        cqe_num = mlx5_ib_poll_srm_private_cq(srmc, srmc->sig_cnt,
+                                             wc, cqe, &completed_wqes);
+        if (cqe_num > 0)
+#else
         if ((cqe_num = mlx5_ib_poll_cq_with_cqe(
                  srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe,
                  &completed_wqes)))
+#endif
         {
 #if MLX5_SRM_ENABLE_WQE_TIMING
             cqe_poll_tsc = rdtsc_ordered();
@@ -2138,6 +2216,11 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
             mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_CTRL_COMPLETE,
                                         phase_start);
             mlx5_ib_srm_record_cq_post_poll(stats, post_poll_start);
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+            /* Native CQEs are borrowed from the hardware ring. Release
+             * only after all route/copy operations (including errors/NOPs). */
+            mlx5_ib_release_srm_private_cq(srmc);
+#endif
             /*
              * Publish credit only after CQ routing and per-KQP SQ recycle
              * are complete.  One signaled CQE cumulatively completes every
@@ -3852,7 +3935,7 @@ int scheduler_polling(void *sched_data)
     if (cq_workspace)
         cq_workspace->latency_worker = worker;
 #endif
-#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS || MLX5_SRM_ENABLE_WQE_TIMING
     if (cq_workspace)
         cq_workspace->diag_last_report = jiffies;
 #endif
@@ -4719,15 +4802,19 @@ int scheduler_polling(void *sched_data)
 #endif
                 mlx5_srm_ring_shared_db(srmc->ini_cb.qp, ctrl_page,
                                         sent, last_ctrl);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                db_done_tsc = rdtsc_ordered();
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS
+                /* End timestamp excludes this diagnostic counter update. */
+                mlx5_srm_record_kernel_db_share(ctrl_page, sent);
+#endif
+#endif
 #if MLX5_SRM_ENABLE_REROUTE || MLX5_SRM_MAX_INFLIGHT_BYTES
                 smp_store_release(&ctrl_page->route.posted_bytes,
                     READ_ONCE(ctrl_page->route.posted_bytes) + rr_scanned_bytes);
 #endif
 #if MLX5_SRM_ENABLE_REROUTE
                 srmc->sched_post_idx = mlx5_srm_rr_seq(srmc->sched_post_idx);
-#endif
-#if MLX5_SRM_ENABLE_WQE_TIMING
-                db_done_tsc = rdtsc_ordered();
 #endif
                 if (srm_stats_enable) {
                     u64 db_done_cycles = rdtsc_ordered();
@@ -4745,8 +4832,9 @@ int scheduler_polling(void *sched_data)
                 smp_store_release(&ctrl_page->db_owner,
                                   MLX5_SRM_DB_OWNER_FREE);
 #if MLX5_SRM_ENABLE_WQE_TIMING
-                mlx5_srm_timing_db_complete(&cq_workspace->db_timing,
-                    &timing_batch, db_done_tsc, id, worker_id);
+                mlx5_srm_timing_db_complete(
+                    &cq_workspace->db_timing[srmc->srmc_idx],
+                    &timing_batch, db_done_tsc);
 #endif
 #if MLX5_SRM_ENABLE_DB_BATCH_LOG
                 db_batch_log_calls++;
@@ -4814,7 +4902,7 @@ int scheduler_polling(void *sched_data)
             // pre_srmc->cur_cqe++;
         }
         mlx5_ib_srm_report_stats(sched, worker_id, srm_stats);
-#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_CQE_CYCLE_STATS || MLX5_SRM_ENABLE_WQE_TIMING
         mlx5_srm_report_diag(id, worker, sq_ctrl_pool, cq_workspace);
 #endif
         {
@@ -4902,9 +4990,10 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
 #if MLX5_SRM_ENABLE_PRIVATE_CQ
     if (!total_kqps || total_kqps > MLX5_SRM_CQ_SLOTS)
         return -EINVAL;
-    pr_info("SRM CQ mode=private-per-kqp simplify=1 reroute=%u poll_budget=%u publish=poll-exit\n",
-            MLX5_SRM_ENABLE_REROUTE,
-            MLX5_SRM_PRIVATE_CQ_POLL_BUDGET);
+    pr_info("SRM CQ mode=private-per-kqp simplify=%u reroute=%u poll_budget=%u publish=%s\n",
+            MLX5_SRM_ENABLE_CQE_SIMPLIFY, MLX5_SRM_ENABLE_REROUTE,
+            MLX5_SRM_PRIVATE_CQ_POLL_BUDGET,
+            MLX5_SRM_ENABLE_CQE_SIMPLIFY ? "poll-exit" : "native-cqe");
 #endif
     pr_info("SRM latency CQ priority enabled=%u policy=one-priority-then-round-robin\n",
             MLX5_SRM_ENABLE_LATENCY_CQ_PRIORITY);
@@ -6473,17 +6562,19 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
         /* Immutable capability: independent of runtime diagnostic flags. */
 #if MLX5_SRM_ENABLE_WQE_TIMING
         WRITE_ONCE(ctrl_page->flags, READ_ONCE(ctrl_page->flags) |
-                   MLX5_SRM_CTRL_F_WQE_TIMING);
+                   MLX5_SRM_CTRL_F_WQE_TIMING | MLX5_SRM_CTRL_F_DB_TIMING_ALL);
 #else
         WRITE_ONCE(ctrl_page->flags, READ_ONCE(ctrl_page->flags) &
-                   ~MLX5_SRM_CTRL_F_WQE_TIMING);
+                   ~(MLX5_SRM_CTRL_F_WQE_TIMING | MLX5_SRM_CTRL_F_DB_TIMING_ALL));
 #endif
         WRITE_ONCE(ctrl_page->flags,
                    READ_ONCE(ctrl_page->flags) &
                        ~(MLX5_SRM_CTRL_F_DIRECT_DB_STATS |
                          MLX5_SRM_CTRL_F_DB_SHARE_STATS));
-#if MLX5_SRM_ENABLE_DB_SHARE_STATS
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS || MLX5_SRM_ENABLE_WQE_TIMING
         memset(&ctrl_page->db_share, 0, sizeof(ctrl_page->db_share));
+#endif
+#if MLX5_SRM_ENABLE_DB_SHARE_STATS
         smp_store_release(&ctrl_page->flags,
                           READ_ONCE(ctrl_page->flags) |
                           MLX5_SRM_CTRL_F_DB_SHARE_STATS);

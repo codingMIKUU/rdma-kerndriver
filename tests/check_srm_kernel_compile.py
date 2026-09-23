@@ -60,8 +60,6 @@ def main():
                             else ((0, 0, 0), (1, 0, 0)))
             variants = itertools.product(combinations, (0, 1) if args.wqe_timing else (0,))
             for (mode, db_stats, cq_stats), timing in variants:
-                if args.private_cq and not mode:
-                    continue
                 variant = "cq%d-db%d-cycles%d" % (mode, db_stats, cq_stats)
                 variant += "-timing%d" % timing
                 command[output] = str(Path(tmp) / (unit + "-" + variant + ".o"))

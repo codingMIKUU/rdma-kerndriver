@@ -16,7 +16,7 @@
  * An oversized WR may be DB'd alone when this physical QP has no in-flight
  * payload. Drain-source kernel DB bypasses the cap but keeps accounting. */
 #ifndef MLX5_SRM_MAX_INFLIGHT_BYTES
-#define MLX5_SRM_MAX_INFLIGHT_BYTES (20480ULL)
+#define MLX5_SRM_MAX_INFLIGHT_BYTES (0xffffffffULL)
 #endif
 #if MLX5_SRM_MAX_INFLIGHT_BYTES < 0 || MLX5_SRM_MAX_INFLIGHT_BYTES > 0xffffffffULL
 #error "MLX5_SRM_MAX_INFLIGHT_BYTES must fit in u32 (0 disables the cap)"

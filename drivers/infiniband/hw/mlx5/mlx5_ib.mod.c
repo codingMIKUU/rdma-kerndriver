@@ -103,7 +103,6 @@ __used __section(__versions) = {
 	{ 0x5bdd947a, "mlx5_core_roce_gid_set" },
 	{ 0xbc25104a, "memtrack_is_new_addr" },
 	{ 0x53b13752, "uverbs_uobject_put" },
-	{ 0xc0a3d105, "find_next_bit" },
 	{ 0xa77afaf8, "ib_query_pkey" },
 	{ 0xffeedf6a, "delayed_work_timer_fn" },
 	{ 0xfb429b5, "mlx5_query_hca_vport_context" },
@@ -125,6 +124,7 @@ __used __section(__versions) = {
 	{ 0x4ad05929, "roce_del_all_netdev_gids" },
 	{ 0x9034a696, "mempool_destroy" },
 	{ 0xa6e487c, "netdev_master_upper_dev_get_rcu" },
+	{ 0xccd4c999, "__sg_page_iter_start" },
 	{ 0xc29957c3, "__x86_indirect_thunk_rcx" },
 	{ 0x3316f112, "put_user_pages" },
 	{ 0x6954b75d, "mlx5_frag_buf_alloc_node" },
@@ -223,6 +223,7 @@ __used __section(__versions) = {
 	{ 0x7c7b59ef, "ib_uverbs_get_ucontext_file" },
 	{ 0xa3672e8, "mlx5_core_query_vport_counter" },
 	{ 0x308fe1f2, "ib_umem_stop_invalidation_notifier" },
+	{ 0x37befc70, "jiffies_to_msecs" },
 	{ 0x977f511b, "__mutex_init" },
 	{ 0xc5850110, "printk" },
 	{ 0xfd3b1780, "mlx5_core_query_sq_state" },
@@ -262,6 +263,7 @@ __used __section(__versions) = {
 	{ 0x1e8ee167, "mlx5_cmd_init_async_ctx" },
 	{ 0x2ab7989d, "mutex_lock" },
 	{ 0x8c03d20c, "destroy_workqueue" },
+	{ 0x7c9ca58f, "__sg_page_iter_next" },
 	{ 0x8e1a7bcb, "ib_device_set_netdev" },
 	{ 0x2e46a7f8, "mlx5_query_port_ptys" },
 	{ 0x6626afca, "down" },
@@ -495,4 +497,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "11BFA085378A4E1C8A22B53");
+MODULE_INFO(srcversion, "47E024C2EDBACFA2C75A185");

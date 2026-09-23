@@ -603,7 +603,11 @@ next_phase:
                     struct mlx5_srm_wqe_timestamp *dt =
                         page_address(d->publish_pages[dst_off / PAGE_SIZE]) +
                         dst_off % PAGE_SIZE;
-                    WRITE_ONCE(dt->post_tsc, READ_ONCE(st->post_tsc));
+                    /* Preserve original post time, not a recycled slot's
+                     * stale timestamp. Copying is not an actual DB. */
+                    u64 start = smp_load_acquire(&st->sequence) == old + 1 ?
+                                READ_ONCE(st->post_tsc) : 0;
+                    WRITE_ONCE(dt->post_tsc, start);
                     smp_store_release(&dt->sequence, tail + 1);
                 }
 #endif

@@ -7,9 +7,6 @@ for byte_limit in 0 32768; do
  for simplify in 0 1; do
     for publish_batch in 1 64; do
       for private in 0 1; do
-        if [[ "$private" == 1 && "$simplify" == 0 ]]; then
-            continue
-        fi
         "${CC:-cc}" -std=gnu11 -O1 -g -fsanitize=address,undefined \
             -DMLX5_SRM_ENABLE_REROUTE=1 \
             -DMLX5_SRM_MAX_INFLIGHT_BYTES="$byte_limit" \

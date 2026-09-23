@@ -7,7 +7,7 @@
 ```
 
 改成 `1` 启用；仅内核需要设置这个开关。要求独立 CQ 已开启
-（`MLX5_SRM_ENABLE_PRIVATE_CQ=1`，且 CQE 简化开启）。关闭时新增的
+（`MLX5_SRM_ENABLE_PRIVATE_CQ=1`；CQE 简化开启或关闭均支持）。关闭时新增的
 优先选择、引用表、bitmap、workspace 字段全部编译掉，保留原轮询路径。
 
 ## 行为
