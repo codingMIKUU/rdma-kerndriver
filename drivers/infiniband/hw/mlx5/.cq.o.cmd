@@ -1724,6 +1724,7 @@ deps_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/cq.o := \
   /home/lingbo11/zxm/rdma-kerndriver/include/rdma/opa_smi.h \
   /home/lingbo11/zxm/rdma-kerndriver/include/uapi/rdma/rdma_user_cm.h \
   /home/lingbo11/zxm/rdma-kerndriver/include/uapi/rdma/ib_user_sa.h \
+  /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/srm_kqp_layout.h \
   /home/lingbo11/zxm/rdma-kerndriver/include/rdma/uverbs_named_ioctl.h \
 
 /home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/cq.o: $(deps_/home/lingbo11/zxm/rdma-kerndriver/drivers/infiniband/hw/mlx5/cq.o)

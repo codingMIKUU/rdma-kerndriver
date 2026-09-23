@@ -1232,6 +1232,125 @@ int mlx5_ib_poll_srm_direct(struct ib_cq *ibcq, int num_entries,
 	return npolled ? npolled : (ret == -EAGAIN ? 0 : ret);
 }
 
+#if MLX5_SRM_ENABLE_PRIVATE_CQ && MLX5_SRM_ENABLE_CQE_SIMPLIFY == 1
+/* PRIVATE_CQ_TEST_BEGIN: the offline test compiles this production function.
+ * num_entries is a snapshot of this SQ's doorbelled, uncompleted BBs. Each
+ * Hollow WR occupies one BB; gaps (e.g. unsignaled WRs) use the counter's
+ * cumulative distance instead of incorrectly returning only one credit.
+ * The CQ is exclusive to srmc: no QPN lookup or touched-QP list. In the
+ * normal path the SQ cursor and completion watermark are published once
+ * per poll, without per-request migration mappings.
+ * A short batch is always flushed.
+ */
+int mlx5_ib_poll_srm_private_progress(struct mlx5_ib_srmc *srmc,
+				      int num_entries, u32 *completed_wqes)
+{
+	struct mlx5_ib_qp *qp = srmc->ini_cb.qp;
+	struct mlx5_ib_cq *cq = to_mcq(srmc->ini_cb.cq);
+	struct mlx5_ib_dev *dev = to_mdev(cq->ibcq.device);
+	struct mlx5_sq_ctrl_page *ctrl = srmc->ctrl_page;
+	u64 cursor;
+	u32 completed = 0, consumed = 0;
+	unsigned long flags;
+	int npolled = 0, error = 0;
+	int budget = min_t(int, num_entries, MLX5_SRM_PRIVATE_CQ_POLL_BUDGET);
+
+	*completed_wqes = 0;
+	if (unlikely(dev->mdev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR))
+		return -EIO;
+	if (unlikely(!qp || !ctrl || qp->srmc_owner != srmc))
+		return -EINVAL;
+	if (num_entries <= 0)
+		return 0;
+
+	spin_lock_irqsave(&cq->lock, flags);
+	cursor = READ_ONCE(srmc->cq_complete_idx);
+	while (npolled < budget && completed < (u32)num_entries) {
+		struct mlx5_cqe64 *cqe64;
+		void *cqe = next_cqe_sw(cq);
+		u32 qpn;
+		u8 opcode;
+
+		if (!cqe)
+			break;
+		cqe64 = cq->mcq.cqe_sz == 64 ? cqe : cqe + 64;
+		rmb();
+		opcode = get_cqe_opcode(cqe64);
+		if (unlikely(opcode == MLX5_CQE_RESIZE_CQ)) {
+			/* Only startup resizing is used. Bound even administrative
+			 * CQEs so a corrupt CQ cannot create an unbounded poll. */
+			if (!cq->resize_buf || consumed >= (u32)budget) {
+				error = -EIO;
+				break;
+			}
+			++cq->mcq.cons_index;
+			++consumed;
+			free_cq_buf(dev, &cq->buf);
+			cq->buf = *cq->resize_buf;
+			kfree(cq->resize_buf);
+			cq->resize_buf = NULL;
+			continue;
+		}
+		qpn = be32_to_cpu(cqe64->sop_drop_qpn) & 0xffffff;
+		if (unlikely(qpn != qp->ibqp.qp_num ||
+			     (opcode != MLX5_CQE_REQ && opcode != MLX5_CQE_REQ_ERR))) {
+			error = -EINVAL;
+			break;
+		}
+		{
+			u32 advance = (u16)(be16_to_cpu(cqe64->wqe_counter) -
+					      (u16)cursor) + 1;
+
+			/* Reject duplicates/stale counters; do not fabricate a
+			 * completion or credit across a 16-bit counter wrap. */
+			if (unlikely(advance > (u32)num_entries - completed ||
+				     advance > qp->sq.wqe_cnt)) {
+				error = -ERANGE;
+				break;
+			}
+			cursor += advance;
+			completed += advance;
+			++npolled;
+			++cq->mcq.cons_index;
+			++consumed;
+			if (unlikely(opcode == MLX5_CQE_REQ_ERR)) {
+				struct ib_wc wc = {};
+
+				mlx5_handle_error_cqe(dev,
+					(struct mlx5_err_cqe *)cqe64, &wc);
+				if (READ_ONCE(ctrl->completion_error_idx) == U64_MAX) {
+					WRITE_ONCE(ctrl->completion_error_idx, cursor);
+					WRITE_ONCE(ctrl->completion_error_status,
+						   wc.status);
+					WRITE_ONCE(ctrl->completion_error_vendor,
+						   wc.vendor_err);
+				}
+				break;
+			}
+		}
+	}
+	if (consumed)
+		mlx5_cq_set_ci(&cq->mcq);
+	if (npolled)
+		wmb();
+	if (npolled) {
+		WRITE_ONCE(srmc->cq_complete_idx, cursor);
+		WRITE_ONCE(qp->sq.tail, (u32)cursor);
+		/* Return CQ slots before allowing producers to reuse SQ slots.
+		 * Publish error information before this single store. */
+		smp_store_release(&ctrl->cons_idx, cursor);
+	}
+	spin_unlock_irqrestore(&cq->lock, flags);
+	if (unlikely(error))
+		pr_warn_ratelimited("SRM private CQ parse failed: kqp=%d qpn=%u next=%llu pending=%d error=%d\n",
+				    srmc->srmc_idx, qp->ibqp.qp_num, cursor,
+				    num_entries - completed, error);
+	*completed_wqes = completed;
+	return npolled ? npolled : error;
+}
+/* PRIVATE_CQ_TEST_END */
+#endif
+
 int mlx5_ib_arm_cq(struct ib_cq *ibcq, enum ib_cq_notify_flags flags)
 {
 	struct mlx5_core_dev *mdev = to_mdev(ibcq->device)->mdev;

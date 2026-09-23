@@ -21,6 +21,9 @@ def main():
     parser.add_argument("--cq-modes", nargs="+", type=int, choices=(0, 1, 2),
                         default=[0, 1, 2],
                         help="CQ delivery modes to compile (default: all three)")
+    parser.add_argument("--private-cq", nargs="+", type=int, choices=(0, 1),
+                        default=[0, 1],
+                        help="CQ layouts to compile (default: shared and private)")
     opts = parser.parse_args()
     config = dict(line.split("=", 1) for line in
                   (ROOT / "configure.mk.kernel").read_text().splitlines()
@@ -38,20 +41,25 @@ def main():
             if source not in args:
                 raise SystemExit("Kbuild record is not from this workspace: " + unit)
             # Dependency writes are not part of this isolated compile check.
-            args = [x for x in args if not x.startswith(("-Wp,-MD,", "-Wp,-MMD,"))]
+            args = [x for x in args if not x.startswith(("-Wp,-MD,", "-Wp,-MMD,",
+                "-DMLX5_SRM_ENABLE_PRIVATE_CQ=", "-DMLX5_SRM_ENABLE_CQE_SIMPLIFY=",
+                "-DMLX5_SRM_ENABLE_LARGE_KERNEL_QP="))]
             output = args.index("-o") + 1
             for levels in (0, 1):
                 for mode in opts.cq_modes:
-                    args[output] = str(Path(tmp) /
-                        (unit + "-large" + str(levels) + "-cq" + str(mode) + ".o"))
-                    command = args + [
-                        "-DMLX5_SRM_ENABLE_LARGE_KERNEL_QP=" + str(levels),
-                        "-DMLX5_SRM_ENABLE_CQE_SIMPLIFY=" + str(mode),
-                    ]
-                    print("Compile", unit, "size_split=" + str(levels),
-                          "cq_simplify=" + str(mode), flush=True)
-                    subprocess.run(command, cwd=kernel_build, check=True)
-        print("PASS: affected kernel units compile across requested CQ modes and size split OFF/ON")
+                    for private in opts.private_cq:
+                        args[output] = str(Path(tmp) /
+                            (unit + "-large" + str(levels) + "-cq" + str(mode) +
+                             "-private" + str(private) + ".o"))
+                        command = args + [
+                            "-DMLX5_SRM_ENABLE_LARGE_KERNEL_QP=" + str(levels),
+                            "-DMLX5_SRM_ENABLE_CQE_SIMPLIFY=" + str(mode),
+                            "-DMLX5_SRM_ENABLE_PRIVATE_CQ=" + str(private),
+                        ]
+                        print("Compile", unit, "size_split=" + str(levels),
+                              "cq_simplify=" + str(mode), "private=" + str(private), flush=True)
+                        subprocess.run(command, cwd=kernel_build, check=True)
+        print("PASS: affected kernel units compile across requested CQ modes/layouts and size split OFF/ON")
 
 
 if __name__ == "__main__":

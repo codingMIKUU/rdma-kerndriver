@@ -128,6 +128,7 @@ __used __section(__versions) = {
 	{ 0x3316f112, "put_user_pages" },
 	{ 0x6954b75d, "mlx5_frag_buf_alloc_node" },
 	{ 0x87b8798d, "sg_next" },
+	{ 0xb0043ac7, "ib_resize_cq" },
 	{ 0xa757c5f8, "rdma_read_gids" },
 	{ 0x8fa25c24, "xa_find" },
 	{ 0xd9491c14, "xa_destroy" },
@@ -493,4 +494,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "mlx5_core,ib_core,ib_uverbs,memtrack,auxiliary,rdma_cm,mlx_compat");
 
 
-MODULE_INFO(srcversion, "F574DBA7C4D752C6DC33CF8");
+MODULE_INFO(srcversion, "F28BE99419A791078B31909");

@@ -17,12 +17,26 @@ static int debug = 0;
 #define NUM_LEVEL 2
 /* 0: software events; 1: completion watermarks; 2: direct 64-byte CQEs. */
 #ifndef MLX5_SRM_ENABLE_CQE_SIMPLIFY
-#define MLX5_SRM_ENABLE_CQE_SIMPLIFY 0
+#define MLX5_SRM_ENABLE_CQE_SIMPLIFY 1
 #endif
 #if MLX5_SRM_ENABLE_CQE_SIMPLIFY != 0 && \
     MLX5_SRM_ENABLE_CQE_SIMPLIFY != 1 && \
     MLX5_SRM_ENABLE_CQE_SIMPLIFY != 2
 #error "MLX5_SRM_ENABLE_CQE_SIMPLIFY must be 0, 1 or 2"
+#endif
+/* Kernel-only CQ layout; independent of the userspace delivery mode above.
+ * 0 preserves shared CQs. 1 allocates one send CQ per physical KQP. */
+#ifndef MLX5_SRM_ENABLE_PRIVATE_CQ
+#define MLX5_SRM_ENABLE_PRIVATE_CQ 1
+#endif
+#ifndef MLX5_SRM_PRIVATE_CQ_POLL_BUDGET
+#define MLX5_SRM_PRIVATE_CQ_POLL_BUDGET 256
+#endif
+#if MLX5_SRM_ENABLE_PRIVATE_CQ != 0 && MLX5_SRM_ENABLE_PRIVATE_CQ != 1
+#error "MLX5_SRM_ENABLE_PRIVATE_CQ must be 0 or 1"
+#endif
+#if MLX5_SRM_PRIVATE_CQ_POLL_BUDGET < 1 || MLX5_SRM_PRIVATE_CQ_POLL_BUDGET > 65536
+#error "private CQ poll budget must be in [1, 65536]"
 #endif
 /*
  * Size-aware dual-KQP mode.  Keep the original single-KQP path as the
@@ -30,7 +44,7 @@ static int debug = 0;
  * create one small and one large KQP for every destination lane.
  */
 #ifndef MLX5_SRM_ENABLE_LARGE_KERNEL_QP
-#define MLX5_SRM_ENABLE_LARGE_KERNEL_QP 0
+#define MLX5_SRM_ENABLE_LARGE_KERNEL_QP 1
 #endif
 #if MLX5_SRM_ENABLE_LARGE_KERNEL_QP != 0 && \
     MLX5_SRM_ENABLE_LARGE_KERNEL_QP != 1
@@ -50,6 +64,18 @@ static int debug = 0;
 #define CQ_NUM_POWER 0 // 示例：CQ_NUM=2^4=16
 #define CQ_NUM (1 << CQ_NUM_POWER)
 #define CQ_MOD(srmc_idx) ((srmc_idx) & (CQ_NUM - 1)) // 位运算替代取模
+
+#if MLX5_SRM_ENABLE_PRIVATE_CQ
+/* Global slot IDs include peer, size class and lane, not just num_kqps. */
+#define MLX5_SRM_CQ_SLOTS NUM_SRMC
+#define MLX5_SRM_CQ_INDEX(srmc_idx) (srmc_idx)
+#if SRMC_POLLING_CNT <= NUM_SRMC
+#error "CQ polling ring must hold every private CQ plus an empty slot"
+#endif
+#else
+#define MLX5_SRM_CQ_SLOTS CQ_NUM
+#define MLX5_SRM_CQ_INDEX(srmc_idx) CQ_MOD(srmc_idx)
+#endif
 
 // 3. 提前计算索引宏（减少循环内重复计算）
 #define LEVEL_TABLE_IDX(level, id) ((level) + (NUM_LEVEL) * (id))       // level_table索引
@@ -87,7 +113,7 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
  */
 #define MLX5_SRM_ENABLE_READY_FASTPATH 0
 
-static u64 LIMIT_BATCHING = 20000;
+static u64 LIMIT_BATCHING = 100000000;
 #define DEBUG_LOG \
     if (debug)    \
     printk
@@ -347,7 +373,7 @@ struct mlx5_ib_sched_worker
 {
     struct mlx5_ib_sched *sched;
     struct task_struct *task;
-    struct ib_cq *shared_cq[CQ_NUM];
+    struct ib_cq *shared_cq[MLX5_SRM_CQ_SLOTS];
     u32 worker_id;
     u32 cpu_id;
     /*
