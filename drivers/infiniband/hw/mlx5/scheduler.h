@@ -12,7 +12,7 @@
 /* Must match rdma-core/providers/mlx5/mlx5.h. Keep the native CQE path
  * when disabled; this is the pre-MVAPICH fixed-window implementation. */
 #ifndef MLX5_SRM_ENABLE_CQE_SIMPLIFY
-#define MLX5_SRM_ENABLE_CQE_SIMPLIFY 1
+#define MLX5_SRM_ENABLE_CQE_SIMPLIFY 0
 #endif
 #if MLX5_SRM_ENABLE_CQE_SIMPLIFY != 0 && MLX5_SRM_ENABLE_CQE_SIMPLIFY != 1
 #error "MLX5_SRM_ENABLE_CQE_SIMPLIFY must be 0 or 1"
@@ -221,7 +221,7 @@ static_assert(offsetof(struct mlx5_sq_ctrl_page, route) == 384);
 
 /* Match both driver builds. Off: no timestamp storage or hot-path hooks. */
 #ifndef MLX5_SRM_ENABLE_WQE_TIMING
-#define MLX5_SRM_ENABLE_WQE_TIMING 1
+#define MLX5_SRM_ENABLE_WQE_TIMING 0
 #endif
 #if MLX5_SRM_ENABLE_WQE_TIMING != 0 && MLX5_SRM_ENABLE_WQE_TIMING != 1
 #error "MLX5_SRM_ENABLE_WQE_TIMING must be 0 or 1"
