@@ -27,6 +27,7 @@
 #include <linux/compiler.h>
 #include <linux/random.h>
 #include <linux/jiffies.h>
+#include <asm/msr.h>
 
 // 文件操作
 #include <linux/fs.h>
@@ -297,6 +298,33 @@ static u64 mlx5_ib_srmc_get_publish_token(struct mlx5_ib_srmc *srmc,
                     page_off);
     return smp_load_acquire(entry);
 }
+
+#if MLX5_SRM_ENABLE_WQE_TIMING
+static void mlx5_ib_srmc_publish_kernel_dispatch_tsc(
+    struct mlx5_cqe64 *cqe, u32 post_idx, u64 kernel_cqe_tsc,
+    u8 source_op_own)
+{
+    struct mlx5_srm_kernel_cqe_timestamp record;
+
+    BUILD_BUG_ON(offsetof(struct mlx5_cqe64, srqn) != sizeof(record));
+    /* Only the kernel XRC initiator's request CQEs reach this publisher.
+     * Never overwrite inline READ/atomic data if that configuration changes. */
+    /* op_own in the destination still belongs to its previous generation;
+     * inspect the source's opcode and inline-scatter bits (2 and 3). */
+    if (WARN_ON_ONCE(((source_op_own >> 4) != MLX5_CQE_REQ &&
+                      (source_op_own >> 4) != MLX5_CQE_REQ_ERR) ||
+                     (source_op_own & 0xc)))
+        return;
+
+    record.kernel_cqe_tsc = kernel_cqe_tsc;
+    record.sequence = ((u64)post_idx + 1) & MLX5_SRM_WRID_POST_MASK;
+    record.magic = MLX5_SRM_CQE_TIMING_MAGIC;
+    record.kernel_dispatch_tsc = rdtsc_ordered();
+    /* Owner is still unpublished. The caller's release store commits CQE
+     * and timestamps together. CQ cleaning/resizing copies them together. */
+    memcpy(cqe, &record, sizeof(record));
+}
+#endif
 
 static struct mlx5_ib_srmc *mlx5_ib_sched_find_srmc_idx(struct mlx5_ib_sched *sched,
                                                         u32 srmc_idx)
@@ -823,6 +851,9 @@ struct mlx5_ib_srm_sched_stats;
 struct mlx5_srm_cqe_publish_entry {
     struct mlx5_ib_cqbuf *cqb;
     struct mlx5_sq_ctrl_page *ctrl_page;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    u64 kernel_cqe_tsc;
+#endif
     u64 wqe_counter;
     u32 uidx;
     struct mlx5_cqe64 *cqe64;
@@ -1077,6 +1108,9 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
     struct mlx5_srm_cqe_publish_entry publish_batch[SRM_CQE_PUBLISH_BATCH];
     struct mlx5_ib_cqbuf *publish_cqb = NULL;
     int publish_batch_cnt = 0;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    u64 kernel_cqe_tsc = 0;
+#endif
 #if MLX5_SRM_ENABLE_FARM
     int poll_budget = MLX5_SRM_FARM_CQ_POLL_BATCH;
 #else
@@ -1093,6 +1127,9 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
         if ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq,
 						 poll_budget, wc, cqe)))
         {
+#if MLX5_SRM_ENABLE_WQE_TIMING
+            kernel_cqe_tsc = rdtsc_ordered();
+#endif
             mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_KERNEL_POLL,
                                         phase_start);
             post_poll_start = srm_stats_enable ? ktime_get_ns() : 0;
@@ -1124,6 +1161,9 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_sched *sched,
                 }
 
                 cqb = entry.cqb;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                entry.kernel_cqe_tsc = kernel_cqe_tsc;
+#endif
                 mlx5_ib_srm_record_cq_phase(stats, SRM_CQ_PHASE_INFO_LOOKUP,
                                             phase_start);
                 if (publish_cqb != cqb ||
@@ -1386,7 +1426,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 32;
+const int num_kqps = 1;
 
 static inline int mlx5_srm_effective_kqps(void)
 {
@@ -1506,6 +1546,11 @@ static inline void mlx5_srm_flush_cqe_publish_batch(
 
         memcpy(ucqe, cqe64, sizeof(*ucqe64) - 1);
         ucqe64->srqn = htonl(batch[i].uidx);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+        mlx5_ib_srmc_publish_kernel_dispatch_tsc(
+            ucqe64, (u32)batch[i].wqe_counter,
+            batch[i].kernel_cqe_tsc, cqe64->op_own);
+#endif
         smp_store_release(&ucqe64->op_own,
                           (cqe64->op_own & (~0xf)) | op_own);
 
@@ -4531,6 +4576,9 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
 		if (ctrl_page) {
 			WRITE_ONCE(ctrl_page->farm_lock, 0);
 			WRITE_ONCE(ctrl_page->farm_bf_offset, cb->qp->bf.offset);
+			WRITE_ONCE(ctrl_page->timing_abi,
+				MLX5_SRM_ENABLE_WQE_TIMING ?
+				MLX5_SRM_KERNEL_CQE_TIMING_ABI : 0);
 		}
     } else {
         pr_err("rdma_create_qp failed,error:%d\n", ret);

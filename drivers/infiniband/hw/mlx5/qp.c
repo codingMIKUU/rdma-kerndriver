@@ -1448,7 +1448,7 @@ static int mlx5_ib_alloc_srmc_publish(struct mlx5_ib_srmc *srmc, u32 depth)
 		goto out;
 	}
 
-	npages = DIV_ROUND_UP((u64)depth * sizeof(u64), PAGE_SIZE);
+	npages = DIV_ROUND_UP(MLX5_SRM_PUBLISH_MAP_BYTES(depth), PAGE_SIZE);
 	pages = kcalloc(npages, sizeof(*pages), GFP_KERNEL);
 	if (!pages) {
 		err = -ENOMEM;

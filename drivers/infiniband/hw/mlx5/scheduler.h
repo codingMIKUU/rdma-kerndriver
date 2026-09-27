@@ -16,6 +16,12 @@ static int debug = 0;
 #define MLX5_SRM_ENABLE_LARGE_KERNEL_QP 0
 #define MLX5_SRM_ENABLE_FARM 1
 #define MLX5_SRM_FARM_CQ_POLL_BATCH 64
+#ifndef MLX5_SRM_ENABLE_WQE_TIMING
+#define MLX5_SRM_ENABLE_WQE_TIMING 1
+#endif
+#if MLX5_SRM_ENABLE_WQE_TIMING != 0 && MLX5_SRM_ENABLE_WQE_TIMING != 1
+#error "MLX5_SRM_ENABLE_WQE_TIMING must be 0 or 1"
+#endif
 #define MLX5_SRM_KERNEL_QP_LEVELS \
     (MLX5_SRM_ENABLE_LARGE_KERNEL_QP ? NUM_LEVEL : 1)
 
@@ -59,7 +65,7 @@ static const u32 LARGE_DB_LIMIT = MLX5_SRM_LARGE_DB_LIMIT;
 #define MLX5_SRM_ENABLE_DB_BATCH_LOG 1
 #define MLX5_SRM_DB_BATCH_LOG_INTERVAL (1ULL << 20)
 
-static u64 LIMIT_BATCHING = 1000;
+static u64 LIMIT_BATCHING = 10000000;
 #define DEBUG_LOG \
     if (debug)    \
     printk
@@ -81,11 +87,27 @@ struct mlx5_sq_ctrl_page {
     __u64 resv_idx;
     __u32 farm_lock;
     __u32 farm_bf_offset;
-    __u8 resv_pad[48];
+    __u32 timing_abi;
+    __u8 resv_pad[44];
     __u64 cons_idx;
     __u8 cons_pad[56];
 } CACHELINE_ALIGNED_USER;
 static_assert(sizeof(struct mlx5_sq_ctrl_page) == 128);
+
+struct mlx5_srm_kernel_cqe_timestamp {
+    __u64 kernel_cqe_tsc;
+    __u64 kernel_dispatch_tsc;
+    __u64 sequence;
+    __u64 magic;
+};
+static_assert(sizeof(struct mlx5_srm_kernel_cqe_timestamp) == 32);
+#define MLX5_SRM_KERNEL_CQE_TIMING_ABI 3U
+#define MLX5_SRM_CQE_TIMING_MAGIC 0x4641524d54534333ULL
+
+/* Software send CQEs carry timing in their request-reserved first 32 bytes.
+ * Reclaiming a physical SQ slot must not overwrite an unconsumed CQE's TSC. */
+#define MLX5_SRM_PUBLISH_MAP_BYTES(depth) \
+    ((size_t)(depth) * sizeof(__u64))
 
 #define MLX5_SRM_PUBLISH_USR_BITS 16
 #define MLX5_SRM_PUBLISH_USR_MASK ((1ULL << MLX5_SRM_PUBLISH_USR_BITS) - 1)
