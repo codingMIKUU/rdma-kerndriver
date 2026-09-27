@@ -59,10 +59,10 @@
 /* Diagnostics only: disabled builds have no new hot-path instructions.
  * Enable DB_SHARE_STATS in the matching rdma-core mlx5.h as well. */
 #ifndef MLX5_SRM_ENABLE_DB_SHARE_STATS
-#define MLX5_SRM_ENABLE_DB_SHARE_STATS 1
+#define MLX5_SRM_ENABLE_DB_SHARE_STATS 0
 #endif
 #ifndef MLX5_SRM_ENABLE_CQE_CYCLE_STATS
-#define MLX5_SRM_ENABLE_CQE_CYCLE_STATS 1
+#define MLX5_SRM_ENABLE_CQE_CYCLE_STATS 0
 #endif
 #ifndef MLX5_SRM_DIAG_INTERVAL_MS
 #define MLX5_SRM_DIAG_INTERVAL_MS 1000U
@@ -221,7 +221,7 @@ static_assert(offsetof(struct mlx5_sq_ctrl_page, route) == 384);
 
 /* Match both driver builds. Off: no timestamp storage or hot-path hooks. */
 #ifndef MLX5_SRM_ENABLE_WQE_TIMING
-#define MLX5_SRM_ENABLE_WQE_TIMING 0
+#define MLX5_SRM_ENABLE_WQE_TIMING 1
 #endif
 #if MLX5_SRM_ENABLE_WQE_TIMING != 0 && MLX5_SRM_ENABLE_WQE_TIMING != 1
 #error "MLX5_SRM_ENABLE_WQE_TIMING must be 0 or 1"

@@ -2511,7 +2511,7 @@ static int calc_level_tot_wqe_num(int n, int num_user_threads)
     return ret;
 }
 
-const int num_kqps = 32;
+const int num_kqps = 1;
 
 /* BYTE_WINDOW_TEST_BEGIN: no-reroute DB/CQ accounting, also tested offline. */
 #if !MLX5_SRM_ENABLE_REROUTE && MLX5_SRM_MAX_INFLIGHT_BYTES
