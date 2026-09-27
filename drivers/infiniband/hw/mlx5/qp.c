@@ -5576,7 +5576,7 @@ int mlx5_ib_alloc_xrcd(struct ib_xrcd *ibxrcd, struct ib_udata *udata)
 	if (!MLX5_CAP_GEN(dev->mdev, xrc))
 		return -EOPNOTSUPP;
 	DEBUG_LOG("server_cb's xrcd is %p\n",xrcd);
-	server.server_cb.xrcd = xrcd;
+	server.server_cb.xrcd = ibxrcd;
 	
 	return mlx5_cmd_xrcd_alloc(dev->mdev, &xrcd->xrcdn, 0);
 }

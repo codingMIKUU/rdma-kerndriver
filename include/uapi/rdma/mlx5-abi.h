@@ -330,11 +330,15 @@ struct mlx5_ib_create_qp_dci_streams {
 };
 
 /* Software-only SRM timing sidecar; never DMAed as a hardware WQE. */
-#define MLX5_SRM_TIMING_ABI_VERSION 1
+#define MLX5_SRM_TIMING_ABI_VERSION 2
 struct mlx5_srm_timing_slot {
 	__aligned_u64 post_tsc;
 	__u32 sequence;
 	__u32 valid;
+	/* Published by the kernel immediately after the matching CQE is polled. */
+	__aligned_u64 kernel_cqe_tsc;
+	__u32 kernel_cqe_sequence;
+	__u32 kernel_cqe_valid;
 };
 
 struct mlx5_ib_create_qp {

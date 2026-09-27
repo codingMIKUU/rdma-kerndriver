@@ -12,19 +12,36 @@
 #if MLX5_SRM_ENABLE_WQE_TIMING != 0 && MLX5_SRM_ENABLE_WQE_TIMING != 1
 #error "MLX5_SRM_ENABLE_WQE_TIMING must be 0 or 1"
 #endif
+
+/*
+ * srm-RDMA-General creates the optional latency thread after all throughput
+ * threads and maps its SQ last.  When enabled, service that last SQ first and
+ * reserve the last KQP in every destination group for it.  Builds that do not
+ * launch the extra latency thread should disable this switch.
+ */
+#ifndef MLX5_SRM_ENABLE_LATENCY_PRIORITY
+#define MLX5_SRM_ENABLE_LATENCY_PRIORITY 1
+#endif
+#if MLX5_SRM_ENABLE_LATENCY_PRIORITY != 0 && \
+    MLX5_SRM_ENABLE_LATENCY_PRIORITY != 1
+#error "MLX5_SRM_ENABLE_LATENCY_PRIORITY must be 0 or 1"
+#endif
+
 #define MLX5_SRM_TIMING_REPORT_WQES 1000000U
 #if MLX5_SRM_ENABLE_WQE_TIMING
 struct mlx5_srm_timing_map {
     struct mlx5_srm_timing_slot *slots;
     struct page **pages;
     size_t npages;
+    u32 count;
 };
 struct mlx5_srm_db_timing_stats {
     u64 db_calls, db_wqes, post_to_db_cycles;
+    u64 kernel_db_cycles;
     u64 missing_timestamps, invalid_timestamps;
 };
 #endif
-#define SQ_DEPTH 1024
+#define SQ_DEPTH 4096
 static int debug = 0; 
 #define NUM_SRMC 8192
 
@@ -92,6 +109,9 @@ struct srm_cb{
     struct rdma_cm_id *cm_id;
     enum test_state state;
     wait_queue_head_t sem;
+    /* tgt_cb is embedded in every SRMC, but is initialized only when a
+     * receive-side CM connection is actually attached to that SRMC. */
+    bool sem_initialized;
     int txdepth;
     struct ib_pd *pd;
     struct ib_xrcd *xrcd;
@@ -174,13 +194,14 @@ int is_xrc_exists(struct mlx5_ib_sched* sched,struct ib_pd *pd,union ib_gid *dgi
 int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group* sched_group,int qpn);
 int mlx5_ib_destroy_srmc(struct mlx5_ib_sched* sched,int ah_id);
 int mlx5_ib_create_srmc_qp(struct mlx5_ib_sched* sched,struct mlx5_ib_srmc *srmc,struct ib_pd *pd,int flags,int qpn);
-int mlx5_sched_run_server(struct srm_cb *cb);
+int mlx5_sched_run_server(void *data);
 int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc,struct ib_pd *pd,union ib_gid *dgid,int flags);
 void ib_sched_free_buf(struct srm_cb *cb);
 int sched_hash_ip(char addr[4],int n);
 int srm_accept(struct srm_cb *cb);
-void mlx5_ib_sched_exit(struct mlx5_ib_sched_group* sched_group);
 int mlx5_ib_server_init(struct mlx5_ib_server* server);
+void mlx5_ib_server_exit(struct mlx5_ib_server *server,
+                         struct mlx5_ib_sched_group *sched_group);
 int polling_cqe(void *data);
 
 

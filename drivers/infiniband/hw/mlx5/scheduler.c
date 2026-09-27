@@ -41,17 +41,66 @@ const size_t MESSAGE_SIZE_THRESHOLD = 1024 * 10;
 // const size_t MESSAGE_SIZE_THRESHOLD = 1e9;
 const size_t QUEUE_LIMIT = 256 * 1024;
 const size_t SCHED_SIZE_LIMIT = 8 * 1024;
+
+/* CM connect requests are completed by short-lived worker threads.  Module
+ * teardown must stop accepting new work and wait for every worker before it
+ * can free an SRMC or its embedded target control block. */
+static atomic_t srm_conn_workers = ATOMIC_INIT(0);
+static DECLARE_WAIT_QUEUE_HEAD(srm_conn_workers_wait);
+static bool srm_server_stopping;
+
+static void srm_init_cb_waitqueue(struct srm_cb *cb)
+{
+    init_waitqueue_head(&cb->sem);
+    WRITE_ONCE(cb->sem_initialized, true);
+}
+
+static void srm_wake_cb(struct srm_cb *cb)
+{
+    if (cb && READ_ONCE(cb->sem_initialized))
+        wake_up_interruptible(&cb->sem);
+}
+
+static void srm_conn_worker_done(void)
+{
+    if (atomic_dec_and_test(&srm_conn_workers))
+        wake_up_all(&srm_conn_workers_wait);
+}
+
+static void srm_put_user_pages(struct page **pages, unsigned long npages,
+                               bool make_dirty)
+{
+    if (!pages || !npages)
+        return;
+#ifdef HAVE_UNPIN_USER_PAGES_DIRTY_LOCK_EXPORTED
+    unpin_user_pages_dirty_lock(pages, npages, make_dirty);
+#elif defined(HAVE_PUT_USER_PAGES_DIRTY_LOCK_3_PARAMS)
+    put_user_pages_dirty_lock(pages, npages, make_dirty);
+#elif defined(HAVE_PUT_USER_PAGES_DIRTY_LOCK_2_PARAMS)
+    unsigned long i;
+
+    if (make_dirty)
+        put_user_pages_dirty_lock(pages, npages);
+    else
+        for (i = 0; i < npages; ++i)
+            put_user_page(pages[i]);
+#else
+    unsigned long i;
+
+    for (i = 0; i < npages; ++i) {
+        if (make_dirty && !PageDirty(pages[i]))
+            set_page_dirty_lock(pages[i]);
+        put_page(pages[i]);
+    }
+#endif
+}
 #if MLX5_SRM_ENABLE_WQE_TIMING
 static void srm_free_timing_map(struct mlx5_srm_timing_map *map)
 {
-    size_t i;
     if (!map)
         return;
     vunmap(map->slots);
-    for (i = 0; i < map->npages; ++i) {
-        set_page_dirty_lock(map->pages[i]);
-        put_page(map->pages[i]);
-    }
+    srm_put_user_pages(map->pages, map->npages, true);
     kfree(map->pages);
     kfree(map);
 }
@@ -80,10 +129,8 @@ static struct mlx5_srm_timing_map *srm_map_timing(const struct mlx5_ib_create_qp
     pinned = get_user_pages(cmd->srm_timing_addr, map->npages,
                             FOLL_WRITE, map->pages, NULL);
     if (pinned != map->npages) {
-        if (pinned > 0) {
-            while (pinned--)
-                put_page(map->pages[pinned]);
-        }
+        if (pinned > 0)
+            srm_put_user_pages(map->pages, pinned, false);
         kfree(map->pages);
         kfree(map);
         return ERR_PTR(-EFAULT);
@@ -93,6 +140,7 @@ static struct mlx5_srm_timing_map *srm_map_timing(const struct mlx5_ib_create_qp
         srm_free_timing_map(map);
         return ERR_PTR(-ENOMEM);
     }
+    map->count = cmd->srm_timing_count;
     return map;
 }
 
@@ -150,9 +198,11 @@ static bool srm_timing_read(struct mlx5_ib_sqbuf *sqb, u16 wqe_counter,
 }
 
 static void srm_timing_db(struct mlx5_srm_db_timing_stats *stats, int sched,
-                          u64 start, u64 end, bool invalid)
+                          u64 start, u64 end, u64 kernel_db_cycles,
+                          bool invalid)
 {
     stats->db_calls++;
+    stats->kernel_db_cycles += kernel_db_cycles;
     if (invalid || (start && (s64)(end - start) < 0))
         stats->invalid_timestamps++;
     else if (!start)
@@ -163,11 +213,36 @@ static void srm_timing_db(struct mlx5_srm_db_timing_stats *stats, int sched,
     }
     if (stats->db_calls < MLX5_SRM_TIMING_REPORT_WQES)
         return;
-    pr_info("SRM_DB_TIMING algorithm=srm source=kernel sched=%d db_calls=%llu db_wqes=%llu post_to_db_cycles=%llu post_to_db_avg_cycles=%llu missing_timestamps=%llu invalid_timestamps=%llu\n",
+    pr_info("SRM_DB_TIMING algorithm=srm source=kernel kernel_db_scope=mlx5r_ring_db sched=%d db_calls=%llu db_wqes=%llu post_to_db_cycles=%llu post_to_db_avg_cycles=%llu kernel_db_cycles=%llu kernel_db_avg_cycles=%llu missing_timestamps=%llu invalid_timestamps=%llu\n",
             sched, stats->db_calls, stats->db_wqes, stats->post_to_db_cycles,
             stats->db_wqes ? div64_u64(stats->post_to_db_cycles, stats->db_wqes) : 0,
+            stats->kernel_db_cycles,
+            stats->db_calls ? div64_u64(stats->kernel_db_cycles,
+                                       stats->db_calls) : 0,
             stats->missing_timestamps, stats->invalid_timestamps);
     memset(stats, 0, sizeof(*stats));
+}
+
+/* Start is captured as soon as the hardware CQ poll returns.  Publish it
+ * before the copied CQE owner bit so userspace can safely consume both. */
+static void srm_timing_publish_kernel_cqe(struct mlx5_ib_sqbuf *sqb,
+                                          u64 wqe_counter, u64 start)
+{
+    struct mlx5_srm_timing_map *map;
+
+    if (!sqb)
+        return;
+    rcu_read_lock();
+    map = rcu_dereference(sqb->timing);
+    if (map && map->count) {
+        struct mlx5_srm_timing_slot *slot =
+            &map->slots[wqe_counter & (map->count - 1)];
+
+        WRITE_ONCE(slot->kernel_cqe_tsc, start);
+        WRITE_ONCE(slot->kernel_cqe_sequence, (u32)wqe_counter);
+        smp_store_release(&slot->kernel_cqe_valid, 1);
+    }
+    rcu_read_unlock();
 }
 #endif
 
@@ -190,16 +265,21 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
     if (ret < npages)
     {
         // 如果获取的页面数少于预期，释放资源并返回错误
-        for (i = 0; i < ret; i++)
-            put_page(pages[i]);
+        if (ret > 0)
+            srm_put_user_pages(pages, ret, false);
         kfree(pages);
         return -EFAULT;
     }
     mutex_lock(&sched_group->sq_lock);
+    if (sched_group->sqb_cnt >= NUM_SQB) {
+        srm_put_user_pages(pages, npages, false);
+        kfree(pages);
+        mutex_unlock(&sched_group->sq_lock);
+        return -ENOSPC;
+    }
     uq = kzalloc(sizeof(struct mlx5_ib_sqbuf), GFP_KERNEL);
     if (!uq) {
-        for (i = 0; i < ret; i++)
-            put_page(pages[i]);
+        srm_put_user_pages(pages, npages, false);
         kfree(pages);
         mutex_unlock(&sched_group->sq_lock);
         return -ENOMEM;
@@ -213,8 +293,7 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
     uq->pages = pages;
     if (!uq->buf)
     {
-        for (i = 0; i < ret; i++)
-            put_page(pages[i]);
+        srm_put_user_pages(pages, npages, false);
         kfree(pages);
         kfree(uq);
         pr_err("fail to map sq buffer\n");
@@ -229,8 +308,7 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
         if (IS_ERR(map)) {
             int map_err = PTR_ERR(map);
             vunmap(uq->buf);
-            for (i = 0; i < ret; ++i)
-                put_page(pages[i]);
+            srm_put_user_pages(pages, npages, false);
             kfree(pages);
             kfree(uq);
             mutex_unlock(&sched_group->sq_lock);
@@ -244,7 +322,7 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
     for (i = 0; i < sched_group->cqb_cnt; i++)
     {
         cqb = sched_group->cqb_arr[i];
-        if (cqb->cqn == cqn)
+        if (cqb && cqb->cqn == cqn)
         {
             uq->cqb = cqb;
             break;
@@ -253,6 +331,22 @@ int mlx5_ib_map_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long virt
     if (uq->cqb == NULL)
     {
         pr_err("cqn %d not found\n", cqn);
+        mutex_unlock(&sched_group->cq_lock);
+#if MLX5_SRM_ENABLE_WQE_TIMING
+        if (rcu_access_pointer(uq->timing)) {
+            struct mlx5_srm_timing_map *map =
+                rcu_dereference_protected(uq->timing, 1);
+
+            RCU_INIT_POINTER(uq->timing, NULL);
+            srm_free_timing_map(map);
+        }
+#endif
+        vunmap(uq->buf);
+        srm_put_user_pages(pages, npages, false);
+        kfree(pages);
+        kfree(uq);
+        mutex_unlock(&sched_group->sq_lock);
+        return -ENOENT;
     }
     mutex_unlock(&sched_group->cq_lock);
 
@@ -280,13 +374,25 @@ int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long v
     if (ret < npages)
     {
         // 如果获取的页面数少于预期，释放资源并返回错误
-        for (i = 0; i < ret; i++)
-            put_page(pages[i]);
+        if (ret > 0)
+            srm_put_user_pages(pages, ret, false);
         kfree(pages);
         return -EFAULT;
     }
     mutex_lock(&sched_group->cq_lock);
+    if (sched_group->cqb_cnt >= NUM_SQB) {
+        srm_put_user_pages(pages, npages, false);
+        kfree(pages);
+        mutex_unlock(&sched_group->cq_lock);
+        return -ENOSPC;
+    }
     uq = kzalloc(sizeof(struct mlx5_ib_cqbuf), GFP_KERNEL);
+    if (!uq) {
+        srm_put_user_pages(pages, npages, false);
+        kfree(pages);
+        mutex_unlock(&sched_group->cq_lock);
+        return -ENOMEM;
+    }
     uq->cqn = cqn;
     uq->cq_size = size;
     uq->buf = vmap(pages, npages, VM_MAP, PAGE_KERNEL);
@@ -296,8 +402,7 @@ int mlx5_ib_map_cq_ubuf(struct mlx5_ib_sched_group *sched_group, unsigned long v
     if (!uq->buf)
     {
         kfree(uq);
-        for (i = 0; i < ret; i++)
-            put_page(pages[i]);
+        srm_put_user_pages(pages, npages, false);
         kfree(pages);
         pr_err("failed to map cf buffer\n");
         mutex_unlock(&sched_group->cq_lock);
@@ -315,7 +420,7 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
 {
     struct mlx5_ib_sqbuf *sqb;
     struct mlx5_ib_cqbuf *cqb;
-    int cqn;
+    int cqn = -1;
     int npages;
     int i;
 #if MLX5_SRM_ENABLE_WQE_TIMING
@@ -333,11 +438,11 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
         if (sqb->qpn == qpn)
         {
             sched_group->sqb_arr[i] = NULL;
-            cqn = sqb->cqb->cqn;
+            if (sqb->cqb)
+                cqn = sqb->cqb->cqn;
             vunmap(sqb->buf);
             npages = (sqb->sq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-            for (i = 0; i < npages; i++)
-                put_page(sqb->pages[i]);
+            srm_put_user_pages(sqb->pages, npages, true);
             kfree(sqb->pages);
             kfree(sqb);
 
@@ -346,6 +451,9 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
     }
 
     mutex_unlock(&sched_group->sq_lock);
+
+    if (cqn < 0)
+        return 0;
 
     // Free cq
     mutex_lock(&sched_group->cq_lock);
@@ -361,8 +469,7 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
             sched_group->cqb_arr[i] = NULL;
             vunmap(cqb->buf);
             npages = (cqb->cq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-            for (i = 0; i < npages; i++)
-                put_page(cqb->pages[i]);
+            srm_put_user_pages(cqb->pages, npages, true);
             kfree(cqb->pages);
             kfree(cqb);
 
@@ -374,7 +481,7 @@ int mlx5_ib_unmap_ubuf(struct mlx5_ib_sched_group *sched_group, int qpn)
 }
 static void srm_cq_event_handler(struct ib_cq *cq, void *ctx)
 {
-    struct mlx5_ib_srmc *srmc;
+    struct mlx5_ib_srmc *srmc = NULL;
     struct ib_wc wc;
     void *cqe, *ucqe;
     int qpn;
@@ -382,6 +489,9 @@ static void srm_cq_event_handler(struct ib_cq *cq, void *ctx)
     struct mlx5_ib_cqbuf *cqb;
     struct mlx5_cqe64 *ucqe64;
     int idx;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    u64 cqe_poll_tsc;
+#endif
     srmc = ctx;
 
     DEBUG_LOG("distributing cqe\n");
@@ -389,6 +499,9 @@ static void srm_cq_event_handler(struct ib_cq *cq, void *ctx)
     int cqe_num = 0;
     while ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.qp->ibqp.send_cq, 1, &wc, &cqe)) == 1)
     {
+#if MLX5_SRM_ENABLE_WQE_TIMING
+        cqe_poll_tsc = rdtsc_ordered();
+#endif
         // cqe64 = (to_mcq(srmc->ini_cb.qp->ibqp.send_cq)->mcq.cqe_sz == 64) ? cqe : cqe + 64;
         //  Two attr to change
         idx = wc.wr_id;
@@ -397,9 +510,14 @@ static void srm_cq_event_handler(struct ib_cq *cq, void *ctx)
         DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc.status, srmc->wqe_infos[idx].pending_bytes);
         DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, srmc->wqe_infos[idx].wqe_counter);
         sqb = srmc->wqe_infos[idx].sqb;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+        srm_timing_publish_kernel_cqe(
+            sqb, srmc->wqe_infos[idx].wqe_counter, cqe_poll_tsc);
+#endif
         if (sqb == NULL || sqb->cqb == NULL)
         {
             pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
+            continue;
         }
         cqb = sqb->cqb;
         mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
@@ -491,6 +609,9 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
     int uidx, idx;
     int cqe_num;
     int i, j;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    u64 cqe_poll_tsc;
+#endif
     for (i = 0; i < NUM_SRMC; i++)
     {
         if (cnt_c >= sched->srmc_cnt)
@@ -510,6 +631,9 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
             cqe_num = 0;
             if ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe)))
             {
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                cqe_poll_tsc = rdtsc_ordered();
+#endif
                 // 减去sig_cnt
                 srmc->sig_cnt -= cqe_num;
                 // cnt2++;
@@ -529,9 +653,15 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                     DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[j].status, srmc->wqe_infos[idx].pending_bytes);
                     DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, srmc->wqe_infos[idx].wqe_counter);
                     sqb = srmc->wqe_infos[idx].sqb;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                    srm_timing_publish_kernel_cqe(
+                        sqb, srmc->wqe_infos[idx].wqe_counter,
+                        cqe_poll_tsc);
+#endif
                     if (sqb == NULL || sqb->cqb == NULL)
                     {
                         pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
+                        continue;
                     }
                     cqb = sqb->cqb;
                     mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
@@ -586,6 +716,9 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
             cqe_num = 0;
             if ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe)))
             {
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                cqe_poll_tsc = rdtsc_ordered();
+#endif
                 // 减去sig_cnt
                 srmc->sig_cnt -= cqe_num;
                 // cnt2++;
@@ -605,9 +738,15 @@ static inline void srm_poll_once(struct mlx5_ib_sched *sched, struct ib_wc *wc, 
                     DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[j].status, srmc->wqe_infos[idx].pending_bytes);
                     DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, srmc->wqe_infos[idx].wqe_counter);
                     sqb = srmc->wqe_infos[idx].sqb;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                    srm_timing_publish_kernel_cqe(
+                        sqb, srmc->wqe_infos[idx].wqe_counter,
+                        cqe_poll_tsc);
+#endif
                     if (sqb == NULL || sqb->cqb == NULL)
                     {
                         pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
+                        continue;
                     }
                     cqb = sqb->cqb;
                     mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
@@ -653,15 +792,32 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
     int op_own;
     int uidx, idx;
     int cqe_num;
+    int poll_budget;
     int i, j;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+    u64 cqe_poll_tsc;
+#endif
+    if (kthread_should_stop())
+        return -ESHUTDOWN;
+    if (!srmc || !srmc->ini_cb.cq || !srmc->ini_cb.qp)
+        return -ENODEV;
     if (srmc->sig_cnt)
     {
         DEBUG_LOG("distributing cqe\n");
         
         // memset(&wc, 1, sizeof wc);
         cqe_num = 0;
-        if ((cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq, srmc->sig_cnt, wc, cqe)))
+        /* wc/cqe are allocated with SQ_DEPTH entries.  sig_cnt can briefly
+         * exceed that value under error/recovery pressure, so never hand a
+         * larger array length to the provider. */
+        poll_budget = min_t(int, srmc->sig_cnt, SQ_DEPTH);
+        cqe_num = mlx5_ib_poll_cq_with_cqe(srmc->ini_cb.cq, poll_budget,
+                                           wc, cqe);
+        if (cqe_num > 0)
         {
+#if MLX5_SRM_ENABLE_WQE_TIMING
+            cqe_poll_tsc = rdtsc_ordered();
+#endif
             // 减去sig_cnt
             srmc->sig_cnt -= cqe_num;
             // cnt2++;
@@ -681,9 +837,15 @@ static inline int srm_poll_srmc_once(struct mlx5_ib_srmc *srmc, struct ib_wc *wc
                 DEBUG_LOG("cqe_num:%d,wc status:%d,byte_cnt:%d\n", cqe_num, wc[i].status, srmc->wqe_infos[idx].pending_bytes);
                 DEBUG_LOG("wc's qpn:%d,wc's wqe_counter:%d\n", qpn, srmc->wqe_infos[idx].wqe_counter);
                 sqb = srmc->wqe_infos[idx].sqb;
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                srm_timing_publish_kernel_cqe(
+                    sqb, srmc->wqe_infos[idx].wqe_counter,
+                    cqe_poll_tsc);
+#endif
                 if (sqb == NULL || sqb->cqb == NULL)
                 {
                     pr_err("Unexpected:No cqn found for qpn %d\n", qpn);
+                    continue;
                 }
                 cqb = sqb->cqb;
                 mutex_lock(&cqb->lock); // 多个线程可能同时写入同一个cq
@@ -729,13 +891,42 @@ static inline uint32_t srm_fastrand(uint64_t *seed)
     return (uint32_t)((*seed) >> 32);
 }
 
-const int num_kqps = 32;
+const int num_kqps = 1;
+
+static inline bool srm_latency_priority_active(u32 sqb_count)
+{
+    return MLX5_SRM_ENABLE_LATENCY_PRIORITY && sqb_count > 1 &&
+           num_kqps > 1;
+}
+
+static inline u32 srm_sqb_scan_index(u32 scan, u32 sqb_count)
+{
+    if (!srm_latency_priority_active(sqb_count))
+        return scan;
+
+    /* The General latency SQ is appended last; visit it before bulk SQs. */
+    return scan ? scan - 1 : sqb_count - 1;
+}
+
+static inline u32 srm_select_kqp_offset(bool latency_sqb, u32 sqb_count)
+{
+    if (!srm_latency_priority_active(sqb_count))
+        return prandom_u32_max(num_kqps);
+
+    /* Keep the final KQP free from throughput head-of-line blocking. */
+    if (latency_sqb)
+        return num_kqps - 1;
+
+    return prandom_u32_max(num_kqps - 1);
+}
+
 // const int polling_itv = 10;//间隔多少个srmc进行一次polling
 int scheduler_polling(void *sched_data)
 {
 #if MLX5_SRM_ENABLE_WQE_TIMING
     struct mlx5_srm_db_timing_stats timing_stats = {};
     u64 timing_start = 0, timing_end = 0;
+    u64 kernel_db_start = 0, kernel_db_end = 0;
     bool timing_enabled = false, timing_invalid = false;
 #endif
     extern struct mlx5_ib_sched_group sched_group;
@@ -748,10 +939,14 @@ int scheduler_polling(void *sched_data)
     struct mlx5_ib_srmc *srmc;
     struct ib_wc *wc;
     void **cqe, *ucqe;
+    struct mlx5_ib_srmc **pre_srmcs = NULL;
+    u8 *in_queue = NULL;
     int qpn;
     int op_own;
     int uidx, idx;
     int i, j, k;
+    u32 scan, sqb_count;
+    bool latency_sqb;
 
     void *seg, *useg;
     struct mlx5_wqe_ctrl_seg *ctrl, *uctrl;
@@ -783,6 +978,10 @@ int scheduler_polling(void *sched_data)
 
     cqe = kmalloc_array(SQ_DEPTH, sizeof(void *), GFP_KERNEL);
     wc = kmalloc_array(SQ_DEPTH, sizeof(struct ib_wc), GFP_KERNEL);
+    if (!cqe || !wc) {
+        ret = -ENOMEM;
+        goto err;
+    }
 
     memset(gid.raw, 0, sizeof(gid.raw));
     memset(gid.raw + 10, 0xff, 2); // 高80位为0，中16位全1，低32位为ip地址，此为gid格式
@@ -790,6 +989,7 @@ int scheduler_polling(void *sched_data)
     unsigned long tfree = 1, cnt = 0, cnt_c;
     // int cnt3 = 0;
     kfree(sched_id);
+    sched_id = NULL;
 
 //     // 文件统计
 //     char pt[200] = {0};
@@ -835,13 +1035,21 @@ int scheduler_polling(void *sched_data)
     uint32_t poll_round = 0;
     const int POLL_ALL_INTERVAL = 10000;//全体遍历的时间
     struct mlx5_ib_srmc *pre_srmc;
-    struct mlx5_ib_srmc **pre_srmcs = kmalloc_array(SRMC_POLLING_CNT, sizeof(struct mlx5_ib_srmc *), GFP_KERNEL);
+    pre_srmcs = kmalloc_array(SRMC_POLLING_CNT,
+                              sizeof(struct mlx5_ib_srmc *), GFP_KERNEL);
+    if (!pre_srmcs) {
+        ret = -ENOMEM;
+        goto err;
+    }
     memset(pre_srmcs,0, SRMC_POLLING_CNT * sizeof(struct mlx5_ib_srmc *));
     int polling_tail,polling_head;
     polling_tail = polling_head = 0;
 
-    u8 *in_queue;
     in_queue = kmalloc_array(NUM_SRMC*2, sizeof(u8), GFP_KERNEL);
+    if (!in_queue) {
+        ret = -ENOMEM;
+        goto err;
+    }
     memset(in_queue, 0, NUM_SRMC * 2 * sizeof(u8));
     while (!kthread_should_stop())
     {
@@ -852,9 +1060,13 @@ int scheduler_polling(void *sched_data)
         //     printk(KERN_INFO "用户态sq切换开销elapsed_time0 = %llu ns\n", elapsed_time0);
         // }
 
-        for (k = 0; k < sched_group.sqb_cnt; k++)
+        sqb_count = READ_ONCE(sched_group.sqb_cnt);
+        for (scan = 0; scan < sqb_count; scan++)
         {
-            sqb = sched_group.sqb_arr[k];
+            k = srm_sqb_scan_index(scan, sqb_count);
+            latency_sqb = srm_latency_priority_active(sqb_count) &&
+                          k == sqb_count - 1;
+            sqb = READ_ONCE(sched_group.sqb_arr[k]);
             if (sqb == NULL)
             {
                 pr_err("sqb %d is NULL\n", k);
@@ -877,16 +1089,28 @@ int scheduler_polling(void *sched_data)
                         if(pre_srmcs[polling_head]!=NULL){
                             pr_info("cq polling queue exceed queue length\n");
                             //此时polling队列满，必须poll完
-                            while(pre_srmc->sig_cnt){
-                                srm_poll_srmc_once(pre_srmc, wc, cqe);
+                            while (pre_srmc->sig_cnt &&
+                                   !kthread_should_stop()) {
+                                ret = srm_poll_srmc_once(pre_srmc, wc, cqe);
+                                if (ret < 0)
+                                    break;
+                                if (!ret)
+                                    cond_resched();
                             }
                             in_queue[pre_srmc->idx] = 0;
                         }
                         else if(pre_srmc->sig_cnt>= SQ_DEPTH || pre_srmc->ini_cb.qp->sq.head - pre_srmc->ini_cb.qp->sq.tail >= SQ_DEPTH){
                             pr_info("cq queue exceed SQ_DEPTH\n");
                             //cqe队列满或者sq队列满，必须poll到一个以上,让sig_cnt小于SQ_DEPTH
-                            while(pre_srmc->sig_cnt>= SQ_DEPTH || pre_srmc->ini_cb.qp->sq.head - pre_srmc->ini_cb.qp->sq.tail >= SQ_DEPTH){
-                                srm_poll_srmc_once(pre_srmc, wc, cqe);
+                            while (!kthread_should_stop() &&
+                                   (pre_srmc->sig_cnt >= SQ_DEPTH ||
+                                    pre_srmc->ini_cb.qp->sq.head -
+                                    pre_srmc->ini_cb.qp->sq.tail >= SQ_DEPTH)) {
+                                ret = srm_poll_srmc_once(pre_srmc, wc, cqe);
+                                if (ret < 0)
+                                    break;
+                                if (!ret)
+                                    cond_resched();
                             }
                             if(!pre_srmc->sig_cnt){
                                 //poll完
@@ -977,6 +1201,11 @@ int scheduler_polling(void *sched_data)
                     break;
                 }
 
+                if (latency_sqb)
+                    pr_info_once("SRM latency priority active: latency_sqb=%d qpn=%d total_sqbs=%u dedicated_kqp_offset=%d\n",
+                                 k, sqb->qpn, sqb_count,
+                                 num_kqps - 1);
+
                 DEBUG_LOG("uidx:%d\n", uidx);
 
                 // imm = (imm & 0x00FFFFFF) | (1 << 24); //将1放在imm的高8位
@@ -999,16 +1228,7 @@ int scheduler_polling(void *sched_data)
                 hash_id = sched_hash_ip((char *)&imm, NUM_SRMC); // 查找目标SRMC
                 found = 0;
 
-                // // 时延线程在第17个
-                // if (k != 16){
-                //     //rd = prandom_u32_max(num_kqps - 1);
-                //     rd = srm_fastrand(&srm_seed)%(num_kqps-1);
-                // }
-                // else{
-                //     rd = num_kqps - 1;
-                //     //pr_info("lat thread length:%d\n",length);
-                // }
-               rd = prandom_u32_max(num_kqps);
+                rd = srm_select_kqp_offset(latency_sqb, sqb_count);
 
                 for (i = 0; i < NUM_SRMC; i++)
                 {
@@ -1200,9 +1420,14 @@ int scheduler_polling(void *sched_data)
                 // TODO:cur_edge
 
                 // ring doorbell
+#if MLX5_SRM_ENABLE_WQE_TIMING
+                if (timing_enabled)
+                    kernel_db_start = rdtsc_ordered();
+#endif
                 mlx5r_ring_db(qp, 1, ctrl);
 #if MLX5_SRM_ENABLE_WQE_TIMING
                 if (timing_enabled) {
+                    kernel_db_end = rdtsc_ordered();
                     /* Drain the CPU's posted WC doorbell writes before TSC.
                      * This does not claim the NIC has consumed the WQE. */
                     wmb();
@@ -1216,7 +1441,9 @@ int scheduler_polling(void *sched_data)
                 spin_unlock_irqrestore(&qp->sq.lock, flags);
 #if MLX5_SRM_ENABLE_WQE_TIMING
                 if (timing_enabled)
-                    srm_timing_db(&timing_stats, id, timing_start, timing_end, timing_invalid);
+                    srm_timing_db(&timing_stats, id, timing_start, timing_end,
+                                  kernel_db_end - kernel_db_start,
+                                  timing_invalid);
 #endif
 
                 // end_cycles = rdtsc();
@@ -1248,9 +1475,12 @@ int scheduler_polling(void *sched_data)
                             polling_tail = (polling_tail + 1) % SRMC_POLLING_CNT;
                             pr_info("err:exceed queue length\n");
                             // 此时队列满，必须poll到,此时head = (tail-1+polling_cnt)%polling_cnt
-                            while ((ret = srm_poll_srmc_once(pre_srmc, wc, cqe))!=-1)
-                            {
-                                ;
+                            while (!kthread_should_stop() && pre_srmc->sig_cnt) {
+                                ret = srm_poll_srmc_once(pre_srmc, wc, cqe);
+                                if (ret < 0)
+                                    break;
+                                if (!ret)
+                                    cond_resched();
                             }
                             in_queue[pre_srmc->idx] = 0;
                         }
@@ -1290,25 +1520,22 @@ out:
     kfree(wc);
     kfree(pre_srmcs);
     kfree(in_queue);
-    sched->task = NULL;
-
     // // 文件
     // filp_close(filp, NULL);
     // kfree(buf);
     return 0;
 err:
     pr_err("scheduler thread %d exit in error state\n", id);
+    kfree(sched_id);
     kfree(cqe);
     kfree(wc);
     kfree(pre_srmcs);
     kfree(in_queue);
 
-    sched->task = NULL;
-
     // // 文件
     // filp_close(filp, NULL);
     // kfree(buf);
-    return -1;
+    return ret ? ret : -EIO;
 }
 
 int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
@@ -1353,11 +1580,13 @@ int mlx5_ib_sched_init(struct mlx5_ib_sched_group *sched_group, int num)
         {
             pr_err("Failed to create polling thread%d\n", i);
             ret = PTR_ERR(sched_group->scheds[i].task);
+            sched_group->scheds[i].task = NULL;
+            kfree(sched_id);
             goto err;
         }
-        kthread_bind(sched_group->scheds[i].task, i + 8);
+        kthread_bind(sched_group->scheds[i].task, i + 174);
         wake_up_process(sched_group->scheds[i].task);
-        pr_info("Polling thread %d started and bound to CPU %d\n", i, i + 8);
+        pr_info("Polling thread %d started and bound to CPU %d\n", i, i + 174);
     }
     // sched_group->cq_task =  kthread_create(polling_cqe,NULL,"polling_cqe");
     // if (IS_ERR(sched_group->cq_task))
@@ -1380,81 +1609,48 @@ err:
         }
     }
     kfree(sched_group->scheds);
+    sched_group->scheds = NULL;
+    sched_group->num_sched = 0;
     return ret;
 }
 
-void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
+static void srm_destroy_cm_resources(struct srm_cb *cb, bool owns_pd)
+{
+    struct rdma_cm_id *cm_id;
+
+    if (!cb)
+        return;
+
+    cm_id = cb->cm_id;
+    if (!cm_id)
+        return;
+
+    cb->state = ERROR;
+    srm_wake_cb(cb);
+    if (cm_id->qp)
+        rdma_destroy_qp(cm_id);
+    cb->qp = NULL;
+
+    if (!IS_ERR_OR_NULL(cb->cq))
+        ib_destroy_cq(cb->cq);
+    cb->cq = NULL;
+
+    if (owns_pd && !IS_ERR_OR_NULL(cb->pd))
+        ib_dealloc_pd(cb->pd);
+    cb->pd = NULL;
+
+    cb->cm_id = NULL;
+    rdma_destroy_id(cm_id);
+    cb->refcnt = 0;
+}
+
+static void srm_free_user_mappings(struct mlx5_ib_sched_group *sched_group)
 {
     struct mlx5_ib_sqbuf *sqb;
     struct mlx5_ib_cqbuf *cqb;
-    struct mlx5_ib_srmc *srmc;
-    struct mlx5_ib_sched *sched;
     int npages;
-    int i, j;
-    for (i = 0; i < sched_group->num_sched; i++)
-    {
-        DEBUG_LOG("Ready to stop sched->task %d\n", i);
-        sched = &sched_group->scheds[i];
-        if (sched->task)
-        {
-            kthread_stop(sched->task);
-            sched->task = NULL;
-        }
-        mutex_lock(&sched->srmc_lock);
-        for (j = 0; j < NUM_SRMC; j++)
-        {
-            srmc = sched->srmc_small_tb[j];
-            if (srmc == NULL)
-            {
-                continue;
-            }
-            DEBUG_LOG("srmc ini_cb state:%d\n", srmc->ini_cb.state);
-            // if (srmc->ini_cb.state == CONNECTED)//可能在event处理过程中发现state是CONNECTED，造成重复释放。如何解决？
-            // {
-            //     rdma_disconnect(srmc->ini_cb.cm_id);
-            //     // ib_sched_free_buf(&srmc->ini_cb);
-            //     ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
-            //     ib_destroy_cq(srmc->ini_cb.cq);
-            // }
-            if (srmc->ini_cb.cm_id)
-            {
-                rdma_disconnect(srmc->ini_cb.cm_id);
-                ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
-                ib_destroy_cq(srmc->ini_cb.cq);
-                // ib_dealloc_pd(srmc->ini_cb.pd);
-                rdma_destroy_id(srmc->ini_cb.cm_id);
-            }
+    int i;
 
-            kfree(srmc);
-        }
-
-        for (j = 0; j < NUM_SRMC; j++)
-        {
-            srmc = sched->srmc_large_tb[j];
-            if (srmc == NULL)
-            {
-                continue;
-            }
-            // if (srmc->ini_cb.state == CONNECTED)
-            // {
-            //     rdma_disconnect(srmc->ini_cb.cm_id);
-            //     // ib_sched_free_buf(&srmc->ini_cb);
-            //     ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
-            //     ib_destroy_cq(srmc->ini_cb.cq);
-            // }
-            if (srmc->ini_cb.cm_id)
-            {
-                rdma_disconnect(srmc->ini_cb.cm_id);
-                ib_destroy_qp(&srmc->ini_cb.qp->ibqp);
-                ib_destroy_cq(srmc->ini_cb.cq);
-                // ib_dealloc_pd(srmc->ini_cb.pd);
-                rdma_destroy_id(srmc->ini_cb.cm_id);
-            }
-            kfree(srmc);
-        }
-        mutex_unlock(&sched->srmc_lock);
-        DEBUG_LOG("clean thread %d srmc success\n", i);
-    }
 #if MLX5_SRM_ENABLE_WQE_TIMING
     for (i = 0; i < sched_group->sqb_cnt; ++i) {
         sqb = sched_group->sqb_arr[i];
@@ -1462,51 +1658,100 @@ void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
             mlx5_srm_unmap_timing(sched_group, sqb->qpn);
     }
 #endif
-    // // cleanup scheduler
-    // mutex_lock(&sched_group->sq_lock);
-    // for (i = 0; i < sched_group->sqb_cnt; i++)
-    // {
-    //     sqb = sched_group->sqb_arr[i];
-    //     sched_group->sqb_arr[i] = NULL;
-    //     if (sqb == NULL)
-    //         continue;
-    //     vunmap(sqb->buf);
-    //     npages = (sqb->sq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    //     for (i = 0; i < npages; i++)
-    //         put_page(sqb->pages[i]);
-    //     kfree(sqb->pages);
-    //     kfree(sqb);
-    // }
-    // mutex_unlock(&sched_group->sq_lock);
-    // DEBUG_LOG("clean sqb success\n");
 
-    // mutex_lock(&sched_group->cq_lock);
-    // for (i = 0; i < sched_group->cqb_cnt; i++)
-    // {
-    //     cqb = sched_group->cqb_arr[i];
-    //     sched_group->cqb_arr[i] = NULL;
-    //     if (cqb == NULL)
-    //         continue;
-    //     vunmap(cqb->buf);
-    //     npages = (cqb->cq_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    //     for (i = 0; i < npages; i++)
-    //         put_page(cqb->pages[i]);
-    //     kfree(cqb->pages);
-    //     kfree(cqb);
-    // }
-    // mutex_unlock(&sched_group->cq_lock);
-    DEBUG_LOG("clean cqb success\n");
+    mutex_lock(&sched_group->sq_lock);
+    for (i = 0; i < sched_group->sqb_cnt; ++i) {
+        sqb = sched_group->sqb_arr[i];
+        sched_group->sqb_arr[i] = NULL;
+        if (!sqb)
+            continue;
+        vunmap(sqb->buf);
+        npages = DIV_ROUND_UP(sqb->sq_size, PAGE_SIZE);
+        srm_put_user_pages(sqb->pages, npages, true);
+        kfree(sqb->pages);
+        kfree(sqb);
+    }
+    sched_group->sqb_cnt = 0;
+    mutex_unlock(&sched_group->sq_lock);
+
+    mutex_lock(&sched_group->cq_lock);
+    for (i = 0; i < sched_group->cqb_cnt; ++i) {
+        cqb = sched_group->cqb_arr[i];
+        sched_group->cqb_arr[i] = NULL;
+        if (!cqb)
+            continue;
+        vunmap(cqb->buf);
+        npages = DIV_ROUND_UP(cqb->cq_size, PAGE_SIZE);
+        srm_put_user_pages(cqb->pages, npages, true);
+        kfree(cqb->pages);
+        kfree(cqb);
+    }
+    sched_group->cqb_cnt = 0;
+    mutex_unlock(&sched_group->cq_lock);
+}
+
+void mlx5_ib_sched_exit(struct mlx5_ib_sched_group *sched_group)
+{
+    struct mlx5_ib_srmc *srmc;
+    struct mlx5_ib_sched *sched;
+    int i, j;
+
+    if (!sched_group->scheds)
+        return;
+
+    /* No CQ/SQ or SRMC object may be freed until every polling thread has
+     * observed kthread_should_stop() and dropped all local pointers. */
+    for (i = 0; i < sched_group->num_sched; ++i) {
+        sched = &sched_group->scheds[i];
+        if (sched->task) {
+            kthread_stop(sched->task);
+            sched->task = NULL;
+        }
+    }
+
+    for (i = 0; i < sched_group->num_sched; ++i) {
+        sched = &sched_group->scheds[i];
+        for (j = 0; j < NUM_SRMC; ++j) {
+            srmc = sched->srmc_small_tb[j];
+            sched->srmc_small_tb[j] = NULL;
+            if (!srmc)
+                continue;
+            srm_destroy_cm_resources(&srmc->ini_cb, false);
+            srm_destroy_cm_resources(&srmc->tgt_cb, true);
+            kfree(srmc);
+        }
+        for (j = 0; j < NUM_SRMC; ++j) {
+            srmc = sched->srmc_large_tb[j];
+            sched->srmc_large_tb[j] = NULL;
+            if (!srmc)
+                continue;
+            srm_destroy_cm_resources(&srmc->ini_cb, false);
+            srm_destroy_cm_resources(&srmc->tgt_cb, true);
+            kfree(srmc);
+        }
+        sched->srmc_cnt = 0;
+    }
+
+    srm_free_user_mappings(sched_group);
+    kfree(sched_group->scheds);
+    sched_group->scheds = NULL;
+    sched_group->num_sched = 0;
 
     pr_info("mlx5_sched_exit success\n");
-    // mlx5_ib_unmap_ubuf(sched,0);
 }
 int mlx5_ib_server_init(struct mlx5_ib_server *server)
 {
+    WRITE_ONCE(srm_server_stopping, false);
+    atomic_set(&srm_conn_workers, 0);
+    srm_init_cb_waitqueue(&server->server_cb);
     server->task = kthread_run(mlx5_sched_run_server, &server->server_cb, "server thread");
     if (IS_ERR(server->task))
     {
+        int ret = PTR_ERR(server->task);
+
+        server->task = NULL;
         DEBUG_LOG("Failed to create server thread\n");
-        return PTR_ERR(server->task);
+        return ret;
     }
     return 0;
 }
@@ -1514,58 +1759,44 @@ void mlx5_ib_server_exit(struct mlx5_ib_server *server, struct mlx5_ib_sched_gro
 {
     int i, j;
     struct mlx5_ib_sched *sched;
-    struct mlx5_ib_srmc *srmc;
+    struct mlx5_ib_srmc *srmc = NULL;
+    struct rdma_cm_id *listen_id;
 
-    if (server->task)
-    {
+    WRITE_ONCE(srm_server_stopping, true);
+    srm_wake_cb(&server->server_cb);
+    if (server->task) {
         kthread_stop(server->task);
-        for (i = 0; i < sched_group->num_sched; i++)
-        {
+        server->task = NULL;
+    }
+
+    /* Destroy the listener first: after this synchronization point no new
+     * CONNECT_REQUEST callback can enqueue another connection worker. */
+    listen_id = server->server_cb.cm_id;
+    server->server_cb.cm_id = NULL;
+    if (listen_id)
+        rdma_destroy_id(listen_id);
+
+    if (sched_group->scheds) {
+        for (i = 0; i < sched_group->num_sched; ++i) {
             sched = &sched_group->scheds[i];
             mutex_lock(&sched->srmc_lock);
-            for (j = 0; j < NUM_SRMC; j++)
-            {
+            for (j = 0; j < NUM_SRMC; ++j) {
                 srmc = sched->srmc_small_tb[j];
-                if (srmc == NULL)
-                {
-                    continue;
+                if (srmc) {
+                    srmc->tgt_cb.state = ERROR;
+                    srm_wake_cb(&srmc->tgt_cb);
                 }
-                if (srmc->tgt_cb.cm_id)
-                {
-                    DEBUG_LOG("Freeing tgt cb's cm connection resources.\n");
-                    rdma_disconnect(srmc->tgt_cb.cm_id);
-                    ib_destroy_qp(&srmc->tgt_cb.qp->ibqp);
-                    ib_destroy_cq(srmc->tgt_cb.cq);
-                    ib_dealloc_pd(srmc->tgt_cb.pd);
-                    rdma_destroy_id(srmc->tgt_cb.cm_id);
-                }
-            }
-            for (j = 0; j < NUM_SRMC; j++)
-            {
                 srmc = sched->srmc_large_tb[j];
-                if (srmc == NULL)
-                {
-                    continue;
-                }
-                if (srmc->tgt_cb.state == CONNECTED)
-                {
-                    rdma_disconnect(srmc->tgt_cb.cm_id);
-                    ib_destroy_qp(&srmc->tgt_cb.qp->ibqp);
-                    ib_destroy_cq(srmc->tgt_cb.cq);
-                    ib_dealloc_pd(srmc->tgt_cb.pd);
-                }
-                if (srmc->tgt_cb.cm_id)
-                {
-                    rdma_destroy_id(srmc->tgt_cb.cm_id);
+                if (srmc) {
+                    srmc->tgt_cb.state = ERROR;
+                    srm_wake_cb(&srmc->tgt_cb);
                 }
             }
             mutex_unlock(&sched->srmc_lock);
         }
-        if (server->server_cb.cm_id)
-            rdma_destroy_id(server->server_cb.cm_id);
     }
-    else
-        pr_info("server task PTR is err\n");
+
+    wait_event(srm_conn_workers_wait, atomic_read(&srm_conn_workers) == 0);
 }
 void mlx5_ib_gid2ip(char addr[4], union ib_gid *gid)
 {
@@ -1787,7 +2018,7 @@ err:
 int mlx5_sched_reg_mr(struct ib_mr *mr, struct mlx5_ib_qp *qp, char *dma_buf, size_t buf_sz, int page_list_len)
 {
     struct ib_reg_wr reg_wr = {0};
-    struct ib_send_wr *bad_wr;
+    const struct ib_send_wr *bad_wr;
     int ret;
     struct scatterlist sg = {0};
     if (!mr || !qp)
@@ -2061,26 +2292,37 @@ struct server_conn_info
     int flags;
 };
 
-int srm_create_connection(struct server_conn_info *conn_info)
+int srm_create_connection(void *data)
 {
+    struct server_conn_info *conn_info = data;
     struct rdma_cm_id *cm_id = conn_info->cm_id;
     int flags = conn_info->flags;
     extern struct mlx5_ib_sched_group sched_group;
-    struct mlx5_ib_srmc *srmc;
+    struct mlx5_ib_srmc *srmc = NULL;
     struct mlx5_ib_sched *sched;
     union ib_gid dgid;
     struct ib_cq_init_attr cq_attr;
     struct ib_qp_init_attr init_attr;
     int idx;
-    int no_srmc;
-    struct srm_cb *cb, *server_cb;
-    int ret;
+    struct srm_cb *cb = NULL, *server_cb;
+    int ret = 0;
 
-    int i, hash_id, j;
-    int found;
-    int cnt;
+    int i, hash_id, j = -1, free_slot = -1;
 
     server_cb = (struct srm_cb *)cm_id->context;
+
+    if (READ_ONCE(srm_server_stopping)) {
+        ret = -ESHUTDOWN;
+        goto reject;
+    }
+    if (flags != MESSAGE_SIZE_SMALL && flags != MESSAGE_SIZE_LARGE) {
+        ret = -EINVAL;
+        goto reject;
+    }
+    if (!sched_group.scheds || !sched_group.num_sched) {
+        ret = -ENODEV;
+        goto reject;
+    }
 
     rdma_read_gids(cm_id, NULL, &dgid);
     DEBUG_LOG("in srm_create_connection,cma_id = %d,dgid.interface_id = %llx,dgid.subnet_prefix=%llx\n", cm_id, dgid.global.interface_id, dgid.global.subnet_prefix);
@@ -2090,40 +2332,35 @@ int srm_create_connection(struct server_conn_info *conn_info)
     sched = &sched_group.scheds[idx];
 
     hash_id = sched_hash_ip(dgid.raw + 12, NUM_SRMC);
-    found = 0;
     mutex_lock(&sched->srmc_lock);
-    for (i = 0; i < NUM_SRMC; i++)
-    {
-        j = (hash_id + i) % NUM_SRMC;
-        srmc = (flags == MESSAGE_SIZE_LARGE ? sched->srmc_large_tb[j] : sched->srmc_small_tb[j]);
-        if (srmc == NULL)
-        {
-            break;
+    for (i = 0; i < NUM_SRMC; ++i) {
+        struct mlx5_ib_srmc *candidate;
+        int slot = (hash_id + i) % NUM_SRMC;
+
+        candidate = flags == MESSAGE_SIZE_LARGE ?
+                    sched->srmc_large_tb[slot] :
+                    sched->srmc_small_tb[slot];
+        if (!candidate) {
+            if (free_slot < 0)
+                free_slot = slot;
+            continue;
         }
-        if (memcmp(srmc->dgid.raw, dgid.raw, sizeof(srmc->dgid.raw)) == 0)
-        {
-            found = 1;
+        if (!candidate->tgt_cb.refcnt &&
+            !memcmp(candidate->dgid.raw, dgid.raw,
+                    sizeof(candidate->dgid.raw))) {
+            srmc = candidate;
+            j = slot;
             break;
-        }
-    }
-    cnt = 0;
-    while (srmc && srmc->tgt_cb.refcnt)
-    {
-        j = (j + 1) % NUM_SRMC;
-        srmc = (flags == MESSAGE_SIZE_LARGE ? sched->srmc_large_tb[j] : sched->srmc_small_tb[j]);
-        cnt++;
-        if (cnt > NUM_SRMC)
-        {
-            pr_err("srmc queue is full\n");
-            mutex_unlock(&sched->srmc_lock);
-            rdma_destroy_id(cm_id);
-            return -1;
         }
     }
 
-    if (!srmc)
-    {
+    if (!srmc && free_slot >= 0) {
+        j = free_slot;
         srmc = kzalloc(sizeof(struct mlx5_ib_srmc), GFP_KERNEL);
+        if (!srmc) {
+            ret = -ENOMEM;
+            goto unlock_reject;
+        }
         sched->srmc_cnt++;
         memcpy(srmc->dgid.raw, dgid.raw, sizeof(srmc->dgid.raw));
         // 将srmc 加入到srmc_head中
@@ -2136,17 +2373,26 @@ int srm_create_connection(struct server_conn_info *conn_info)
             sched->srmc_small_tb[j] = srmc;
         }
     }
+    if (!srmc) {
+        ret = -ENOSPC;
+        pr_err("srmc queue is full\n");
+        goto unlock_reject;
+    }
+    if (READ_ONCE(srm_server_stopping)) {
+        ret = -ESHUTDOWN;
+        goto unlock_reject;
+    }
 
-    // srmc->tgt_cb.refcnt == 0
-    srmc->tgt_cb.refcnt = 1;
-    srmc->tgt_cb.cm_id = cm_id;
-    srmc->tgt_cb.state = CONNECT_REQUEST;
-    mutex_unlock(&sched->srmc_lock);
     cb = &srmc->tgt_cb;
-
+    srm_init_cb_waitqueue(cb);
     cb->txdepth = server_cb->txdepth;
-    init_waitqueue_head(&cb->sem);
     cb->server = 1;
+    cb->xrcd = server_cb->xrcd;
+    cb->state = CONNECT_REQUEST;
+    cb->cm_id = cm_id;
+    cb->refcnt = 1;
+    cm_id->context = cb;
+    mutex_unlock(&sched->srmc_lock);
 
     // create pd
     cb->pd = ib_alloc_pd(cb->cm_id->device, 0);
@@ -2188,7 +2434,6 @@ int srm_create_connection(struct server_conn_info *conn_info)
     init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     init_attr.qp_type = IB_QPT_XRC_TGT;
 
-    cb->xrcd = ((struct srm_cb *)cm_id->context)->xrcd;
     init_attr.xrcd = cb->xrcd;
     DEBUG_LOG("xrcd = %p,txdepth = %d\n", init_attr.xrcd, init_attr.cap.max_recv_wr);
     if (cb->xrcd == NULL)
@@ -2207,8 +2452,6 @@ int srm_create_connection(struct server_conn_info *conn_info)
         goto err2;
     }
     DEBUG_LOG("created qp %p\n", cb->qp);
-    cm_id->context = (void *)&srmc->tgt_cb;
-
     // accept
     ret = srm_accept(cb);
     if (ret)
@@ -2220,18 +2463,39 @@ int srm_create_connection(struct server_conn_info *conn_info)
 
     DEBUG_LOG("srm_create_connection success\n");
     kfree(conn_info);
+    srm_conn_worker_done();
     return 0;
 
 err3:
-    ib_destroy_qp(&cb->qp->ibqp);
+    if (cm_id->qp)
+        rdma_destroy_qp(cm_id);
+    cb->qp = NULL;
 err2:
-    ib_destroy_cq(cb->cq);
+    if (!IS_ERR_OR_NULL(cb->cq))
+        ib_destroy_cq(cb->cq);
+    cb->cq = NULL;
 err1:
-    ib_dealloc_pd(cb->pd);
+    if (!IS_ERR_OR_NULL(cb->pd))
+        ib_dealloc_pd(cb->pd);
+    cb->pd = NULL;
 err0:
+    cb->state = ERROR;
     rdma_reject(cm_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);
     rdma_destroy_id(cm_id);
+    mutex_lock(&sched->srmc_lock);
+    cb->cm_id = NULL;
+    cb->refcnt = 0;
+    mutex_unlock(&sched->srmc_lock);
+    goto done;
+
+unlock_reject:
+    mutex_unlock(&sched->srmc_lock);
+reject:
+    rdma_reject(cm_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);
+    rdma_destroy_id(cm_id);
+done:
     kfree(conn_info);
+    srm_conn_worker_done();
     return ret;
 }
 static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
@@ -2241,6 +2505,9 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
     int flags;
     struct server_conn_info *conn_info;
     struct srm_cb *cb = cma_id->context;
+
+    if (!cb)
+        return -EINVAL;
 
     printk("cma_event type %d cma_id %p (%s)\n", event->event, cma_id,
            (cma_id == cb->cm_id) ? "parent" : "child");
@@ -2254,29 +2521,51 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
         {
             printk(KERN_ERR "rdma_resolve_route error %d\n",
                    ret);
-            wake_up_interruptible(&cb->sem);
+            srm_wake_cb(cb);
         }
         break;
 
     case RDMA_CM_EVENT_ROUTE_RESOLVED:
         cb->state = ROUTE_RESOLVED;
-        wake_up_interruptible(&cb->sem);
+        srm_wake_cb(cb);
         break;
 
     case RDMA_CM_EVENT_CONNECT_REQUEST:
+        if (!event->param.conn.private_data ||
+            event->param.conn.private_data_len < sizeof(flags)) {
+            rdma_reject(cma_id, NULL, 0, IB_CM_REJ_INVALID_SERVICE_ID);
+            return -EINVAL;
+        }
         flags = *(int *)event->param.conn.private_data;
         DEBUG_LOG("connect request,flags = %d\n", flags);
         conn_info = kzalloc(sizeof(struct server_conn_info), GFP_KERNEL);
+        if (!conn_info) {
+            rdma_reject(cma_id, NULL, 0, IB_CM_REJ_NO_RESOURCES);
+            return -ENOMEM;
+        }
         conn_info->cm_id = cma_id;
         conn_info->flags = flags;
-        kthread_run(srm_create_connection, conn_info, "server connection thread");
+        atomic_inc(&srm_conn_workers);
+        {
+            struct task_struct *task;
+
+            task = kthread_run(srm_create_connection, conn_info,
+                               "server connection thread");
+            if (IS_ERR(task)) {
+                ret = PTR_ERR(task);
+                srm_conn_worker_done();
+                kfree(conn_info);
+                rdma_reject(cma_id, NULL, 0, IB_CM_REJ_NO_RESOURCES);
+                return ret;
+            }
+        }
         printk("child cma %p\n", cma_id);
         break;
 
     case RDMA_CM_EVENT_ESTABLISHED:
         printk("ESTABLISHED\n");
         cb->state = CONNECTED;
-        wake_up_interruptible(&cb->sem);
+        srm_wake_cb(cb);
         break;
 
     case RDMA_CM_EVENT_ADDR_ERROR:
@@ -2287,24 +2576,24 @@ static int srm_cma_event_handler(struct rdma_cm_id *cma_id,
         printk(KERN_ERR "cma event %d, error %d,reject msg:%s\n", event->event,
                event->status, rdma_reject_msg(cma_id, event->status));
         cb->state = ERROR;
-        wake_up_interruptible(&cb->sem);
+        srm_wake_cb(cb);
         break;
 
     case RDMA_CM_EVENT_DISCONNECTED:
         printk(KERN_ERR "DISCONNECT EVENT...\n");
         cb->state = ERROR;
-        wake_up_interruptible(&cb->sem);
+        srm_wake_cb(cb);
         break;
 
     case RDMA_CM_EVENT_DEVICE_REMOVAL:
         printk(KERN_ERR "cma detected device removal!!!!\n");
         cb->state = ERROR;
-        wake_up_interruptible(&cb->sem);
+        srm_wake_cb(cb);
         break;
 
     default:
         printk(KERN_ERR "oof bad type!\n");
-        wake_up_interruptible(&cb->sem);
+        srm_wake_cb(cb);
         break;
     }
     return 0;
@@ -2385,7 +2674,11 @@ static int srm_connect_client(struct srm_cb *cb, int flags)
         return ret;
     }
 
-    wait_event_interruptible(cb->sem, cb->state >= CONNECTED);
+    wait_event_interruptible(cb->sem,
+                             cb->state >= CONNECTED ||
+                             READ_ONCE(srm_server_stopping));
+    if (READ_ONCE(srm_server_stopping))
+        return -ESHUTDOWN;
     if (cb->state == ERROR)
     {
         printk(KERN_ERR "wait for CONNECTED state %d\n", cb->state);
@@ -2418,7 +2711,7 @@ int create_srmc_qp_cm(struct mlx5_ib_srmc *srmc, struct ib_pd *pd, union ib_gid 
     mlx5_ib_gid2ip(cb->addr, dgid);
     DEBUG_LOG("Real IPv4 address: %u.%u.%u.%u\n", cb->addr[0], cb->addr[1], cb->addr[2], cb->addr[3]);
     cb->server = 0;
-    init_waitqueue_head(&cb->sem);
+    srm_init_cb_waitqueue(cb);
     cb->txdepth = SQ_DEPTH;
     cb->pd = pd;
 
@@ -2606,7 +2899,11 @@ int srm_accept(struct srm_cb *cb)
         return ret;
     }
 
-    wait_event_interruptible(cb->sem, cb->state >= CONNECTED);
+    wait_event_interruptible(cb->sem,
+                             cb->state >= CONNECTED ||
+                             READ_ONCE(srm_server_stopping));
+    if (READ_ONCE(srm_server_stopping))
+        return -ESHUTDOWN;
     if (cb->state == ERROR)
     {
         printk(KERN_ERR "wait for CONNECTED state %d\n",
@@ -2615,8 +2912,9 @@ int srm_accept(struct srm_cb *cb)
     }
     return 0;
 }
-int mlx5_sched_run_server(struct srm_cb *cb)
+int mlx5_sched_run_server(void *data)
 {
+    struct srm_cb *cb = data;
     pr_info("srm server is running\n");
     int ret;
     struct ib_cq_init_attr cq_attr;
@@ -2632,7 +2930,6 @@ int mlx5_sched_run_server(struct srm_cb *cb)
         goto out;
     }
     cb->server = 1;
-    init_waitqueue_head(&cb->sem);
     cb->txdepth = SQ_DEPTH;
 
     cb->cm_id = rdma_create_id(&init_net, srm_cma_event_handler, cb, RDMA_PS_TCP, IB_QPT_XRC_TGT);
@@ -2660,14 +2957,18 @@ int mlx5_sched_run_server(struct srm_cb *cb)
         goto err0;
     }
 
-    wait_event_interruptible(cb->sem, kthread_should_stop());
+    wait_event_interruptible(cb->sem,
+                             kthread_should_stop() ||
+                             READ_ONCE(srm_server_stopping));
     pr_info("srm server stop\n");
     return ret;
 err0:
     rdma_destroy_id(cb->cm_id);
     cb->cm_id = NULL;
 out:
-    wait_event_interruptible(cb->sem, kthread_should_stop());
+    wait_event_interruptible(cb->sem,
+                             kthread_should_stop() ||
+                             READ_ONCE(srm_server_stopping));
     return ret;
 }
 

@@ -5338,6 +5338,8 @@ static int __init mlx5_ib_init(void)
 	ret = mlx5_ib_sched_init(&sched_group,num_sched);
 	if (ret){
 		pr_err("mlx5_ib_sched_init failed\n");
+		auxiliary_driver_unregister(&mlx5r_driver);
+		goto drv_err;
 	}
 	
 	//init server
@@ -5345,6 +5347,8 @@ static int __init mlx5_ib_init(void)
 	if (ret){
 		pr_err("mlx5_ib_server_init failed\n");
 		mlx5_ib_sched_exit(&sched_group);
+		auxiliary_driver_unregister(&mlx5r_driver);
+		goto drv_err;
 	}
 	return 0;
 drv_err:

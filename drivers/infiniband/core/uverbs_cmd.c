@@ -2418,6 +2418,7 @@ out:
 
 static int ib_uverbs_create_ah(struct uverbs_attr_bundle *attrs)
 {
+	pr_info("in ib_uverbs_create_ah\n");
 	struct ib_uverbs_create_ah	 cmd;
 	struct ib_uverbs_create_ah_resp	 resp;
 	struct ib_uobject		*uobj;
